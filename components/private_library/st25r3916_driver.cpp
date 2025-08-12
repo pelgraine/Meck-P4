@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-08-09 11:13:23
- * @LastEditTime: 2025-08-09 17:19:03
+ * @LastEditTime: 2025-08-12 09:33:27
  * @License: GPL 3.0
  */
 
@@ -350,11 +350,28 @@ void St25r3916_Init(void)
 #endif /* RFAL_SUPPORT_CE && RFAL_FEATURE_LISTEN_MODE */
 
         /* Check for valid configuration by calling Discover once */
-        rfal_nfc.rfalNfcDiscover(&discParam);
-        rfal_nfc.rfalNfcDeactivate(RFAL_NFC_DEACTIVATE_IDLE);
+        err = rfal_nfc.rfalNfcDiscover(&discParam);
+        if (err == ERR_NONE)
+        {
+            Serial.printf("rfalNfcDiscover init success\n");
+        }
+        else
+        {
+            Serial.printf("rfalNfcDiscover init fail (error code: %d)\n", err);
+            return;
+        }
+        err = rfal_nfc.rfalNfcDeactivate(RFAL_NFC_DEACTIVATE_IDLE);
+        if (err == ERR_NONE)
+        {
+            Serial.printf("rfalNfcDeactivate init success\n");
+        }
+        else
+        {
+            Serial.printf("rfalNfcDeactivate init fail (error code: %d)\n", err);
+            return;
+        }
 
         state = DEMO_ST_START_DISCOVERY;
-
         Serial.printf("st25r3916 init success\n");
     }
     else

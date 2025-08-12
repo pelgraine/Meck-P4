@@ -2,7 +2,7 @@
  * @Description: st25r3916
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-08-09 17:12:58
+ * @LastEditTime: 2025-08-12 09:33:51
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -23,6 +23,8 @@ auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(IIC_Bus_0, XL9555_IIC_ADD
 
 auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
+size_t Cycle_Time = 0;
+
 extern "C" void app_main(void)
 {
     printf("Ciallo\n");
@@ -41,24 +43,33 @@ extern "C" void app_main(void)
     ESP32P4->pin_write(T_MIXRF_NRF24L01_CS, 1);
     ESP32P4->pin_write(T_MIXRF_ST25R3916_CS, 1);
 
-    ESP32P4->create_gpio_interrupt(T_MIXRF_ST25R3916_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::RISING,
-                                   [](void *arg) -> IRAM_ATTR void
-                                   {
-                                       Interrupt_Flag = true;
-                                   });
+    // ESP32P4->create_gpio_interrupt(T_MIXRF_ST25R3916_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::RISING,
+    //                                [](void *arg) -> IRAM_ATTR void
+    //                                {
+    //                                    Interrupt_Flag = true;
+    //                                });
 
+    // rfst25r3916.int_pin = T_MIXRF_ST25R3916_INT;
     St25r3916_Init();
 
     while (1)
     {
-        if (Interrupt_Flag == true)
-        {
-            printf("Interrupt_Flag trigger\n");
 
-            rfst25r3916.st25r3916Isr();
+        // if (Interrupt_Flag == true)
+        // {
+        //     printf("Interrupt_Flag trigger\n");
 
-            Interrupt_Flag = false;
-        }
+        //     rfst25r3916.st25r3916Isr();
+
+        //     Interrupt_Flag = false;
+        // }
+
+        // if (ESP32P4->get_system_time_ms() > Cycle_Time)
+        // {
+        //     rfst25r3916.st25r3916Isr();
+
+        //     Cycle_Time = ESP32P4->get_system_time_ms() + 1000;
+        // }
 
         St25r3916_Loop();
         vTaskDelay(pdMS_TO_TICKS(10));

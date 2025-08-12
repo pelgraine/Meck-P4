@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-08-09 11:13:53
- * @LastEditTime: 2025-08-09 16:58:08
+ * @LastEditTime: 2025-08-11 13:58:37
  * @License: GPL 3.0
  */
 #pragma once
@@ -21,7 +21,7 @@
 #endif
 
 #define CS_PIN T_MIXRF_ST25R3916_CS
-#define IRQ_PIN -1
+#define IRQ_PIN T_MIXRF_ST25R3916_INT
 
 #define LED_A_PIN -1
 #define LED_B_PIN -1
