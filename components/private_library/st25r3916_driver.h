@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-08-09 11:13:53
- * @LastEditTime: 2025-08-11 13:58:37
+ * @LastEditTime: 2025-08-12 17:58:40
  * @License: GPL 3.0
  */
 #pragma once
@@ -44,7 +44,7 @@
 
 #define NDEF_DEMO_MAX_FEATURES 4U /*!< Number of menu items         */
 
-#define NDEF_WRITE_FORMAT_TIMEOUT 10000U /*!< When write or format mode is selected, demo returns back to read mode after a timeout */
+#define NDEF_WRITE_FORMAT_TIMEOUT 60000U /*!< When write or format mode is selected, demo returns back to read mode after a timeout */
 #define NDEF_LED_BLINK_DURATION 250U     /*!< Led blink duration         */
 
 #define DEMO_RAW_MESSAGE_BUF_LEN 8192 /*!< Raw message buffer len     */
