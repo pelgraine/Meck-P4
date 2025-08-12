@@ -2,7 +2,7 @@
  * @Description: radiolib_sx1262_send_receive
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-08-04 12:00:54
+ * @LastEditTime: 2025-08-12 16:16:34
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -63,13 +63,13 @@ extern "C" void app_main(void)
     }
     else
     {
-        printf("sx1262 init fail (error code: %ld)\n", status);
+        printf("sx1262 init fail (error code: %d)\n", status);
     }
 
     status = Sx1262.setCurrentLimit(140);
     if (status != RADIOLIB_ERR_NONE)
     {
-        printf("setCurrentLimit fail (error code: %ld)\n", status);
+        printf("setCurrentLimit fail (error code: %d)\n", status);
     }
 
     Sx1262.startReceive();
