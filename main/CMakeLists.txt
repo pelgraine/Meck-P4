@@ -55,6 +55,8 @@ elseif(CONFIG_EXAMPLE_BUILD_RADIOLIB_NRF24L01_SEND_RECEIVE)
     set(PROJECT_PATH "keyboard_examples/radiolib_nrf24l01_send_receive/")
 elseif(CONFIG_EXAMPLE_BUILD_ST25R3916)
     set(PROJECT_PATH "keyboard_examples/st25r3916/")
+elseif(CONFIG_EXAMPLE_BUILD_SCREEN_TCA8418_LVGL_TOUCH_DRAW)
+    set(PROJECT_PATH "keyboard_examples/screen_tca8418_lvgl_touch_draw/")
 endif()
         
 idf_component_register(SRC_DIRS ${PROJECT_PATH} 
