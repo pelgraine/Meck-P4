@@ -417,7 +417,7 @@ namespace Lvgl_Ui
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
         Gt9895::Touch_Point _touch_point;
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
         bool _edge_touch_flag = false;

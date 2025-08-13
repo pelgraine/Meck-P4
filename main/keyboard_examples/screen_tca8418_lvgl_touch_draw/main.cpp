@@ -67,7 +67,7 @@ auto GT9895 = std::make_unique<Cpp_Bus_Driver::Gt9895>(GT9895_Bus, GT9895_IIC_AD
                                                        DEFAULT_CPP_BUS_DRIVER_VALUE);
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 void lvgl_port_task(void *arg)
@@ -144,7 +144,7 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
         data->state = LV_INDEV_STATE_REL;
     }
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     // }
@@ -385,7 +385,7 @@ extern "C" void app_main(void)
     GT9895->begin();
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     Lvgl_Init();
@@ -404,7 +404,7 @@ extern "C" void app_main(void)
     }
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     //     while (1)
@@ -436,7 +436,7 @@ extern "C" void app_main(void)
     //                 }
     //             }
     // #else
-    // #error "Unknown macro definition. Please select the correct macro definition."
+    // #error "unknown macro definition, please select the correct macro definition."
     // #endif
 
     //             Cycle_Time = esp_log_timestamp() + 1000;

@@ -122,7 +122,7 @@ auto GT9895_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(GT9895_TO
 auto GT9895 = std::make_unique<Cpp_Bus_Driver::Gt9895>(GT9895_IIC_Bus, GT9895_IIC_ADDRESS, GT9895_X_SCALE_FACTOR, GT9895_Y_SCALE_FACTOR,
                                                        DEFAULT_CPP_BUS_DRIVER_VALUE);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 /** Event handler for Ethernet events */
@@ -224,7 +224,7 @@ void Device_Sleep_Status(bool status)
         SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::OFF);
         SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::OFF);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
         printf("stop and deinitialize Ethernet network...\n");
@@ -260,7 +260,7 @@ void Device_Sleep_Status(bool status)
 
         GT9895->set_sleep();
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 #endif
 
@@ -888,7 +888,7 @@ extern "C" void app_main(void)
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 #endif
 
@@ -913,7 +913,7 @@ extern "C" void app_main(void)
     SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
     SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     Init_Ldo_Channel_Power(3, 1800);
@@ -959,7 +959,7 @@ extern "C" void app_main(void)
     GT9895->begin();
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 #endif
@@ -1082,7 +1082,7 @@ extern "C" void app_main(void)
     }
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 #endif
@@ -1096,7 +1096,7 @@ extern "C" void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     vTaskDelay(pdMS_TO_TICKS(1000));

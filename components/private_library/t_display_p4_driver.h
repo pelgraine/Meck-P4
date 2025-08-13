@@ -24,7 +24,7 @@
 #define CAMERA_COLOR_RGB_PIXEL_FORMAT LCD_COLOR_PIXEL_FORMAT_RGB888
 #define LVGL_COLOR_FORMAT LV_COLOR_FORMAT_RGB888
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 // SCREEN
@@ -55,7 +55,7 @@
 #define SCREEN_LANE_BIT_RATE_MBPS RM69A10_SCREEN_LANE_BIT_RATE_MBPS
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t dpi_clock_freq_mhz, lcd_color_rgb_pixel_format_t color_rgb_pixel_format, uint8_t num_fbs, uint32_t width, uint32_t height,

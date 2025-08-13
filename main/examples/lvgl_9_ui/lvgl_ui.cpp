@@ -62,7 +62,7 @@ namespace Lvgl_Ui
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
             {"screen type: ", "rm69a10"},
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 #if defined CONFIG_LCD_PIXEL_FORMAT_RGB565
@@ -70,7 +70,7 @@ namespace Lvgl_Ui
 #elif defined CONFIG_LCD_PIXEL_FORMAT_RGB888
             {"screen pixel format: ", "rgb888"},
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 #if defined CONFIG_CAMERA_TYPE_SC2336
@@ -80,7 +80,7 @@ namespace Lvgl_Ui
 #elif defined CONFIG_CAMERA_TYPE_OV5645
             {"camera type: ", "ov5645"},
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
             {"firmware build date:\n     ", "202508071807"},
@@ -378,7 +378,7 @@ namespace Lvgl_Ui
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
         lv_obj_set_style_bg_image_src(_registry.win.home.root, GET_WALLPAPER_PATH("wallpaper_1_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
         lv_obj_set_size(_registry.win.home.root, _width, _height);
         lv_obj_set_scrollbar_mode(_registry.win.home.root, LV_SCROLLBAR_MODE_OFF);
@@ -1387,7 +1387,7 @@ namespace Lvgl_Ui
                                     lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
                                     break;
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
                                     case 8:
@@ -4291,7 +4291,7 @@ namespace Lvgl_Ui
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
         lv_obj_set_style_bg_image_src(_registry.win.music.root, GET_MUSIC_COVER_PATH("Eagles - Hotel California (Live on MTV, 1994)_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
         lv_obj_set_size(_registry.win.music.root, _width, _height);

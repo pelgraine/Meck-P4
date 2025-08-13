@@ -182,7 +182,7 @@ extern "C" void app_main(void)
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     Init_Ldo_Channel_Power(3, 1800);
@@ -220,6 +220,6 @@ extern "C" void app_main(void)
     }
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 }

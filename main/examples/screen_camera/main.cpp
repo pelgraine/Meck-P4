@@ -112,7 +112,7 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
         assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - srm_config.in.block_h) / 2 + 150,
                                            srm_config.in.block_w, srm_config.in.block_h + (SCREEN_HEIGHT - srm_config.in.block_h) / 2 - 150, lcd_buffer[camera_buf_index]);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
         if (assert != ESP_OK)
@@ -301,7 +301,7 @@ extern "C" void app_main(void)
     SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
     SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
@@ -309,7 +309,7 @@ extern "C" void app_main(void)
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     Init_Ldo_Channel_Power(3, 1800);
@@ -361,7 +361,7 @@ extern "C" void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     assert = app_video_stream_task_restart(video_cam_fd0);

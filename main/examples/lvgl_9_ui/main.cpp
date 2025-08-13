@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-08-07 18:11:13
+ * @LastEditTime: 2025-08-13 16:23:09
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -279,7 +279,7 @@ auto GT9895_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(GT9895_TO
 auto GT9895 = std::make_unique<Cpp_Bus_Driver::Gt9895>(GT9895_IIC_Bus, GT9895_IIC_ADDRESS, GT9895_X_SCALE_FACTOR, GT9895_Y_SCALE_FACTOR,
                                                        DEFAULT_CPP_BUS_DRIVER_VALUE);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
 // esp_err_t register_gpio_wakeup(void)
@@ -1927,7 +1927,7 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
     }
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     // }
@@ -2942,7 +2942,7 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
             assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - srm_config.in.block_h) / 2 + 150,
                                                srm_config.in.block_w, srm_config.in.block_h + (SCREEN_HEIGHT - srm_config.in.block_h) / 2 - 150, lcd_buffer[camera_buf_index]);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
             if (assert != ESP_OK)
             {
@@ -3227,7 +3227,7 @@ extern "C" void app_main(void)
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     SGM38121->begin();
@@ -3251,7 +3251,7 @@ extern "C" void app_main(void)
     SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
     SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     // bsp_init_refresh_monitor_io();
@@ -3304,7 +3304,7 @@ extern "C" void app_main(void)
     GT9895->begin();
 
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     // SDMMC_HOST_SLOT_1必须要先于SDMMC_HOST_SLOT_0初始化
@@ -3337,7 +3337,7 @@ extern "C" void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 #else
-#error "Unknown macro definition. Please select the correct macro definition."
+#error "unknown macro definition, please select the correct macro definition."
 #endif
 
     PCF8563_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
@@ -3506,7 +3506,7 @@ extern "C" void app_main(void)
     //                 }
     //             }
     // #else
-    // #error "Unknown macro definition. Please select the correct macro definition."
+    // #error "unknown macro definition, please select the correct macro definition."
     // #endif
 
     //             Cycle_Time = esp_log_timestamp() + 1000;
