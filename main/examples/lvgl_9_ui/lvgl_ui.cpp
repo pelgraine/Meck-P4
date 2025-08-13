@@ -2,13 +2,14 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-08-07 18:07:17
+ * @LastEditTime: 2025-08-13 16:00:26
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
 #include "esp_chip_info.h"
 #include "esp_mac.h"
 #include "esp_flash.h"
+#include "t_display_p4_driver.h"
 
 namespace Lvgl_Ui
 {
@@ -1170,7 +1171,7 @@ namespace Lvgl_Ui
 
         // 创建画布并初始化调色板
         _registry.win.cit.touch_test.canvas = lv_canvas_create(_registry.win.cit.touch_test.root);
-        lv_canvas_set_buffer(_registry.win.cit.touch_test.canvas, _lv_color_win_draw_buf.get(), _width, _height, LV_COLOR_FORMAT_RGB565);
+        lv_canvas_set_buffer(_registry.win.cit.touch_test.canvas, _lv_color_win_draw_buf.get(), _width, _height, LVGL_COLOR_FORMAT);
         lv_canvas_fill_bg(_registry.win.cit.touch_test.canvas, lv_color_hex(0xCCCCCC), LV_OPA_COVER);
         lv_obj_center(_registry.win.cit.touch_test.canvas);
 
@@ -2678,7 +2679,7 @@ namespace Lvgl_Ui
 
         // // 创建画布来显示摄像头数据
         // _registry.win.camera.canvas = lv_canvas_create(_registry.win.camera.root);
-        // lv_canvas_set_buffer(_registry.win.camera.canvas, _lv_color_win_draw_buf.get(), _width, _height, LV_COLOR_FORMAT_RGB565);
+        // lv_canvas_set_buffer(_registry.win.camera.canvas, _lv_color_win_draw_buf.get(), _width, _height, LVGL_COLOR_FORMAT);
         // lv_canvas_fill_bg(_registry.win.camera.canvas, lv_color_black(), LV_OPA_COVER);
         // lv_obj_center(_registry.win.camera.canvas);
 

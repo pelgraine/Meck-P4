@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-07-28 14:05:18
+ * @LastEditTime: 2025-08-13 15:43:57
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -220,7 +220,7 @@ void lv_example_canvas_7(void)
     /*Create a canvas and initialize its palette*/
     canvas = lv_canvas_create(lv_screen_active());
     // lv_canvas_set_draw_buf(canvas, (lv_draw_buf_t *)draw_buf);
-    lv_canvas_set_buffer(canvas, draw_buf, SCREEN_WIDTH, SCREEN_HEIGHT, LV_COLOR_FORMAT_RGB888);
+    lv_canvas_set_buffer(canvas, draw_buf, SCREEN_WIDTH, SCREEN_HEIGHT, LVGL_COLOR_FORMAT);
     lv_canvas_fill_bg(canvas, lv_color_hex3(0xCCC), LV_OPA_COVER);
     lv_obj_center(canvas);
 
