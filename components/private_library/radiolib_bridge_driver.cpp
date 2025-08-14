@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-07-31 16:06:23
- * @LastEditTime: 2025-08-09 15:54:38
+ * @LastEditTime: 2025-08-14 09:38:15
  * @License: GPL 3.0
  */
 #include "radiolib_bridge_driver.h"
@@ -142,7 +142,7 @@ void inline Radiolib_Cpp_Bus_Driver_Hal::spiBeginTransaction()
 
 void Radiolib_Cpp_Bus_Driver_Hal::spiTransfer(uint8_t *out, size_t len, uint8_t *in)
 {
-    if (_bus->write_read(out, in, len))
+    if (_bus->write_read(out, in, len) == false)
     {
         _bus->assert_log(Cpp_Bus_Driver::Tool::Log_Level::BUS, __FILE__, __LINE__, "write_read fail\n");
     }
