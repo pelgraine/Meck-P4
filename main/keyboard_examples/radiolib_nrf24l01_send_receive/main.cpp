@@ -2,7 +2,7 @@
  * @Description: radiolib_nrf24l01_send_receive
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-08-08 18:09:05
+ * @LastEditTime: 2025-08-14 13:45:15
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -110,6 +110,9 @@ extern "C" void app_main(void)
     }
 
     Nrf24l01.startReceive();
+
+    // 连续波测试
+    // Nrf24l01.transmitDirect(2400.0);
 
     while (1)
     {
