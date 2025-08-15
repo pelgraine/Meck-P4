@@ -573,12 +573,7 @@ extern "C" void app_main(void)
     esp_lcd_panel_handle_t screen_mipi_dpi_panel = NULL;
     Screen_Init(&screen_mipi_dpi_panel);
 
-    esp_err_t assert = esp_lcd_panel_reset(screen_mipi_dpi_panel);
-    if (assert != ESP_OK)
-    {
-        printf("esp_lcd_panel_reset fail (error code: %#X)\n", assert);
-    }
-    assert = esp_lcd_panel_init(screen_mipi_dpi_panel);
+    esp_err_t assert = esp_lcd_panel_init(screen_mipi_dpi_panel);
     if (assert != ESP_OK)
     {
         printf("esp_lcd_panel_init fail (error code: %#X)\n", assert);

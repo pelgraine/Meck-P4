@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-08-15 09:18:51
+ * @LastEditTime: 2025-08-15 16:22:51
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -379,12 +379,7 @@ extern "C" void app_main(void)
 
     Screen_Init(&Screen_Mipi_Dpi_Panel);
 
-    esp_err_t assert = esp_lcd_panel_reset(Screen_Mipi_Dpi_Panel);
-    if (assert != ESP_OK)
-    {
-        printf("esp_lcd_panel_reset fail (error code: %#X)\n", assert);
-    }
-    assert = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
+    esp_err_t assert = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
     if (assert != ESP_OK)
     {
         printf("esp_lcd_panel_init fail (error code: %#X)\n", assert);
