@@ -65,9 +65,9 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-#if defined CONFIG_LCD_PIXEL_FORMAT_RGB565
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
             {"screen pixel format: ", "rgb565"},
-#elif defined CONFIG_LCD_PIXEL_FORMAT_RGB888
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
             {"screen pixel format: ", "rgb888"},
 #else
 #error "unknown macro definition, please select the correct macro definition."

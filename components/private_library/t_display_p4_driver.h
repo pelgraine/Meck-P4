@@ -2,7 +2,7 @@
  * @Description: t_display_p4_driver
  * @Author: LILYGO_L
  * @Date: 2025-07-07 14:31:51
- * @LastEditTime: 2025-07-31 16:26:58
+ * @LastEditTime: 2025-08-15 10:31:38
  * @License: GPL 3.0
  */
 #pragma once
@@ -11,13 +11,13 @@
 #include "hi8561_driver.h"
 #include "rm69a10_driver.h"
 
-#if CONFIG_LCD_PIXEL_FORMAT_RGB565
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
 #define SCREEN_BITS_PER_PIXEL 16
 #define CAMERA_BITS_PER_PIXEL 16
 #define SCREEN_COLOR_RGB_PIXEL_FORMAT LCD_COLOR_PIXEL_FORMAT_RGB565
 #define CAMERA_COLOR_RGB_PIXEL_FORMAT LCD_COLOR_PIXEL_FORMAT_RGB565
 #define LVGL_COLOR_FORMAT LV_COLOR_FORMAT_RGB565
-#elif CONFIG_LCD_PIXEL_FORMAT_RGB888
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
 #define SCREEN_BITS_PER_PIXEL 24
 #define SCREEN_COLOR_RGB_PIXEL_FORMAT LCD_COLOR_PIXEL_FORMAT_RGB888
 #define CAMERA_BITS_PER_PIXEL 24
@@ -56,6 +56,24 @@
 
 #else
 #error "unknown macro definition, please select the correct macro definition."
+#endif
+
+#if defined CONFIG_SCREEN_ROTATION_DIRECTION_0
+
+#define LV_DISPLAY_ROTATION LV_DISPLAY_ROTATION_0
+
+#elif defined CONFIG_SCREEN_ROTATION_DIRECTION_90
+
+#define LV_DISPLAY_ROTATION LV_DISPLAY_ROTATION_90
+
+#elif defined CONFIG_SCREEN_ROTATION_DIRECTION_180
+
+#define LV_DISPLAY_ROTATION LV_DISPLAY_ROTATION_180
+
+#elif defined CONFIG_SCREEN_ROTATION_DIRECTION_270
+
+#define LV_DISPLAY_ROTATION LV_DISPLAY_ROTATION_270
+
 #endif
 
 bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t dpi_clock_freq_mhz, lcd_color_rgb_pixel_format_t color_rgb_pixel_format, uint8_t num_fbs, uint32_t width, uint32_t height,

@@ -59,8 +59,8 @@ menu "Example Configuration"
 
     choice
         prompt "Choose the color format of the LCD"
-        default LCD_PIXEL_FORMAT_RGB565
-            config LCD_PIXEL_FORMAT_RGB565
+        default SCREEN_PIXEL_FORMAT_RGB565
+            config SCREEN_PIXEL_FORMAT_RGB565
                 bool "RGB565"
 
             config LCD_PIXEL_FORMAT_RGB888

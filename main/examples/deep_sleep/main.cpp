@@ -1039,7 +1039,7 @@ extern "C" void app_main(void)
 
 #if defined USE_SCREEN
 
-#if defined CONFIG_LCD_PIXEL_FORMAT_RGB565
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
     // 设置整个屏幕为白色
     size_t screen_size = SCREEN_WIDTH * SCREEN_HEIGHT * 2; // RGB565: 2 bytes per pixel
     size_t data_cache_line_size = 16;                      // 通常16或32，具体可查芯片手册
@@ -1058,7 +1058,7 @@ extern "C" void app_main(void)
         }
         heap_caps_free(white_buf);
     }
-#elif defined CONFIG_LCD_PIXEL_FORMAT_RGB888
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
 
     // 设置整个屏幕为白色
     size_t screen_size = SCREEN_WIDTH * SCREEN_HEIGHT * 3; // RGB888: 3 bytes per pixel
