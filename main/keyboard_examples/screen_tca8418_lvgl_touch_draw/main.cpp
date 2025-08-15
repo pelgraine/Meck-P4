@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-08-13 16:18:37
+ * @LastEditTime: 2025-08-15 09:18:51
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -220,7 +220,7 @@ void lv_example_canvas_7(void)
     /*Create a canvas and initialize its palette*/
     canvas = lv_canvas_create(lv_screen_active());
     // lv_canvas_set_draw_buf(canvas, (lv_draw_buf_t *)draw_buf);
-    lv_canvas_set_buffer(canvas, draw_buf, SCREEN_WIDTH, SCREEN_HEIGHT, LVGL_COLOR_FORMAT);
+    lv_canvas_set_buffer(canvas, draw_buf, SCREEN_HEIGHT, SCREEN_WIDTH, LVGL_COLOR_FORMAT);
     lv_canvas_fill_bg(canvas, lv_color_hex3(0xCCC), LV_OPA_COVER);
     lv_obj_center(canvas);
 
@@ -268,12 +268,37 @@ void Lvgl_Init(void)
     // set the callback which can copy the rendered image to an area of the display
 
     lv_display_set_flush_cb(display, [](lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
-                            {
+                            {                            
+                                lv_display_rotation_t rotation = lv_display_get_rotation(disp);
+                                lv_area_t rotated_area;
+                                if(rotation != LV_DISPLAY_ROTATION_0) 
+                                {
+                                    lv_color_format_t cf = lv_display_get_color_format(disp);
+                                    /*Calculate the position of the rotated area*/
+                                    rotated_area = *area;
+                                    lv_display_rotate_area(disp, &rotated_area);
+                                    /*Calculate the source stride (bytes in a line) from the width of the area*/
+                                    uint32_t src_stride = lv_draw_buf_width_to_stride(lv_area_get_width(area), cf);
+                                    /*Calculate the stride of the destination (rotated) area too*/
+                                    uint32_t dest_stride = lv_draw_buf_width_to_stride(lv_area_get_width(&rotated_area), cf);
+                                    /*Have a buffer to store the rotated area and perform the rotation*/
+                                    
+                                    int32_t src_w = lv_area_get_width(area);
+                                    int32_t src_h = lv_area_get_height(area);
+                                    auto rotated_buf = std::make_unique<uint8_t[]>(SCREEN_WIDTH * SCREEN_HEIGHT* (SCREEN_BITS_PER_PIXEL/8));
+                                    lv_draw_sw_rotate(px_map, rotated_buf.get(), src_w, src_h, src_stride, dest_stride, rotation, cf);
+                                    /*Use the rotated area and rotated buffer from now on*/
+                                    area = &rotated_area;
+                                    px_map = rotated_buf.get();
+                                }
+
                                 esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
                                 int offsetx1 = area->x1;
                                 int offsetx2 = area->x2;
                                 int offsety1 = area->y1;
                                 int offsety2 = area->y2;
+
+
                                 // pass the draw buffer to the driver
                                 esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map); });
 
@@ -308,6 +333,8 @@ void Lvgl_Init(void)
     esp_timer_handle_t lvgl_tick_timer = NULL;
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, LVGL_TICK_PERIOD_MS * 1000));
+
+    lv_display_set_rotation(display, LV_DISPLAY_ROTATION);
 }
 
 extern "C" void app_main(void)
