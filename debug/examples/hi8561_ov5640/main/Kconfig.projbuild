@@ -59,7 +59,7 @@ menu "Example Configuration"
             config SCREEN_PIXEL_FORMAT_RGB565
                 bool "RGB565"
 
-            config LCD_PIXEL_FORMAT_RGB888
+            config SCREEN_PIXEL_FORMAT_RGB888
                 bool "RGB888"
     endchoice
 
