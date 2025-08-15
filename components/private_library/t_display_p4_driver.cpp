@@ -1,3 +1,10 @@
+/*
+ * @Description: t_display_p4_driver
+ * @Author: LILYGO_L
+ * @Date: 2025-07-07 14:31:29
+ * @LastEditTime: 2025-08-15 15:00:40
+ * @License: GPL 3.0
+ */
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "cpp_bus_driver_library.h"
