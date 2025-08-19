@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-07-14 16:52:49
+ * @LastEditTime: 2025-08-18 15:58:43
  * @License: GPL 3.0
  */
 #pragma once
@@ -25,6 +25,7 @@ extern const lv_image_dsc_t win_music_play_switch_right_1_95x95px_rgb565a8;
 extern const lv_image_dsc_t win_music_play_switch_right_2_95x95px_rgb565a8;
 extern const lv_image_dsc_t win_music_play_pause_1_117x117px_rgb565a8;
 extern const lv_image_dsc_t win_music_play_pause_2_117x117px_rgb565a8;
+extern const lv_image_dsc_t win_music_album_cover_540x540px_rgb565a8;
 
 extern const lv_font_t lvgl_font_lineseedkr_rg_120;
 extern const lv_font_t lvgl_font_lineseedkr_th_60;

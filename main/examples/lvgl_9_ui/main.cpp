@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-08-13 16:28:07
+ * @LastEditTime: 2025-08-19 09:39:06
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -566,8 +566,6 @@ bool Play_Wav_File(const char *file_path)
     {
         if (Music_Play_End_Flag == true)
         {
-            Music_Play_End_Flag = false;
-
             break;
         }
 
@@ -634,7 +632,7 @@ bool Play_Wav_File(const char *file_path)
             // //     break; // 结束循环，如果读取的字节数为 0
             // // }
 
-            if (Iis_Transmission_Data_Stream.size() > 1024 * 8)
+            if (Iis_Transmission_Data_Stream.size() > 1024 * 10)
             {
                 // 存储数据
                 // memcpy(data_buffer.get(), Iis_Transmission_Data_Stream.data(), 1024 * 100);
@@ -645,7 +643,7 @@ bool Play_Wav_File(const char *file_path)
                 //     Iis_Transmission_Data_Stream.erase(Iis_Transmission_Data_Stream.begin(), Iis_Transmission_Data_Stream.begin() + bytes_read);
                 // }
 
-                size_t bytes_read = ES8311->write_data(Iis_Transmission_Data_Stream.data() + Iis_Read_Data_Size_Index, 1024 * 8); // 这一行需要根据你的 I2S 驱动实现来修改
+                size_t bytes_read = ES8311->write_data(Iis_Transmission_Data_Stream.data() + Iis_Read_Data_Size_Index, 1024 * 10); // 这一行需要根据你的 I2S 驱动实现来修改
                 Iis_Read_Data_Size_Index += bytes_read;
                 // if (bytes_read > 0)
                 // {
@@ -663,17 +661,27 @@ bool Play_Wav_File(const char *file_path)
     }
 
     vTaskSuspend(Iis_Transmission_Data_Stream_Task);
+    Iis_Transmission_Data_Stream.clear(); 
+    Iis_Transmission_Data_Stream.shrink_to_fit();// 释放内存
 
     Music_File.close();
 
-    printf("music play finish\n");
-
     System_Ui->_registry.win.music.play_flag = false;
 
-    _lock_acquire(&lvgl_api_lock);
-    System_Ui->set_win_music_play_imagebutton_status(System_Ui->_registry.win.music.play_flag);
-    System_Ui->set_win_music_current_total_time(0, duration);
-    _lock_release(&lvgl_api_lock);
+    if (Music_Play_End_Flag == false)
+    {
+        printf("music play finish\n");
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->set_win_music_play_imagebutton_status(System_Ui->_registry.win.music.play_flag);
+        System_Ui->set_win_music_current_total_time(0, duration);
+        _lock_release(&lvgl_api_lock);
+    }
+    else
+    {
+        printf("music play end\n");
+        Music_Play_End_Flag = false;
+    }
 
     return true;
 }
@@ -1688,14 +1696,14 @@ void iis_transmission_data_stream_task(void *arg)
                     // printf("current_buf_size: %d\n", current_buf_size);
 
                     // 调整容量
-                    Iis_Transmission_Data_Stream.resize(current_buf_size + 1024 * 10);
+                    Iis_Transmission_Data_Stream.resize(current_buf_size + 1024 * 20);
 
-                    Music_File.read(Iis_Transmission_Data_Stream.data() + current_buf_size, 1024 * 10);
+                    Music_File.read(Iis_Transmission_Data_Stream.data() + current_buf_size, 1024 * 20);
                     std::streamsize bytes_read = Music_File.gcount(); // 获取实际读取的字节数
                     // 如果实际读取的字节数小于预期，则从末尾扣除多余的空间
-                    if (bytes_read < 1024 * 10)
+                    if (bytes_read < 1024 * 20)
                     {
-                        Iis_Transmission_Data_Stream.erase(Iis_Transmission_Data_Stream.end() - (1024 * 10 - bytes_read), Iis_Transmission_Data_Stream.end());
+                        Iis_Transmission_Data_Stream.erase(Iis_Transmission_Data_Stream.end() - (1024 * 20 - bytes_read), Iis_Transmission_Data_Stream.end());
                     }
                 }
 
@@ -1784,11 +1792,11 @@ void iis_transmission_data_stream_task(void *arg)
 
         if (Music_File.good())
         {
-            if (Iis_Read_Data_Size_Index > 1024 * 100)
+            if (Iis_Read_Data_Size_Index > 1024 * 250)
             {
                 // 删除已经存储的数据
-                Iis_Transmission_Data_Stream.erase(Iis_Transmission_Data_Stream.begin(), Iis_Transmission_Data_Stream.begin() + 1024 * 100);
-                Iis_Read_Data_Size_Index -= 1024 * 100;
+                Iis_Transmission_Data_Stream.erase(Iis_Transmission_Data_Stream.begin(), Iis_Transmission_Data_Stream.begin() + 1024 * 250);
+                Iis_Read_Data_Size_Index -= 1024 * 250;
             }
         }
 

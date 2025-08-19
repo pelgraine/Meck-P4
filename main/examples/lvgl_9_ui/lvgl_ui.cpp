@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-08-13 16:00:26
+ * @LastEditTime: 2025-08-19 10:21:02
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -83,7 +83,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202508071807"},
+            {"firmware build date:\n     ", "202508191019"},
     };
 
     void System::begin()
@@ -480,7 +480,7 @@ namespace Lvgl_Ui
                                 case LV_EVENT_CLICKED:
                                 self->init_win_music();
 
-                                lv_screen_load(self->_registry.win.music.root);
+                                lv_screen_load_anim(self->_registry.win.music.root, LV_SCR_LOAD_ANIM_FADE_OUT, 500, 0, true);
                                 break;
                                 default:
                                 break;
@@ -4285,14 +4285,12 @@ namespace Lvgl_Ui
     {
         // 主界面
         _registry.win.music.root = lv_obj_create(NULL);
-        lv_obj_set_style_bg_color(_registry.win.music.root, lv_color_white(), (lv_style_selector_t)LV_PART_MAIN);
-#if defined CONFIG_SCREEN_TYPE_HI8561
-        lv_obj_set_style_bg_image_src(_registry.win.music.root, GET_MUSIC_COVER_PATH("Eagles - Hotel California (Live on MTV, 1994)_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
-#elif defined CONFIG_SCREEN_TYPE_RM69A10
-        lv_obj_set_style_bg_image_src(_registry.win.music.root, GET_MUSIC_COVER_PATH("Eagles - Hotel California (Live on MTV, 1994)_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
-#else
-#error "unknown macro definition, please select the correct macro definition."
-#endif
+        lv_obj_set_style_bg_color(_registry.win.music.root, lv_color_hex(0xE0DFDE), (lv_style_selector_t)LV_PART_MAIN);
+        
+        lv_obj_t *album_cover_img = lv_image_create(_registry.win.music.root);
+        lv_image_set_src(album_cover_img, &win_music_album_cover_540x540px_rgb565a8);
+        lv_obj_set_size(album_cover_img, 540, 540);
+        lv_obj_align(album_cover_img, LV_ALIGN_TOP_MID, 0, 50);
 
         lv_obj_set_size(_registry.win.music.root, _width, _height);
         lv_obj_set_scrollbar_mode(_registry.win.music.root, LV_SCROLLBAR_MODE_OFF);
@@ -4487,6 +4485,7 @@ namespace Lvgl_Ui
                                     // 边缘检测以及左右滑动
                                     if ((gesture_dir == LV_DIR_LEFT || gesture_dir == LV_DIR_RIGHT)&&(self->_edge_touch_flag == true))
                                     {   
+                                        // self->set_music_start_end(false);
                                         self->set_vibration();
                                         self->init_win_home();
                                         
