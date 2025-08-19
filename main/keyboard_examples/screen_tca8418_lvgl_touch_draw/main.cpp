@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-08-15 16:22:51
+ * @LastEditTime: 2025-08-15 17:57:30
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -21,7 +21,7 @@
 #include "esp_log.h"
 #include "lvgl.h"
 #include "t_display_p4_driver.h"
-#include "t_display_p4_config.h"
+#include "t_display_p4_keyboard_config.h"
 #include "cpp_bus_driver_library.h"
 
 #define LVGL_TICK_PERIOD_MS 1
@@ -52,6 +52,10 @@ auto XL9535_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9535_SDA, X
 
 auto XL9535 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9535_Bus, XL9535_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
+// auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(TCA8418_SDA, TCA8418_SCL, I2C_NUM_0);
+
+// auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
+
 auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
@@ -69,6 +73,7 @@ auto GT9895 = std::make_unique<Cpp_Bus_Driver::Gt9895>(GT9895_Bus, GT9895_IIC_AD
 #else
 #error "unknown macro definition, please select the correct macro definition."
 #endif
+
 
 void lvgl_port_task(void *arg)
 {
@@ -150,6 +155,27 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
     // }
 }
 
+void my_keyboard_read(lv_indev_t *indev, lv_indev_data_t *data)
+{
+//     static uint32_t last_key = 0; // 静态变量记录上一次按键
+
+//     uint32_t key = your_hardware_get_key(); // 替换为实际按键检测函数
+// LV_KEY_UP       
+//     // 2. 处理按键按下
+//     if (key != 0)
+//     {
+//         data->state = LV_INDEV_STATE_PRESSED; // 按下状态
+//         data->key = key;                      // 当前按下的键值
+//         last_key = key;                       // 保存最后按下的键
+//     }
+//     // 3. 处理按键释放
+//     else
+//     {
+//         data->state = LV_INDEV_STATE_RELEASED; // 释放状态
+//         data->key = last_key;                  // 释放时发送最后按下的键值
+//     }
+}
+
 // 绘图回调函数
 void draw_point(lv_event_t *e)
 {
@@ -220,7 +246,25 @@ void lv_example_canvas_7(void)
     /*Create a canvas and initialize its palette*/
     canvas = lv_canvas_create(lv_screen_active());
     // lv_canvas_set_draw_buf(canvas, (lv_draw_buf_t *)draw_buf);
-    lv_canvas_set_buffer(canvas, draw_buf, SCREEN_HEIGHT, SCREEN_WIDTH, LVGL_COLOR_FORMAT);
+    switch (LV_DISPLAY_ROTATION)
+    {
+    case LV_DISPLAY_ROTATION_0:
+        lv_canvas_set_buffer(canvas, draw_buf, SCREEN_WIDTH, SCREEN_HEIGHT, LVGL_COLOR_FORMAT);
+        break;
+    case LV_DISPLAY_ROTATION_90:
+        lv_canvas_set_buffer(canvas, draw_buf, SCREEN_HEIGHT, SCREEN_WIDTH, LVGL_COLOR_FORMAT);
+        break;
+    case LV_DISPLAY_ROTATION_180:
+        lv_canvas_set_buffer(canvas, draw_buf, SCREEN_WIDTH, SCREEN_HEIGHT, LVGL_COLOR_FORMAT);
+        break;
+    case LV_DISPLAY_ROTATION_270:
+        lv_canvas_set_buffer(canvas, draw_buf, SCREEN_HEIGHT, SCREEN_WIDTH, LVGL_COLOR_FORMAT);
+        break;
+
+    default:
+        break;
+    }
+
     lv_canvas_fill_bg(canvas, lv_color_hex3(0xCCC), LV_OPA_COVER);
     lv_obj_center(canvas);
 
@@ -305,6 +349,10 @@ void Lvgl_Init(void)
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER); /*Touchpad should have POINTER type*/
     lv_indev_set_read_cb(indev, my_touchpad_read);
+
+    lv_indev_t *indev_2 = lv_indev_create();
+    lv_indev_set_type(indev_2, LV_INDEV_TYPE_KEYPAD);
+    lv_indev_set_read_cb(indev_2, my_keyboard_read);
 
     printf("register dpi panel event callback for lvgl flush ready notification\n");
     esp_lcd_dpi_panel_event_callbacks_t cbs = {
