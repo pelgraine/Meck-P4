@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-08-19 09:39:06
+ * @LastEditTime: 2025-08-20 10:29:16
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -661,8 +661,8 @@ bool Play_Wav_File(const char *file_path)
     }
 
     vTaskSuspend(Iis_Transmission_Data_Stream_Task);
-    Iis_Transmission_Data_Stream.clear(); 
-    Iis_Transmission_Data_Stream.shrink_to_fit();// 释放内存
+    Iis_Transmission_Data_Stream.clear();
+    Iis_Transmission_Data_Stream.shrink_to_fit(); // 释放内存
 
     Music_File.close();
 
@@ -2244,6 +2244,15 @@ void System_Ui_Callback_Init(void)
 
     System_Ui->_win_lora_config_lora_params_callback = [](Lvgl_Ui::System::Device_Lora device_lora) -> bool
     {
+        if (device_lora.params.rf_switch == 0)
+        {
+            XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+        }
+        else
+        {
+            XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+        }
+
         if (SX1262->config_lora_params(device_lora.params.freq, device_lora.params.bw, device_lora.params.current_limit,
                                        device_lora.params.power, device_lora.params.sf, device_lora.params.cr, device_lora.params.crc_type,
                                        device_lora.params.preamble_length, device_lora.params.sync_word) == false)
@@ -3427,9 +3436,16 @@ extern "C" void app_main(void)
     XL9535->pin_write(XL9535_SX1262_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    // 默认使用RF1天线
     XL9535->pin_mode(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
-    XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    // 默认使用RF1天线
+    if (System_Ui->_device_lora.params.rf_switch == 0)
+    {
+        XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    }
+    else
+    {
+        XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+    }
 
     XL9535->pin_mode(XL9535_SX1262_DIO1, Cpp_Bus_Driver::Xl95x5::Mode::INPUT);
     if (SX1262->begin(10000000) == false)

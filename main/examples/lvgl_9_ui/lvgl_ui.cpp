@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-08-19 10:21:02
+ * @LastEditTime: 2025-08-20 09:53:23
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -83,7 +83,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202508191019"},
+            {"firmware build date:\n     ", "202508200942"},
     };
 
     void System::begin()
@@ -3262,6 +3262,8 @@ namespace Lvgl_Ui
 
                                 Device_Lora dl;
 
+                                dl.params.rf_switch = static_cast<bool>(lv_dropdown_get_selected(self->_registry.win.lora.setings.config_lora_params.dropdown.rf_switch));
+
                                 const char* freq_text = lv_textarea_get_text(self->_registry.win.lora.setings.config_lora_params.textarea.freq);
                                 if (freq_text != nullptr && freq_text[0] != '\0') // 同时检查NULL和空字符串
                                 {  
@@ -3373,11 +3375,54 @@ namespace Lvgl_Ui
 
                                 } }, LV_EVENT_ALL, this);
 
+        lv_obj_t *msgbox_rf_switch_text = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
+        lv_label_set_text(msgbox_rf_switch_text, "rf switch");
+        lv_obj_set_size(msgbox_rf_switch_text, 300, 40);
+        lv_obj_set_style_text_font(msgbox_rf_switch_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align(msgbox_rf_switch_text, LV_ALIGN_TOP_LEFT, 0, 0);
+
+        _registry.win.lora.setings.config_lora_params.dropdown.rf_switch = lv_dropdown_create(_registry.win.lora.setings.message_box.parameter_container);
+        lv_dropdown_set_dir(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, LV_DIR_BOTTOM);
+        lv_dropdown_set_options(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, "RF1\n"
+                                                                                                  "RF2");
+        lv_dropdown_set_selected(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, static_cast<uint32_t>(_device_lora.params.rf_switch));
+        lv_obj_set_style_pad_top(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_min_width(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, 200, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_min_height(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, 30, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);  // 输入框字体
+        lv_obj_set_style_text_font(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, &lv_font_montserrat_24, LV_PART_ITEMS | LV_STATE_DEFAULT); // 下拉列表字体
+        lv_obj_align_to(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, msgbox_rf_switch_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+
+        lv_obj_add_event_cb(_registry.win.lora.setings.config_lora_params.dropdown.rf_switch, [](lv_event_t *e)
+                            {
+                                lv_obj_t *dropdown = lv_event_get_target_obj(e);
+                                lv_event_code_t code = lv_event_get_code(e);
+                                
+                                if (code == LV_EVENT_CLICKED) 
+                                {
+                                    // // 强制下拉列表向下打开
+                                    // lv_dropdown_set_dir(dropdown, LV_DIR_BOTTOM);
+                                    // 获取弹出的下拉列表对象
+                                    lv_obj_t *list = lv_dropdown_get_list(dropdown);
+                                    // // 设置下拉列表最多显示100高度
+                                    // lv_obj_set_height(list, 300);
+
+                                    lv_obj_set_style_bg_color(list, lv_color_hex(0xEEE9E9), LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ACTIVE);
+                                    lv_obj_set_style_border_width(list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    
+                                    lv_obj_set_style_text_font(list, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    lv_obj_set_style_text_font(list, &lv_font_montserrat_24, LV_PART_ITEMS | LV_STATE_DEFAULT);
+                                } }, LV_EVENT_ALL, NULL);
+
         lv_obj_t *msgbox_freq_text = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_label_set_text(msgbox_freq_text, "freq");
         lv_obj_set_size(msgbox_freq_text, 100, 40);
         lv_obj_set_style_text_font(msgbox_freq_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_align(msgbox_freq_text, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_align_to(msgbox_freq_text, _registry.win.lora.setings.config_lora_params.dropdown.rf_switch, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
 
         _registry.win.lora.setings.config_lora_params.textarea.freq = lv_textarea_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_obj_set_style_pad_top(_registry.win.lora.setings.config_lora_params.textarea.freq, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -3456,12 +3501,6 @@ namespace Lvgl_Ui
         lv_obj_set_size(msgbox_bandwidth_text, 200, 40);
         lv_obj_set_style_text_font(msgbox_bandwidth_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(msgbox_bandwidth_text, _registry.win.lora.setings.config_lora_params.textarea.freq, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
-
-        // lv_obj_t *textarea_bandwidth = lv_textarea_create(_registry.win.lora.setings.message_box.parameter_container);
-        // lv_obj_set_width(textarea_bandwidth, 300);
-        // lv_textarea_set_one_line(textarea_bandwidth, true);
-        // lv_textarea_set_text(textarea_bandwidth, ""); // 设置初始内容为空
-        // lv_obj_align_to(textarea_bandwidth, msgbox_bandwidth_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
 
         _registry.win.lora.setings.config_lora_params.dropdown.bandwidth = lv_dropdown_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_dropdown_set_dir(_registry.win.lora.setings.config_lora_params.dropdown.bandwidth, LV_DIR_BOTTOM);
@@ -4286,7 +4325,7 @@ namespace Lvgl_Ui
         // 主界面
         _registry.win.music.root = lv_obj_create(NULL);
         lv_obj_set_style_bg_color(_registry.win.music.root, lv_color_hex(0xE0DFDE), (lv_style_selector_t)LV_PART_MAIN);
-        
+
         lv_obj_t *album_cover_img = lv_image_create(_registry.win.music.root);
         lv_image_set_src(album_cover_img, &win_music_album_cover_540x540px_rgb565a8);
         lv_obj_set_size(album_cover_img, 540, 540);

@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-08-18 15:58:43
+ * @LastEditTime: 2025-08-20 09:52:08
  * @License: GPL 3.0
  */
 #pragma once
@@ -278,6 +278,7 @@ namespace Lvgl_Ui
 
                             struct
                             {
+                                lv_obj_t *rf_switch;
                                 lv_obj_t *bandwidth;
                                 lv_obj_t *spreading_factor;
                                 lv_obj_t *coding_rate;
@@ -386,6 +387,7 @@ namespace Lvgl_Ui
 
             struct
             {
+                bool rf_switch = 0; // 射频开关
                 double freq = 868.0;
                 Sx126x::Lora_Bw bw = Sx126x::Lora_Bw::BW_125000HZ;
                 float current_limit = 140.0;
