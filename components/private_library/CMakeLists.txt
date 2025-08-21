@@ -5,7 +5,7 @@ idf_component_register(
         INCLUDE_DIRS 
         ${src_dirs}
         REQUIRES
-        "driver" "cpp_bus_driver" "esp_lcd" "esp_video" "RadioLib" "ST25R3916" "NFC-RFAL"
+        "driver" "cpp_bus_driver" "esp_lcd" "esp_video" "RadioLib" "ST25R3916" "NFC-RFAL" "lvgl"
     )
 
 target_compile_options(

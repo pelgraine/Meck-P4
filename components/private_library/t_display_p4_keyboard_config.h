@@ -2,11 +2,12 @@
  * @Description: t_display_p4_keyboard_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-08-04 11:56:16
+ * @LastEditTime: 2025-08-21 16:32:22
  */
 #pragma once
 #include "t_display_p4_config.h"
 #include <string>
+#include "lvgl.h"
 
 ////////////////////////////////////////////////// gpio config //////////////////////////////////////////////////
 
@@ -75,10 +76,45 @@ constexpr const std::string Tca8418_Map[] =
     {
         "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
         "Esc", "Esc", "1", "2", "3", "4", "5", "6", "7", "8",
-        "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P",
-        "Caps", "A", "S", "D", "F", "G", "H", "J", "K", "L",
-        "Alt", "Z", "X", "C", "V", "B", "N", "M", "Ctrl", "Up",
+        "q", "w", "e", "r", "t", "y", "u", "i", "o", "p",
+        "Caps", "a", "s", "d", "f", "g", "h", "j", "k", "l",
+        "Alt", "z", "x", "c", "v", "b", "n", "m", "Ctrl", "Up",
         "Fn", "Win", "Shift", "Tab", "Space", "Space", "Space", "Fn", "Left", "Down",
         "F11", "9", "Del", "Enter", "Record", "Enter", "0", "Right"};
+
+// TCA8418 Lvgl键盘按键映射
+constexpr const uint32_t Tca8418_Map_Lvgl[] =
+    {
+        // F1-F10  使用ASCII控制字符范围
+        0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A,
+
+        LV_KEY_ESC, LV_KEY_ESC,
+        '1', '2', '3', '4', '5', '6', '7', '8',
+        'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p',
+        0x8B, // Caps Lock  自定义值
+        'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l',
+        0x8C, // Alt  自定义值
+        'z', 'x', 'c', 'v', 'b', 'n', 'm',
+        0x8D, // Ctrl  自定义值
+        LV_KEY_UP,
+        0x8E,         // Fn  自定义值
+        0x8F,         // Win  自定义值
+        0x90,         // Shift  自定义值
+        LV_KEY_NEXT,  // Tab
+        LV_KEY_ENTER, // Space
+        LV_KEY_ENTER, // Space
+        LV_KEY_ENTER, // Space
+        0x8E,         // Fn 自定义值
+        LV_KEY_LEFT,
+        LV_KEY_DOWN,
+
+        0x91, // F11  自定义值
+        '9',
+        LV_KEY_BACKSPACE,
+        LV_KEY_ENTER,
+        0x92, // Record 自定义值
+        LV_KEY_ENTER,
+        '0',
+        LV_KEY_RIGHT};
 
 ////////////////////////////////////////////////// other define config //////////////////////////////////////////////////

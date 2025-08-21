@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-08-15 17:57:30
+ * @LastEditTime: 2025-08-21 16:19:58
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -52,9 +52,13 @@ auto XL9535_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9535_SDA, X
 
 auto XL9535 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9535_Bus, XL9535_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
-// auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(TCA8418_SDA, TCA8418_SCL, I2C_NUM_0);
+auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9555_SDA, XL9555_SCL, I2C_NUM_1);
 
-// auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
+auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
+
+auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(TCA8418_SDA, TCA8418_SCL, I2C_NUM_1);
+
+auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
 auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
@@ -74,6 +78,7 @@ auto GT9895 = std::make_unique<Cpp_Bus_Driver::Gt9895>(GT9895_Bus, GT9895_IIC_AD
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
+volatile bool Interrupt_Flag = false;
 
 void lvgl_port_task(void *arg)
 {
@@ -157,23 +162,109 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
 
 void my_keyboard_read(lv_indev_t *indev, lv_indev_data_t *data)
 {
-//     static uint32_t last_key = 0; // 静态变量记录上一次按键
+    static uint32_t last_key = 0; // 静态变量记录上一次按键
+    static bool pressed_state_flag = false;
+    static bool caps_lock_flag = false;
 
-//     uint32_t key = your_hardware_get_key(); // 替换为实际按键检测函数
-// LV_KEY_UP       
-//     // 2. 处理按键按下
-//     if (key != 0)
-//     {
-//         data->state = LV_INDEV_STATE_PRESSED; // 按下状态
-//         data->key = key;                      // 当前按下的键值
-//         last_key = key;                       // 保存最后按下的键
-//     }
-//     // 3. 处理按键释放
-//     else
-//     {
-//         data->state = LV_INDEV_STATE_RELEASED; // 释放状态
-//         data->key = last_key;                  // 释放时发送最后按下的键值
-//     }
+    if (Interrupt_Flag == true)
+    {
+        Cpp_Bus_Driver::Tca8418::Irq_Status is;
+
+        if (TCA8418->parse_irq_status(TCA8418->get_irq_flag(), is) == false)
+        {
+            printf("parse_irq_status fail\n");
+        }
+        else
+        {
+            if (is.key_events_flag == true)
+            {
+                Cpp_Bus_Driver::Tca8418::Touch_Point tp;
+                if (TCA8418->get_multiple_touch_point(tp) == true)
+                {
+                    printf("touch finger: %d\n", tp.finger_count);
+
+                    for (uint8_t i = 0; i < tp.info.size(); i++)
+                    {
+                        switch (tp.info[i].event_type)
+                        {
+                        case Cpp_Bus_Driver::Tca8418::Event_Type::KEYPAD:
+                        {
+                            Cpp_Bus_Driver::Tca8418::Touch_Position tp_2;
+                            if (TCA8418->parse_touch_num(tp.info[i].num, tp_2) == true)
+                            {
+                                printf("keypad event\n");
+                                printf("   touch num:[%d] num: %d x: %d y: %d press_flag: %d\n", i + 1, tp.info[i].num, tp_2.x, tp_2.y, tp.info[i].press_flag);
+                                if (tp.info[i].num <= (sizeof(Tca8418_Map) / sizeof(std::string)))
+                                {
+                                    printf("   touch string: %s\n", Tca8418_Map[tp.info[i].num - 1].c_str());
+                                }
+
+                                if (tp.info[i].press_flag == 1)
+                                {
+                                    pressed_state_flag = true;
+                                    if (Tca8418_Map[tp.info[i].num - 1] == "Caps")
+                                    {
+                                        caps_lock_flag = !caps_lock_flag;
+                                        if (caps_lock_flag == false)
+                                        {
+                                            XL9555->pin_write(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Value::HIGH); // 关闭LED
+                                            XL9555->pin_write(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+                                            XL9555->pin_write(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+                                        }
+                                        else
+                                        {
+                                            XL9555->pin_write(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Value::LOW); // 开启LED
+                                            XL9555->pin_write(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+                                            XL9555->pin_write(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+                                        }
+                                    }
+
+                                    last_key = Tca8418_Map_Lvgl[tp.info[i].num - 1]; // 保存最后按下的键
+                                    if (caps_lock_flag == true)
+                                    {
+                                        // 如果是小写字母，转为大写
+                                        if (last_key >= 'a' && last_key <= 'z')
+                                        {
+                                            last_key = last_key - 'a' + 'A';
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    pressed_state_flag = false;
+                                }
+                            }
+
+                            break;
+                        }
+                        case Cpp_Bus_Driver::Tca8418::Event_Type::GPIO:
+                            printf("gpio event\n");
+                            printf("   touch num:[%d] num: %d press_flag: %d\n", i + 1, tp.info[i].num, tp.info[i].press_flag);
+                            break;
+
+                        default:
+                            break;
+                        }
+                    }
+                }
+
+                TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
+            }
+        }
+
+        Interrupt_Flag = false;
+    }
+
+    if (pressed_state_flag == false)
+    {
+        data->state = LV_INDEV_STATE_RELEASED; // 释放状态
+    }
+    else
+    {
+        data->state = LV_INDEV_STATE_PRESSED; // 按下状态
+
+        data->key = last_key; // 当前按下的键值
+    }
 }
 
 // 绘图回调函数
@@ -385,6 +476,43 @@ void Lvgl_Init(void)
     lv_display_set_rotation(display, LV_DISPLAY_ROTATION);
 }
 
+void Lvgl_Keyboard_Init(void)
+{
+    // 创建一个半透明文本框
+    lv_obj_t *ta = lv_textarea_create(lv_screen_active());
+    lv_obj_set_width(ta, 600);
+    lv_obj_set_height(ta, 300);
+    lv_obj_center(ta);
+
+    // 设置背景为50%透明
+    lv_obj_set_style_bg_opa(ta, LV_OPA_50, 0);
+
+    lv_obj_set_style_text_font(ta, &lv_font_montserrat_24, 0);
+
+    // 设置文本框不可触摸
+    lv_obj_remove_flag(ta, LV_OBJ_FLAG_CLICKABLE);
+
+    // 关联键盘输入
+    lv_indev_t *kb_indev = NULL;
+    // 查找类型为KEYPAD的输入设备
+    lv_indev_t *indev_iter = lv_indev_get_next(NULL);
+    while (indev_iter)
+    {
+        if (lv_indev_get_type(indev_iter) == LV_INDEV_TYPE_KEYPAD)
+        {
+            kb_indev = indev_iter;
+            break;
+        }
+        indev_iter = lv_indev_get_next(indev_iter);
+    }
+    if (kb_indev)
+    {
+        lv_group_t *g = lv_group_create();
+        lv_group_add_obj(g, ta);
+        lv_indev_set_group(kb_indev, g);
+    }
+}
+
 extern "C" void app_main(void)
 {
     printf("Ciallo\n");
@@ -458,10 +586,50 @@ extern "C" void app_main(void)
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
+    Init_Ldo_Channel_Power(4, 3300);
+
+    XL9555->begin();
+    XL9555->pin_mode(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_mode(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_mode(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_write(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Value::HIGH); // 关闭led
+    XL9555->pin_write(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    XL9555->pin_write(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+
+    XL9555->pin_mode(XL9555_TCA8418_RST, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_write(XL9555_TCA8418_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    XL9555->pin_write(XL9555_TCA8418_RST, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    XL9555->pin_write(XL9555_TCA8418_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    TCA8418->create_gpio_interrupt(TCA8418_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::FALLING,
+                                   [](void *arg) -> IRAM_ATTR void
+                                   {
+                                       Interrupt_Flag = true;
+                                   });
+
+    TCA8418_IIC_Bus->set_bus_handle(XL9555_IIC_Bus->get_bus_handle());
+
+    TCA8418->begin();
+    TCA8418->set_keypad_scan_window(0, 0, TCA8418_KEYPAD_SCAN_WIDTH, TCA8418_KEYPAD_SCAN_HEIGHT);
+    TCA8418->set_irq_pin_mode(Cpp_Bus_Driver::Tca8418::Irq_Mask::KEY_EVENTS);
+    TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
+
+    ESP32P4->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_0, 20000);
+    ESP32P4->start_pwm_gradient_time(10, 1000);
+
     Lvgl_Init();
+    lv_example_canvas_7();
+    Lvgl_Keyboard_Init();
     xTaskCreate(lvgl_port_task, "lvgl_port_task", 4 * 1024, NULL, 2, NULL);
 
-    lv_example_canvas_7();
+    // 等待lvgl刷新完成
+    while (lv_display_flush_is_last(lv_display_get_default()) == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
     ESP32P4->start_pwm_gradient_time(100, 500);
