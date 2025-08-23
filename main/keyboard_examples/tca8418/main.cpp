@@ -2,7 +2,7 @@
  * @Description: xl9535
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-08-21 16:11:44
+ * @LastEditTime: 2025-08-23 10:42:57
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -15,9 +15,13 @@
 #include "t_display_p4_driver.h"
 #include "cpp_bus_driver_library.h"
 
-auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9555_SDA, XL9555_SCL, I2C_NUM_0);
+// auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9555_SDA, XL9555_SCL, I2C_NUM_0);
 
-auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(TCA8418_SDA, TCA8418_SCL, I2C_NUM_0);
+// auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(TCA8418_SDA, TCA8418_SCL, I2C_NUM_0);
+
+auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA, XL9555_SCL);
+
+auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SDA, TCA8418_SCL);
 
 auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
@@ -55,7 +59,7 @@ extern "C" void app_main(void)
                                        Interrupt_Flag = true;
                                    });
 
-    TCA8418_IIC_Bus->set_bus_handle(XL9555_IIC_Bus->get_bus_handle());
+    // TCA8418_IIC_Bus->set_bus_handle(XL9555_IIC_Bus->get_bus_handle());
 
     TCA8418->begin();
     TCA8418->set_keypad_scan_window(0, 0, TCA8418_KEYPAD_SCAN_WIDTH, TCA8418_KEYPAD_SCAN_HEIGHT);
