@@ -10,6 +10,3 @@ dependencies:
 
   espressif/esp-sr:
     version: "^2.1.3"
-
-  espressif/i2c_bus:
-    version: "^1.4.0"
