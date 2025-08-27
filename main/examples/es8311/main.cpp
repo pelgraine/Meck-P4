@@ -2,7 +2,7 @@
  * @Description: es8311
  * @Author: LILYGO_L
  * @Date: 2024-12-23 15:18:58
- * @LastEditTime: 2025-06-13 09:21:54
+ * @LastEditTime: 2025-08-27 17:21:15
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -412,7 +412,7 @@ extern "C" void app_main(void)
             uint8_t buffer = 0;
             for (size_t i = 0; i < 256; i++)
             {
-                IIC_Bus_0->Bus_Iic_Guide::read(i, &buffer);
+                IIC_Bus_0->Bus_Iic_Guide::read(static_cast<uint8_t>(i), &buffer);
                 printf("es8311 register[%d]: %#X\n", i, buffer);
             }
 
