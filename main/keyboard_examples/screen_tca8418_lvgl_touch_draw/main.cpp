@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-09-01 15:31:03
+ * @LastEditTime: 2025-09-01 16:09:47
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -45,6 +45,8 @@ bool need_clear_lock_flag = false;
 // 定义一个画布对象
 static lv_obj_t *canvas;
 static lv_layer_t layer;
+
+lv_obj_t *Keyboard_Label;
 
 lv_point_t point;
 
@@ -195,6 +197,8 @@ void my_keyboard_read(lv_indev_t *indev, lv_indev_data_t *data)
                                 if (tp.info[i].num <= (sizeof(Tca8418_Map) / sizeof(std::string)))
                                 {
                                     printf("   touch string: %s\n", Tca8418_Map[tp.info[i].num - 1].c_str());
+
+                                    lv_label_set_text(Keyboard_Label, Tca8418_Map[tp.info[i].num - 1].c_str());
                                 }
 
                                 if (tp.info[i].press_flag == 1)
@@ -477,10 +481,10 @@ void Lvgl_Init(void)
 void Lvgl_Keyboard_Init(void)
 {
     // 创建一个半透明文本框
-    lv_obj_t *ta = lv_textarea_create(lv_screen_active());
-    lv_obj_set_width(ta, 600);
-    lv_obj_set_height(ta, 300);
-    lv_obj_center(ta);
+    lv_obj_t *ta = lv_textarea_create(canvas);
+    lv_obj_set_width(ta, 300);
+    lv_obj_set_height(ta, 150);
+    lv_obj_align(ta, LV_ALIGN_BOTTOM_MID, -370, -50);
 
     // 设置背景为50%透明
     lv_obj_set_style_bg_opa(ta, LV_OPA_50, 0);
@@ -494,21 +498,16 @@ void Lvgl_Keyboard_Init(void)
     lv_indev_t *kb_indev = NULL;
     // 查找类型为KEYPAD的输入设备
     lv_indev_t *indev_iter = lv_indev_get_next(NULL);
-    while (indev_iter)
-    {
-        if (lv_indev_get_type(indev_iter) == LV_INDEV_TYPE_KEYPAD)
-        {
-            kb_indev = indev_iter;
-            break;
-        }
-        indev_iter = lv_indev_get_next(indev_iter);
-    }
-    if (kb_indev)
-    {
-        lv_group_t *g = lv_group_create();
-        lv_group_add_obj(g, ta);
-        lv_indev_set_group(kb_indev, g);
-    }
+    lv_group_t *g = lv_group_create();
+    lv_group_add_obj(g, ta);
+    lv_indev_set_group(indev_iter, g);
+
+    // 创建一个标签并居中显示
+    Keyboard_Label = lv_label_create(canvas);
+    lv_obj_set_style_text_color(Keyboard_Label, lv_color_black(), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(Keyboard_Label, &lv_font_montserrat_48, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+    lv_label_set_text(Keyboard_Label, "NULL");
+    lv_obj_align(Keyboard_Label, LV_ALIGN_CENTER, 0, 0);
 }
 
 extern "C" void app_main(void)
@@ -615,8 +614,8 @@ extern "C" void app_main(void)
     TCA8418->set_irq_pin_mode(Cpp_Bus_Driver::Tca8418::Irq_Mask::KEY_EVENTS);
     TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
 
-    TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_1, 2000);
-    TCA8418->start_pwm_gradient_time(50, 1000);
+    // TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_1, 2000);
+    // TCA8418->start_pwm_gradient_time(50, 1000);
 
     Lvgl_Init();
     lv_example_canvas_7();
