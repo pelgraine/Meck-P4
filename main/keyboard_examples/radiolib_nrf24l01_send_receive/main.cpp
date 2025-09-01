@@ -2,7 +2,7 @@
  * @Description: radiolib_nrf24l01_send_receive
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-08-14 13:45:15
+ * @LastEditTime: 2025-09-01 14:04:53
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -135,6 +135,8 @@ extern "C" void app_main(void)
             {
                 printf("startReceive fail (error code: %d)\n", status);
             }
+
+            Interrupt_Flag = false;
         }
 
         if (Interrupt_Flag == true) // 接收完成中断
