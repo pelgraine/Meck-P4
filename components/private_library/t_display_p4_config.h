@@ -2,7 +2,7 @@
  * @Description: t_display_p4_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-08-04 14:04:23
+ * @LastEditTime: 2025-09-01 14:01:54
  */
 #pragma once
 
@@ -135,13 +135,9 @@
 #define ESP32C6_SDIO_D3 SDIO_2_D3
 
 // Extended io
-// #define EXT_2X8P_SPI_SCLK SPI_1_SCLK
-// #define EXT_2X8P_SPI_MOSI SPI_1_MOSI
-// #define EXT_2X8P_SPI_MISO SPI_1_MISO
-
-#define EXT_2X8P_SPI_SCLK SPI_1_MISO
-#define EXT_2X8P_SPI_MOSI SPI_1_SCLK
-#define EXT_2X8P_SPI_MISO SPI_1_MOSI
+#define EXT_2X8P_SPI_SCLK SPI_1_SCLK
+#define EXT_2X8P_SPI_MOSI SPI_1_MOSI
+#define EXT_2X8P_SPI_MISO SPI_1_MISO
 
 #define EXT_2X8P_IO_26 26
 #define EXT_2X8P_IO_27 27

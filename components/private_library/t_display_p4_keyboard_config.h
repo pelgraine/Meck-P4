@@ -2,7 +2,7 @@
  * @Description: t_display_p4_keyboard_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-08-21 16:32:22
+ * @LastEditTime: 2025-09-01 14:02:23
  */
 #pragma once
 #include "t_display_p4_config.h"
@@ -38,11 +38,11 @@
 #define KEYBOARD_BL SY7200A_EN_PWM
 
 // T-MixRF
-#define T_MIXRF_CC1101_CS EXT_2X8P_IO_25
+#define T_MIXRF_CC1101_CS EXT_2X8P_IO_36
 #define T_MIXRF_CC1101_SCLK EXT_2X8P_SPI_SCLK
 #define T_MIXRF_CC1101_MOSI EXT_2X8P_SPI_MOSI
 #define T_MIXRF_CC1101_MISO EXT_2X8P_SPI_MISO
-#define T_MIXRF_CC1101_GDO0 EXT_2X8P_IO_36
+#define T_MIXRF_CC1101_GDO0 EXT_2X8P_IO_25
 #define T_MIXRF_CC1101_GDO2 EXT_2X8P_IO_33
 #define T_MIXRF_CC1101_INT T_MIXRF_CC1101_GDO0
 #define T_MIXRF_CC1101_BUSY T_MIXRF_CC1101_GDO2
