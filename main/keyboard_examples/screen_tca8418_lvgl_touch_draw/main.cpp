@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-09-01 16:09:47
+ * @LastEditTime: 2025-09-01 16:41:43
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -396,12 +396,12 @@ void Lvgl_Init(void)
     // create draw buffer
     printf("allocate separate lvgl draw buffers\n");
     size_t draw_buffer_sz = SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(lv_color_t);
-    void *buf1 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *buf1 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
     assert(buf1);
-    void *buf2 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    assert(buf2);
+    // void *buf2 = heap_caps_malloc(draw_buffer_sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
+    // assert(buf2);
     // initialize LVGL draw buffers
-    lv_display_set_buffers(display, buf1, buf2, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(display, buf1, NULL, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
     // set the callback which can copy the rendered image to an area of the display
 
     lv_display_set_flush_cb(display, [](lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
