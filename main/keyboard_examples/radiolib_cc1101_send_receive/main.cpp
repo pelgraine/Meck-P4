@@ -2,7 +2,7 @@
  * @Description: radiolib_cc1101_send_receive
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-09-01 14:03:46
+ * @LastEditTime: 2025-09-01 14:49:01
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -128,8 +128,8 @@ extern "C" void app_main(void)
                                        Interrupt_Flag = true;
                                    });
 
-    int16_t status = Cc1101.begin(870.0);
-    // int16_t status = Cc1101.beginFSK4(870.0);
+    int16_t status = Cc1101.begin(868.0);
+    // int16_t status = Cc1101.beginFSK4(868.0);
     if (status == RADIOLIB_ERR_NONE)
     {
         printf("cc1101 init success\n");
