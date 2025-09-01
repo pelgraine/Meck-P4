@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-08-21 16:19:58
+ * @LastEditTime: 2025-09-01 15:31:03
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -59,8 +59,6 @@ auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_II
 auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(TCA8418_SDA, TCA8418_SCL, I2C_NUM_1);
 
 auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
-
-auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
 auto HI8561_T_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(HI8561_TOUCH_SDA, HI8561_TOUCH_SCL, I2C_NUM_0);
@@ -570,7 +568,7 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(10));
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    ESP32P4->create_pwm(HI8561_SCREEN_BL, ledc_channel_t::LEDC_CHANNEL_0, 2000);
+    HI8561_T->create_pwm(HI8561_SCREEN_BL, ledc_channel_t::LEDC_CHANNEL_0, 2000);
 
     HI8561_T_Bus->_iic_bus_handle = XL9535_Bus->_iic_bus_handle;
 
@@ -617,8 +615,8 @@ extern "C" void app_main(void)
     TCA8418->set_irq_pin_mode(Cpp_Bus_Driver::Tca8418::Irq_Mask::KEY_EVENTS);
     TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
 
-    ESP32P4->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_0, 20000);
-    ESP32P4->start_pwm_gradient_time(10, 1000);
+    TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_1, 2000);
+    TCA8418->start_pwm_gradient_time(50, 1000);
 
     Lvgl_Init();
     lv_example_canvas_7();
@@ -632,7 +630,7 @@ extern "C" void app_main(void)
     }
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    ESP32P4->start_pwm_gradient_time(100, 500);
+    HI8561_T->start_pwm_gradient_time(100, 500);
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
     for (uint8_t i = 0; i < 255; i += 5)
