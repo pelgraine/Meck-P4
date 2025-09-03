@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-03 15:51:19
+ * @LastEditTime: 2025-09-03 16:49:54
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -2981,7 +2981,13 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
             .scale_y = 1,
             .mirror_x = false,
 #if defined SCREEN_ROTATION_DIRECTION_0
+#if defined CONFIG_SCREEN_TYPE_HI8561
             .mirror_y = true,
+#elif defined CONFIG_SCREEN_TYPE_RM69A10
+            .mirror_y = false,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 #elif defined SCREEN_ROTATION_DIRECTION_90
             .mirror_y = false,
 #else

@@ -2,7 +2,7 @@
  * @Description: t_display_p4_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-09-01 14:01:54
+ * @LastEditTime: 2025-09-03 16:22:05
  */
 #pragma once
 
@@ -216,12 +216,13 @@
 // CAMERA
 #define CAMERA_WIDTH 1920
 #define CAMERA_HEIGHT 1080
-// #define CAMERA_WIDTH 640
-// #define CAMERA_HEIGHT 480
 // #define CAMERA_WIDTH 1280
 // #define CAMERA_HEIGHT 720
 // #define CAMERA_WIDTH 800
 // #define CAMERA_HEIGHT 800
+// #define CAMERA_WIDTH 640
+// #define CAMERA_HEIGHT 480
+
 #define CAMERA_DATA_LANE_NUM 2
 #define CAMERA_LANE_BIT_RATE_MBPS 1000
 #define CAMERA_MIPI_DSI_DPI_CLK_MHZ 60
