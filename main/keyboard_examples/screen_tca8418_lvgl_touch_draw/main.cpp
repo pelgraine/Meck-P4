@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-09-01 16:41:43
+ * @LastEditTime: 2025-09-03 17:49:42
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -54,11 +54,15 @@ auto XL9535_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9535_SDA, X
 
 auto XL9535 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9535_Bus, XL9535_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
-auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9555_SDA, XL9555_SCL, I2C_NUM_1);
+auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA, XL9555_SCL);
+
+// auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9555_SDA, XL9555_SCL, I2C_NUM_1);
 
 auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
-auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(TCA8418_SDA, TCA8418_SCL, I2C_NUM_1);
+auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SDA, TCA8418_SCL);
+
+// auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(TCA8418_SDA, TCA8418_SCL, I2C_NUM_1);
 
 auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
@@ -485,28 +489,26 @@ void Lvgl_Keyboard_Init(void)
     lv_obj_set_width(ta, 300);
     lv_obj_set_height(ta, 150);
     lv_obj_align(ta, LV_ALIGN_BOTTOM_MID, -370, -50);
-
     // 设置背景为50%透明
     lv_obj_set_style_bg_opa(ta, LV_OPA_50, 0);
-
     lv_obj_set_style_text_font(ta, &lv_font_montserrat_24, 0);
-
     // 设置文本框不可触摸
     lv_obj_remove_flag(ta, LV_OBJ_FLAG_CLICKABLE);
 
-    // 关联键盘输入
-    lv_indev_t *kb_indev = NULL;
     // 查找类型为KEYPAD的输入设备
     lv_indev_t *indev_iter = lv_indev_get_next(NULL);
-    lv_group_t *g = lv_group_create();
-    lv_group_add_obj(g, ta);
-    lv_indev_set_group(indev_iter, g);
+    if (indev_iter != nullptr)
+    {
+        lv_group_t *g = lv_group_create();
+        lv_group_add_obj(g, ta);
+        lv_indev_set_group(indev_iter, g);
+    }
 
     // 创建一个标签并居中显示
     Keyboard_Label = lv_label_create(canvas);
     lv_obj_set_style_text_color(Keyboard_Label, lv_color_black(), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(Keyboard_Label, &lv_font_montserrat_48, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-    lv_label_set_text(Keyboard_Label, "NULL");
+    lv_label_set_text(Keyboard_Label, "null");
     lv_obj_align(Keyboard_Label, LV_ALIGN_CENTER, 0, 0);
 }
 
@@ -607,7 +609,7 @@ extern "C" void app_main(void)
                                        Interrupt_Flag = true;
                                    });
 
-    TCA8418_IIC_Bus->set_bus_handle(XL9555_IIC_Bus->get_bus_handle());
+    // TCA8418_IIC_Bus->set_bus_handle(XL9555_IIC_Bus->get_bus_handle());
 
     TCA8418->begin();
     TCA8418->set_keypad_scan_window(0, 0, TCA8418_KEYPAD_SCAN_WIDTH, TCA8418_KEYPAD_SCAN_HEIGHT);
