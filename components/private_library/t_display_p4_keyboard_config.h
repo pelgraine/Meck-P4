@@ -2,7 +2,7 @@
  * @Description: t_display_p4_keyboard_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-09-01 14:02:23
+ * @LastEditTime: 2025-09-03 18:06:00
  */
 #pragma once
 #include "t_display_p4_config.h"
@@ -25,6 +25,10 @@
 #define XL9555_LED_2 static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(4)
 #define XL9555_LED_3 static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(5)
 #define XL9555_TCA8418_RST static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(6)
+#define XL9555_T_MIXRF_LR1121_INT static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(7)
+#define XL9555_T_MIXRF_LR1121_RST static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(10)
+#define XL9555_T_MIXRF_LR1121_CS static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(11)
+#define XL9555_T_MIXRF_LR1121_BUSY static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(12)
 
 // SY7200A
 #define SY7200A_EN_PWM EXT_1X4P_1_IO_47
