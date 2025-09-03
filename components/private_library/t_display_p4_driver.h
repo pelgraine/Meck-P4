@@ -2,7 +2,7 @@
  * @Description: t_display_p4_driver
  * @Author: LILYGO_L
  * @Date: 2025-07-07 14:31:51
- * @LastEditTime: 2025-08-15 10:31:38
+ * @LastEditTime: 2025-09-01 16:40:08
  * @License: GPL 3.0
  */
 #pragma once
@@ -10,6 +10,14 @@
 #include "t_display_p4_config.h"
 #include "hi8561_driver.h"
 #include "rm69a10_driver.h"
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
+#define SCREEN_ROTATION_DIRECTION_0
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+#define SCREEN_ROTATION_DIRECTION_90
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
 #if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
 #define SCREEN_BITS_PER_PIXEL 16
@@ -58,19 +66,19 @@
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-#if defined CONFIG_SCREEN_ROTATION_DIRECTION_0
+#if defined SCREEN_ROTATION_DIRECTION_0
 
 #define LV_DISPLAY_ROTATION LV_DISPLAY_ROTATION_0
 
-#elif defined CONFIG_SCREEN_ROTATION_DIRECTION_90
+#elif defined SCREEN_ROTATION_DIRECTION_90
 
 #define LV_DISPLAY_ROTATION LV_DISPLAY_ROTATION_90
 
-#elif defined CONFIG_SCREEN_ROTATION_DIRECTION_180
+#elif defined SCREEN_ROTATION_DIRECTION_180
 
 #define LV_DISPLAY_ROTATION LV_DISPLAY_ROTATION_180
 
-#elif defined CONFIG_SCREEN_ROTATION_DIRECTION_270
+#elif defined SCREEN_ROTATION_DIRECTION_270
 
 #define LV_DISPLAY_ROTATION LV_DISPLAY_ROTATION_270
 

@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-08-20 09:53:23
+ * @LastEditTime: 2025-09-03 14:42:54
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -88,6 +88,7 @@ namespace Lvgl_Ui
 
     void System::begin()
     {
+#if defined SCREEN_ROTATION_DIRECTION_0
         _app_style.icon.edge_distance.height = std::min(_width, _height) / 5;
         _app_style.icon.edge_distance.width = _app_style.icon.edge_distance.height / 5;
         _app_style.icon.icon_distance.width = (_width - (_app_style.icon.edge_distance.width * 2) - (4 * APP_STYLE_ICON_WIDTH_HEIGHT)) / 3;
@@ -97,6 +98,19 @@ namespace Lvgl_Ui
         _app_style.icon.edge_distance_fixed.width = _app_style.icon.edge_distance.width + 40;
         _app_style.icon.edge_distance_fixed.height = 10;
         _app_style.icon.icon_distance.fixed_width = (_width - (_app_style.icon.edge_distance_fixed.width * 2) - (3 * APP_STYLE_ICON_WIDTH_HEIGHT)) / 2;
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        _app_style.icon.edge_distance.height = std::min(_width, _height) / 6;
+        _app_style.icon.edge_distance.width = _app_style.icon.edge_distance.height / 5;
+        _app_style.icon.icon_distance.width = (_width - (_app_style.icon.edge_distance.width * 2) - (9 * APP_STYLE_ICON_WIDTH_HEIGHT)) / 3;
+        _app_style.icon.icon_distance.height = APP_STYLE_ICON_WIDTH_HEIGHT + (APP_STYLE_ICON_WIDTH_HEIGHT / 1.5);
+        _app_style.label.width = APP_STYLE_ICON_WIDTH_HEIGHT;
+        _app_style.label.height = APP_STYLE_ICON_WIDTH_HEIGHT / 3;
+        _app_style.icon.edge_distance_fixed.width = _app_style.icon.edge_distance.width + 40;
+        _app_style.icon.edge_distance_fixed.height = 10;
+        _app_style.icon.icon_distance.fixed_width = (_width - (_app_style.icon.edge_distance_fixed.width * 2) - (8 * APP_STYLE_ICON_WIDTH_HEIGHT)) / 2;
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
         _device_information_list[0].info = "esp32p4";
 
@@ -228,7 +242,13 @@ namespace Lvgl_Ui
         // 创建PASS按键
         lv_obj_t *pass_button = lv_button_create(button_container);
         lv_obj_set_size(pass_button, 200, 60);
+#if defined SCREEN_ROTATION_DIRECTION_0
         lv_obj_align(pass_button, LV_ALIGN_LEFT_MID, 10, 0);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_align(pass_button, LV_ALIGN_LEFT_MID, 150, 0);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
         lv_obj_set_style_radius(pass_button, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_shadow_width(pass_button, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 移除阴影
 
@@ -259,7 +279,13 @@ namespace Lvgl_Ui
         // 创建FAIL按键
         lv_obj_t *fail_button = lv_button_create(button_container);
         lv_obj_set_size(fail_button, 200, 60);
+#if defined SCREEN_ROTATION_DIRECTION_0
         lv_obj_align(fail_button, LV_ALIGN_RIGHT_MID, -10, 0);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_align(fail_button, LV_ALIGN_RIGHT_MID, -150, 0);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
         lv_obj_set_style_radius(fail_button, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_shadow_width(fail_button, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 移除阴影
 
@@ -373,6 +399,8 @@ namespace Lvgl_Ui
         // 主界面
         _registry.win.home.root = lv_obj_create(NULL);
         lv_obj_set_style_bg_color(_registry.win.home.root, lv_color_black(), (lv_style_selector_t)LV_PART_MAIN);
+
+#if defined SCREEN_ROTATION_DIRECTION_0
 #if defined CONFIG_SCREEN_TYPE_HI8561
         lv_obj_set_style_bg_image_src(_registry.win.home.root, GET_WALLPAPER_PATH("wallpaper_1_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
@@ -380,6 +408,18 @@ namespace Lvgl_Ui
 #else
 #error "unknown macro definition, please select the correct macro definition."
 #endif
+#elif defined SCREEN_ROTATION_DIRECTION_90
+#if defined CONFIG_SCREEN_TYPE_HI8561
+        lv_obj_set_style_bg_image_src(_registry.win.home.root, GET_WALLPAPER_PATH("wallpaper_1_1168x540px.png"), (lv_style_selector_t)LV_PART_MAIN);
+#elif defined CONFIG_SCREEN_TYPE_RM69A10
+        lv_obj_set_style_bg_image_src(_registry.win.home.root, GET_WALLPAPER_PATH("wallpaper_1_1232x568px.png"), (lv_style_selector_t)LV_PART_MAIN);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+
         lv_obj_set_size(_registry.win.home.root, _width, _height);
         lv_obj_set_scrollbar_mode(_registry.win.home.root, LV_SCROLLBAR_MODE_OFF);
 
@@ -426,9 +466,19 @@ namespace Lvgl_Ui
             // 应用样式
             lv_obj_add_style(image_button[i], &style_def, (lv_style_selector_t)LV_PART_MAIN);
             lv_obj_add_style(image_button[i], &style_pr, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_PRESSED);
+#if defined SCREEN_ROTATION_DIRECTION_0
             // 设置按钮位置
-            lv_obj_align(image_button[i], LV_ALIGN_TOP_LEFT, _app_style.icon.edge_distance.width + (APP_STYLE_ICON_WIDTH_HEIGHT * i) + (_app_style.icon.icon_distance.width * i), _app_style.icon.edge_distance.height + 300);
+            lv_obj_align(image_button[i], LV_ALIGN_TOP_LEFT,
+                         _app_style.icon.edge_distance.width + (APP_STYLE_ICON_WIDTH_HEIGHT * i) + (_app_style.icon.icon_distance.width * i),
+                         _app_style.icon.edge_distance.height + 300);
 
+#elif defined SCREEN_ROTATION_DIRECTION_90
+            // 设置按钮位置
+            lv_obj_align(image_button[i], LV_ALIGN_TOP_LEFT,
+                         _app_style.icon.edge_distance.width + (APP_STYLE_ICON_WIDTH_HEIGHT * i) + (_app_style.icon.icon_distance.width * i) + 400, _app_style.icon.edge_distance.height);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
             lv_obj_t *image_button_label = lv_label_create(tileview_tile_1);
             lv_label_set_text(image_button_label, _win_home_app_icon_list[i].name.c_str());
             lv_obj_set_style_text_align(image_button_label, LV_TEXT_ALIGN_CENTER, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -1344,48 +1394,78 @@ namespace Lvgl_Ui
         const uint32_t color_list[4] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF};
         lv_obj_add_event_cb(_registry.win.cit.screen_color_test.start_color_test, [](lv_event_t *e)
                             {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
+            System *self = static_cast<System *>(lv_event_get_user_data(e));
+            lv_event_code_t code = lv_event_get_code(e);
 
-                                switch (code)
-                                {
-                                    case LV_EVENT_CLICKED:
-                                    self->_registry.win.cit.screen_color_test.color_change_count++;
+            switch (code)
+            {
+            case LV_EVENT_CLICKED:
+                self->_registry.win.cit.screen_color_test.color_change_count++;
 
-                                    switch (self->_registry.win.cit.screen_color_test.color_change_count)
-                                    {
-                                    case 1:
-                                        lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test,lv_color_hex(0x00FF00),(lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-                                    case 2:
-                                        lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test,lv_color_hex(0x00FF00),(lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-                                    case 3:
-                                        lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test,lv_color_hex(0x0000FF),(lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-                                    case 4:
-                                        lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test,lv_color_hex(0xFFFFFF),(lv_style_selector_t)LV_PART_MAIN);
-                                    break;
+                switch (self->_registry.win.cit.screen_color_test.color_change_count)
+                {
+                case 1:
+                    lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x00FF00), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+                case 2:
+                    lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x00FF00), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+                case 3:
+                    lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x0000FF), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+                case 4:
+                    lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0xFFFFFF), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+#if defined SCREEN_ROTATION_DIRECTION_0
+#if defined CONFIG_SCREEN_TYPE_HI8561
+                case 5:
+                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+                case 6:
+                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+                case 7:
+                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+#elif defined CONFIG_SCREEN_TYPE_RM69A10
+                case 5:
+                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+                case 6:
+                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+                case 7:
+                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                    break;
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+
+#elif defined SCREEN_ROTATION_DIRECTION_90
 #if defined CONFIG_SCREEN_TYPE_HI8561
                                     case 5:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_1168x540px.png"), (lv_style_selector_t)LV_PART_MAIN);
                                     break;
                                     case 6:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_1168x540px.png"), (lv_style_selector_t)LV_PART_MAIN);
                                     break;
                                     case 7:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_1168x540px.png"), (lv_style_selector_t)LV_PART_MAIN);
                                     break;
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
                                     case 5:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_1232x568px.png"), (lv_style_selector_t)LV_PART_MAIN);
                                     break;
                                     case 6:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_1232x568px.png"), (lv_style_selector_t)LV_PART_MAIN);
                                     break;
                                     case 7:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
+                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_1232x568px.png"), (lv_style_selector_t)LV_PART_MAIN);
                                     break;
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+
 #else
 #error "unknown macro definition, please select the correct macro definition."
 #endif
@@ -1456,7 +1536,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_color(_registry.win.cit.vibration_test.data_label, lv_color_black(), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_text_font(_registry.win.cit.vibration_test.data_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_label_set_text(_registry.win.cit.vibration_test.data_label, "vibration data:");
-        lv_obj_align(_registry.win.cit.vibration_test.data_label, LV_ALIGN_TOP_MID, 0, 300);
+        lv_obj_align(_registry.win.cit.vibration_test.data_label, LV_ALIGN_CENTER, 0, -50);
 
         // 创建START F0按键
         lv_obj_t *start_button = lv_button_create(container);
@@ -1465,7 +1545,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_radius(start_button, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_shadow_width(start_button, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 移除阴影
         lv_obj_set_style_bg_color(start_button, lv_color_hex(0xFF6A6A), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_align(start_button, LV_ALIGN_CENTER, 0, 300);
+        lv_obj_align_to(start_button, _registry.win.cit.vibration_test.data_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 50);
 
         lv_obj_t *start_label = lv_label_create(start_button);
         lv_obj_set_style_text_font(start_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -1758,6 +1838,8 @@ namespace Lvgl_Ui
                                         }
                                     } }, LV_EVENT_ALL, this);
 
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.microphone_test.root);
+
         init_status_bar(_registry.win.cit.microphone_test.root);
 
         lv_obj_update_layout(_registry.win.cit.microphone_test.root);
@@ -1894,6 +1976,8 @@ namespace Lvgl_Ui
                                         }
                                     } }, LV_EVENT_ALL, this);
 
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.imu_test.root);
+
         init_status_bar(_registry.win.cit.imu_test.root);
 
         lv_obj_update_layout(_registry.win.cit.imu_test.root);
@@ -2024,6 +2108,8 @@ namespace Lvgl_Ui
                                             self->_edge_touch_flag = false;
                                         }
                                     } }, LV_EVENT_ALL, this);
+
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.battery_health_test.root);
 
         init_status_bar(_registry.win.cit.battery_health_test.root);
 
@@ -2162,6 +2248,8 @@ namespace Lvgl_Ui
                                         }
                                     } }, LV_EVENT_ALL, this);
 
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.gps_test.root);
+
         init_status_bar(_registry.win.cit.gps_test.root);
 
         lv_obj_update_layout(_registry.win.cit.gps_test.root);
@@ -2299,6 +2387,8 @@ namespace Lvgl_Ui
                                         }
                                     } }, LV_EVENT_ALL, this);
 
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.ethernet_test.root);
+
         init_status_bar(_registry.win.cit.ethernet_test.root);
 
         lv_obj_update_layout(_registry.win.cit.ethernet_test.root);
@@ -2432,6 +2522,8 @@ namespace Lvgl_Ui
                                             self->_edge_touch_flag = false;
                                         }
                                     } }, LV_EVENT_ALL, this);
+
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.rtc_test.root);
 
         init_status_bar(_registry.win.cit.rtc_test.root);
 
@@ -2569,6 +2661,8 @@ namespace Lvgl_Ui
                                             self->_edge_touch_flag = false;
                                         }
                                     } }, LV_EVENT_ALL, this);
+
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.esp32c6_at_test.root);
 
         init_status_bar(_registry.win.cit.esp32c6_at_test.root);
 
@@ -4616,5 +4710,4 @@ namespace Lvgl_Ui
             _set_music_current_time_s_callback(current_time_s);
         }
     }
-
 };

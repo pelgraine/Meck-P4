@@ -105,23 +105,6 @@ menu "Example Configuration"
                 bool "RGB888"
     endchoice
 
-    choice
-        prompt "Select screen rotation direction"
-        default SCREEN_ROTATION_DIRECTION_90
-            config SCREEN_ROTATION_DIRECTION_0
-                bool "screen_rotation_direction_0"
-                depends on BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-            config SCREEN_ROTATION_DIRECTION_90
-                bool "screen_rotation_direction_90"
-                depends on BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-            config SCREEN_ROTATION_DIRECTION_180
-                bool "screen_rotation_direction_180"
-                depends on BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-            config SCREEN_ROTATION_DIRECTION_270
-                bool "screen_rotation_direction_270"
-                depends on BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-    endchoice
-
     choice BOARD_TYPE
         prompt "Board type"
         default BOARD_TYPE_T_DISPLAY_P4
@@ -175,7 +158,7 @@ menu "Example Configuration"
                 depends on BOARD_TYPE_T_DISPLAY_P4
             config EXAMPLE_BUILD_LVGL_9_UI
                 bool "lvgl_9_ui"
-                depends on BOARD_TYPE_T_DISPLAY_P4
+                depends on BOARD_TYPE_T_DISPLAY_P4 || BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
             config EXAMPLE_BUILD_PCF8563
                 bool "pcf8563"
                 depends on BOARD_TYPE_T_DISPLAY_P4

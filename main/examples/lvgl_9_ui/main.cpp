@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-08-20 10:29:16
+ * @LastEditTime: 2025-09-03 15:51:19
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -265,7 +265,13 @@ auto SX1262 = std::make_unique<Cpp_Bus_Driver::Sx126x>(SX1262_SPI_Bus, Cpp_Bus_D
 
 auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
+#if defined SCREEN_ROTATION_DIRECTION_0
 auto System_Ui = std::make_unique<Lvgl_Ui::System>(SCREEN_WIDTH, SCREEN_HEIGHT);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+auto System_Ui = std::make_unique<Lvgl_Ui::System>(SCREEN_HEIGHT, SCREEN_WIDTH);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
 auto HI8561_T_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(HI8561_TOUCH_SDA, HI8561_TOUCH_SCL, I2C_NUM_0);
@@ -1868,16 +1874,15 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
             }
         }
 
-        System_Ui->_touch_point = tp;
-
         if (tp.edge_touch_flag == true)
         {
-            tp.edge_touch_flag = false;
             System_Ui->_edge_touch_flag = true;
 
             edge_touch_scheduled_shutdown_time = esp_log_timestamp() + 100;
             edge_touch_scheduled_shutdown_lock = true;
         }
+
+        System_Ui->_touch_point = tp;
 
         tp.info.clear();
     }
@@ -1916,16 +1921,30 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
             }
         }
 
-        System_Ui->_touch_point = tp;
-
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
         if (tp.edge_touch_flag == true)
         {
-            tp.edge_touch_flag = false;
             System_Ui->_edge_touch_flag = true;
 
             edge_touch_scheduled_shutdown_time = esp_log_timestamp() + 100;
             edge_touch_scheduled_shutdown_lock = true;
         }
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+
+        if ((tp.info[0].y < 20) || ((tp.info[0].y > SCREEN_HEIGHT - 20) && (tp.info[0].y <= SCREEN_HEIGHT)))
+        {
+            tp.edge_touch_flag = true;
+            System_Ui->_edge_touch_flag = true;
+
+            edge_touch_scheduled_shutdown_time = esp_log_timestamp() + 200;
+            edge_touch_scheduled_shutdown_lock = true;
+        }
+
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+
+        System_Ui->_touch_point = tp;
 
         tp.info.clear();
     }
@@ -2217,6 +2236,12 @@ void System_Ui_Callback_Init(void)
     {
         if (Camera_Init_Status == true)
         {
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+            vTaskDelay(pdMS_TO_TICKS(1000));
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
             esp_err_t assert;
             if (status == true)
             {
@@ -2349,6 +2374,29 @@ void Lvgl_Init(void)
     // set the callback which can copy the rendered image to an area of the display
     lv_display_set_flush_cb(display, [](lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
                             {
+                                lv_display_rotation_t rotation = lv_display_get_rotation(disp);
+                                lv_area_t rotated_area;
+                                if(rotation != LV_DISPLAY_ROTATION_0) 
+                                {
+                                    lv_color_format_t cf = lv_display_get_color_format(disp);
+                                    /*Calculate the position of the rotated area*/
+                                    rotated_area = *area;
+                                    lv_display_rotate_area(disp, &rotated_area);
+                                    /*Calculate the source stride (bytes in a line) from the width of the area*/
+                                    uint32_t src_stride = lv_draw_buf_width_to_stride(lv_area_get_width(area), cf);
+                                    /*Calculate the stride of the destination (rotated) area too*/
+                                    uint32_t dest_stride = lv_draw_buf_width_to_stride(lv_area_get_width(&rotated_area), cf);
+                                    /*Have a buffer to store the rotated area and perform the rotation*/
+                                    
+                                    int32_t src_w = lv_area_get_width(area);
+                                    int32_t src_h = lv_area_get_height(area);
+                                    auto rotated_buf = std::make_unique<uint8_t[]>(SCREEN_WIDTH * SCREEN_HEIGHT* (SCREEN_BITS_PER_PIXEL/8));
+                                    lv_draw_sw_rotate(px_map, rotated_buf.get(), src_w, src_h, src_stride, dest_stride, rotation, cf);
+                                    /*Use the rotated area and rotated buffer from now on*/
+                                    area = &rotated_area;
+                                    px_map = rotated_buf.get();
+                                }
+                                
                                 esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
                                 int offsetx1 = area->x1;
                                 int offsetx2 = area->x2;
@@ -2388,6 +2436,8 @@ void Lvgl_Init(void)
     esp_timer_handle_t lvgl_tick_timer = NULL;
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, LVGL_TICK_PERIOD_MS * 1000));
+
+    lv_display_set_rotation(display, LV_DISPLAY_ROTATION);
 
     System_Ui_Callback_Init();
 }
@@ -2930,7 +2980,13 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
             .scale_x = 1,
             .scale_y = 1,
             .mirror_x = false,
+#if defined SCREEN_ROTATION_DIRECTION_0
             .mirror_y = true,
+#elif defined SCREEN_ROTATION_DIRECTION_90
+            .mirror_y = false,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
             .rgb_swap = false,
             .byte_swap = false,
             .mode = PPA_TRANS_MODE_BLOCKING,
