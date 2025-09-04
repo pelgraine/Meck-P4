@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-04 11:24:21
+ * @LastEditTime: 2025-09-04 11:27:53
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -57,7 +57,13 @@ namespace Lvgl_Ui
             {"chip free heap size:\n     ", ""},
             {"espidf version:\n     ", ""},
             {"company: ", "lilygo"},
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
             {"board name: ", "t-display-p4"},
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+            {"board name: ", "t-display-p4-keyboard"},
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
             {"software name: ", "lvgl_9_ui"},
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
