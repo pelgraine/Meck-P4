@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-08-20 09:52:08
+ * @LastEditTime: 2025-09-04 11:22:46
  * @License: GPL 3.0
  */
 #pragma once
@@ -84,6 +84,9 @@ namespace Lvgl_Ui
             CIT_RTC_TEST,
             CIT_BATTERY_HEALTH_TEST,
             CIT_TOUCH_TEST,
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+            CIT_KEYBOARD_TEST,
+#endif
             CAMERA,
             LORA,
             LORA_SETINGS,
@@ -230,6 +233,14 @@ namespace Lvgl_Ui
                     } esp32c6_at_test;
 
                     // lv_obj_t *sleep_test;
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                    struct
+                    {
+                        lv_obj_t *root;
+                        lv_obj_t *data_label;
+                    } keyboard_test;
+#endif
 
                 } cit;
 
@@ -540,6 +551,10 @@ namespace Lvgl_Ui
         void set_win_music_current_total_time(double current_time_s, double total_time_s);
         void set_music_current_time_s(double current_time_s);
         void set_music_start_end(bool status);
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+        void init_win_cit_keyboard_test(void);
+#endif
     };
 
 };

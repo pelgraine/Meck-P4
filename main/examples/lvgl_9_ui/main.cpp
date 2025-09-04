@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-03 16:49:54
+ * @LastEditTime: 2025-09-04 11:09:23
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -21,7 +21,6 @@
 #include "esp_log.h"
 #include "lvgl.h"
 #include "t_display_p4_driver.h"
-#include "t_display_p4_config.h"
 #include "cpp_bus_driver_library.h"
 #include "lvgl_ui.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
@@ -38,6 +37,11 @@
 #include "driver/ppa.h"
 #include "esp_private/esp_cache_private.h"
 #include <fstream>
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
+#include "t_display_p4_config.h"
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+#include "t_display_p4_keyboard_config.h"
+#endif
 
 #define SD_FILE_PATH_MUSIC "/sdcard/t_display_p4_lvgl_9_ui_resource/music/Eagles - Hotel California (Live on MTV, 1994).wav"
 
@@ -211,6 +215,10 @@ QueueHandle_t app_queue;
 
 esp_lcd_panel_handle_t Screen_Mipi_Dpi_Panel = NULL;
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+volatile bool TCA8418_Interrupt_Flag = false;
+#endif
+
 // IIC 1
 auto XL9535_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9535_SDA, XL9535_SCL, I2C_NUM_0);
 auto BQ27220_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(BQ27220_SDA, BQ27220_SCL, I2C_NUM_0);
@@ -220,6 +228,12 @@ auto PCF8563_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(PCF8563_
 auto SGM38121_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(SGM38121_SDA, SGM38121_SCL, I2C_NUM_1);
 auto AW86224_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(AW86224_SDA, AW86224_SCL, I2C_NUM_1);
 auto ES8311_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(ES8311_SDA, ES8311_SCL, I2C_NUM_1);
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+//  Software IIC
+auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA, XL9555_SCL);
+auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SDA, TCA8418_SCL);
+#endif
 
 // IIS
 auto ES8311_IIS_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iis>(ES8311_ADC_DATA, ES8311_DAC_DATA, ES8311_WS_LRCK, ES8311_BCLK, ES8311_MCLK, I2S_NUM_0);
@@ -247,6 +261,12 @@ auto AW86224 = std::make_unique<Cpp_Bus_Driver::Aw862xx>(AW86224_IIC_Bus, AW8622
 auto ES8311 = std::make_unique<Cpp_Bus_Driver::Es8311>(ES8311_IIC_Bus, ES8311_IIS_Bus, ES8311_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 auto ICM20948 = std::make_unique<ICM20948_WE>(&Wire1, ICM20948_IIC_ADDRESS);
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+//  Software IIC
+auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
+auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
+#endif
+
 // UART
 auto L76K = std::make_unique<Cpp_Bus_Driver::L76k>(L76K_Uart_Bus, [](bool Value) -> IRAM_ATTR bool
                                                    { return XL9535->pin_write(XL9535_GPS_WAKE_UP, static_cast<Cpp_Bus_Driver::Xl95x5::Value>(Value)); }, DEFAULT_CPP_BUS_DRIVER_VALUE);
@@ -262,8 +282,6 @@ auto ESP32C6_AT = std::make_unique<Cpp_Bus_Driver::Esp_At>(ESP32C6_AT_SDIO_Bus,
 // SPI
 auto SX1262 = std::make_unique<Cpp_Bus_Driver::Sx126x>(SX1262_SPI_Bus, Cpp_Bus_Driver::Sx126x::Chip_Type::SX1262, SX1262_BUSY,
                                                        SX1262_CS, DEFAULT_CPP_BUS_DRIVER_VALUE);
-
-auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
 #if defined SCREEN_ROTATION_DIRECTION_0
 auto System_Ui = std::make_unique<Lvgl_Ui::System>(SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -409,7 +427,7 @@ auto GT9895 = std::make_unique<Cpp_Bus_Driver::Gt9895>(GT9895_IIC_Bus, GT9895_II
 //         XL9535->pin_write(XL9535_3_3_V_POWER_EN, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
 
 //         // 背光150ma
-//         ESP32P4->start_pwm_gradient_time(0, 500);
+//         HI8561_T->start_pwm_gradient_time(0, 500);
 
 //         // Esp_Enter_Light_Sleep();
 //     }
@@ -1960,6 +1978,120 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
     // }
 }
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+void my_keyboard_read(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    static uint32_t last_key = 0; // 静态变量记录上一次按键
+    static bool pressed_state_flag = false;
+    static bool caps_lock_flag = false;
+
+    if (TCA8418_Interrupt_Flag == true)
+    {
+        Cpp_Bus_Driver::Tca8418::Irq_Status is;
+
+        if (TCA8418->parse_irq_status(TCA8418->get_irq_flag(), is) == false)
+        {
+            printf("parse_irq_status fail\n");
+        }
+        else
+        {
+            if (is.key_events_flag == true)
+            {
+                Cpp_Bus_Driver::Tca8418::Touch_Point tp;
+                if (TCA8418->get_multiple_touch_point(tp) == true)
+                {
+                    // printf("touch finger: %d\n", tp.finger_count);
+
+                    for (uint8_t i = 0; i < tp.info.size(); i++)
+                    {
+                        switch (tp.info[i].event_type)
+                        {
+                        case Cpp_Bus_Driver::Tca8418::Event_Type::KEYPAD:
+                        {
+                            Cpp_Bus_Driver::Tca8418::Touch_Position tp_2;
+                            if (TCA8418->parse_touch_num(tp.info[i].num, tp_2) == true)
+                            {
+                                // printf("keypad event\n");
+                                // printf("   touch num:[%d] num: %d x: %d y: %d press_flag: %d\n", i + 1, tp.info[i].num, tp_2.x, tp_2.y, tp.info[i].press_flag);
+                                if (tp.info[i].num <= (sizeof(Tca8418_Map) / sizeof(std::string)))
+                                {
+                                    // printf("   touch string: %s\n", Tca8418_Map[tp.info[i].num - 1].c_str());
+
+                                    if (System_Ui->get_current_win() == Lvgl_Ui::System::Current_Win::CIT_KEYBOARD_TEST)
+                                    {
+                                        lv_label_set_text(System_Ui->_registry.win.cit.keyboard_test.data_label, Tca8418_Map[tp.info[i].num - 1].c_str());
+                                    }
+                                }
+
+                                if (tp.info[i].press_flag == 1)
+                                {
+                                    pressed_state_flag = true;
+                                    if (Tca8418_Map[tp.info[i].num - 1] == "Caps")
+                                    {
+                                        caps_lock_flag = !caps_lock_flag;
+                                        if (caps_lock_flag == false)
+                                        {
+                                            XL9555->pin_write(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Value::HIGH); // 关闭LED
+                                            XL9555->pin_write(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+                                            XL9555->pin_write(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+                                        }
+                                        else
+                                        {
+                                            XL9555->pin_write(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Value::LOW); // 开启LED
+                                            XL9555->pin_write(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+                                            XL9555->pin_write(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+                                        }
+                                    }
+
+                                    last_key = Tca8418_Map_Lvgl[tp.info[i].num - 1]; // 保存最后按下的键
+                                    if (caps_lock_flag == true)
+                                    {
+                                        // 如果是小写字母，转为大写
+                                        if (last_key >= 'a' && last_key <= 'z')
+                                        {
+                                            last_key = last_key - 'a' + 'A';
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    pressed_state_flag = false;
+                                }
+                            }
+
+                            break;
+                        }
+                        case Cpp_Bus_Driver::Tca8418::Event_Type::GPIO:
+                            // printf("gpio event\n");
+                            // printf("   touch num:[%d] num: %d press_flag: %d\n", i + 1, tp.info[i].num, tp.info[i].press_flag);
+                            break;
+
+                        default:
+                            break;
+                        }
+                    }
+                }
+
+                TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
+            }
+        }
+
+        TCA8418_Interrupt_Flag = false;
+    }
+
+    if (pressed_state_flag == false)
+    {
+        data->state = LV_INDEV_STATE_RELEASED; // 释放状态
+    }
+    else
+    {
+        data->state = LV_INDEV_STATE_PRESSED; // 按下状态
+
+        data->key = last_key; // 当前按下的键值
+    }
+}
+#endif
+
 // bool Usb_Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
 // {
 //     usb_display_vendor_config_t vendor_config_usb = DEFAULT_USB_DISPLAY_VENDOR_CONFIG(SCREEN_WIDTH, SCREEN_HEIGHT,
@@ -2408,6 +2540,12 @@ void Lvgl_Init(void)
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER); /*Touchpad should have POINTER type*/
     lv_indev_set_read_cb(indev, my_touchpad_read);
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+    lv_indev_t *indev_2 = lv_indev_create();
+    lv_indev_set_type(indev_2, LV_INDEV_TYPE_KEYPAD);
+    lv_indev_set_read_cb(indev_2, my_keyboard_read);
+#endif
 
     printf("register dpi panel event callback for lvgl flush ready notification\n");
     esp_lcd_dpi_panel_event_callbacks_t cbs = {
@@ -3301,7 +3439,7 @@ extern "C" void app_main(void)
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
     // 这个必须放在以太网后面
-    ESP32P4->create_pwm(HI8561_SCREEN_BL, ledc_channel_t::LEDC_CHANNEL_0, 2000);
+    HI8561_T->create_pwm(HI8561_SCREEN_BL, ledc_channel_t::LEDC_CHANNEL_0, 2000);
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 #else
@@ -3401,8 +3539,41 @@ extern "C" void app_main(void)
     Lvgl_Startup();
     xTaskCreate(lvgl_ui_task, "lvgl_ui_task", 100 * 1024, NULL, 1, NULL);
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+    XL9555->begin();
+    XL9555->pin_mode(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_mode(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_mode(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_write(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Value::HIGH); // 关闭led
+    XL9555->pin_write(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    XL9555->pin_write(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+
+    XL9555->pin_mode(XL9555_TCA8418_RST, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_write(XL9555_TCA8418_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    XL9555->pin_write(XL9555_TCA8418_RST, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    XL9555->pin_write(XL9555_TCA8418_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    TCA8418->create_gpio_interrupt(TCA8418_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::FALLING,
+                                   [](void *arg) -> IRAM_ATTR void
+                                   {
+                                       TCA8418_Interrupt_Flag = true;
+                                   });
+
+    TCA8418->begin();
+    TCA8418->set_keypad_scan_window(0, 0, TCA8418_KEYPAD_SCAN_WIDTH, TCA8418_KEYPAD_SCAN_HEIGHT);
+    TCA8418->set_irq_pin_mode(Cpp_Bus_Driver::Tca8418::Irq_Mask::KEY_EVENTS);
+    TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
+
+    TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_1, 2000);
+    TCA8418->start_pwm_gradient_time(30, 1000);
+
+#endif
+
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    ESP32P4->start_pwm_gradient_time(100, 500);
+    HI8561_T->start_pwm_gradient_time(100, 500);
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
     for (uint8_t i = 0; i < 255; i += 5)
     {

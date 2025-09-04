@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-03 16:16:15
+ * @LastEditTime: 2025-09-04 11:24:21
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -40,7 +40,10 @@ namespace Lvgl_Ui
             {"ethernet test", LV_SYMBOL_WARNING, 0xFFA500},
             {"rtc test", LV_SYMBOL_WARNING, 0xFFA500},
             {"esp32c6 at test", LV_SYMBOL_WARNING, 0xFFA500},
-            // {"sleep test", LV_SYMBOL_WARNING, 0xFFA500},
+// {"sleep test", LV_SYMBOL_WARNING, 0xFFA500},
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+            {"keyboard test", LV_SYMBOL_WARNING, 0xFFA500},
+#endif
     };
 
     System::Device_Information System::_device_information_list[] =
@@ -83,7 +86,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202509031616"},
+            {"firmware build date:\n     ", "202509041117"},
     };
 
     void System::begin()
@@ -1081,6 +1084,26 @@ namespace Lvgl_Ui
                                 default:
                                 break;
                                 } }, LV_EVENT_ALL, this);
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+        lv_obj_add_event_cb(list_button[12], [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
+
+                                switch (code)
+                                {
+                                case LV_EVENT_CLICKED:
+                                self->_registry.win.cit.current_test_item_index = 12;
+
+                                self->init_win_cit_keyboard_test();
+
+                                lv_screen_load_anim(self->_registry.win.cit.keyboard_test.root, LV_SCR_LOAD_ANIM_MOVE_LEFT, 100, 0, true);
+                                break;
+                                default:
+                                break;
+                                } }, LV_EVENT_ALL, this);
+#endif
 
         // lv_obj_add_event_cb(list_button[12], [](lv_event_t *e)
         //                     {
@@ -4710,4 +4733,66 @@ namespace Lvgl_Ui
             _set_music_current_time_s_callback(current_time_s);
         }
     }
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+    void System::init_win_cit_keyboard_test(void)
+    {
+        // 主界面
+        _registry.win.cit.keyboard_test.root = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(_registry.win.cit.keyboard_test.root, lv_color_hex(0xFF7F58), (lv_style_selector_t)LV_PART_MAIN);
+        lv_obj_set_size(_registry.win.cit.keyboard_test.root, _width, _height);
+        lv_obj_set_scrollbar_mode(_registry.win.cit.keyboard_test.root, LV_SCROLLBAR_MODE_OFF);
+
+        // 创建标题
+        lv_obj_t *title_label = lv_label_create(_registry.win.cit.keyboard_test.root);
+        lv_label_set_text(title_label, "Keyboard");
+        lv_obj_set_style_text_color(title_label, lv_color_white(), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_align(title_label, LV_TEXT_ALIGN_LEFT, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(title_label, &lv_font_montserrat_48, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(title_label, _width - 100, 40);
+        lv_obj_align(title_label, LV_ALIGN_TOP_LEFT, 20, 10 + 50);
+
+        // 创建容器
+        lv_obj_t *container = lv_obj_create(_registry.win.cit.keyboard_test.root);
+        lv_obj_set_size(container, _width, _height - 50 - 80 - 140);
+        lv_obj_align(container, LV_ALIGN_TOP_MID, 0, 50 + 80);
+        lv_obj_set_style_bg_color(container, lv_color_white(), (lv_style_selector_t)LV_PART_MAIN); // 设置背景颜色为白色
+        lv_obj_set_style_radius(container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
+
+        // 创建一个标签用于显示键盘数据
+        _registry.win.cit.keyboard_test.data_label = lv_label_create(container);
+        lv_obj_set_style_text_color(_registry.win.cit.keyboard_test.data_label, lv_color_black(), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(_registry.win.cit.keyboard_test.data_label, &lv_font_montserrat_48, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_label_set_text(_registry.win.cit.keyboard_test.data_label, "null");
+        lv_obj_align(_registry.win.cit.keyboard_test.data_label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+        // 创建一个半透明文本框
+        lv_obj_t *textarea = lv_textarea_create(container);
+        lv_obj_set_width(textarea, 600);
+        lv_obj_set_height(textarea, 200);
+        lv_obj_set_style_text_font(textarea, &lv_font_montserrat_24, 0);
+        lv_obj_center(textarea);
+
+        // 查找类型为KEYPAD的输入设备
+        lv_indev_t *indev_iter = lv_indev_get_next(NULL);
+        if (indev_iter != nullptr)
+        {
+            lv_group_t *group = lv_group_create();
+            lv_group_add_obj(group, textarea);
+            lv_indev_set_group(indev_iter, group);
+        }
+
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.keyboard_test.root);
+
+        add_event_cb_win_return_to_cit(_registry.win.cit.keyboard_test.root);
+
+        init_status_bar(_registry.win.cit.keyboard_test.root);
+
+        lv_obj_update_layout(_registry.win.cit.keyboard_test.root);
+
+        _current_win = Current_Win::CIT_KEYBOARD_TEST;
+    }
+
+#endif
 };

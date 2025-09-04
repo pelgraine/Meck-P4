@@ -2,7 +2,7 @@
  * @Description: t_display_p4_keyboard_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-09-03 18:06:00
+ * @LastEditTime: 2025-09-04 11:11:55
  */
 #pragma once
 #include "t_display_p4_config.h"
@@ -105,9 +105,9 @@ constexpr const uint32_t Tca8418_Map_Lvgl[] =
         0x8F,         // Win  自定义值
         0x90,         // Shift  自定义值
         LV_KEY_NEXT,  // Tab
-        LV_KEY_ENTER, // Space
-        LV_KEY_ENTER, // Space
-        LV_KEY_ENTER, // Space
+        ' ', // Space
+        ' ', // Space
+        ' ', // Space
         0x8E,         // Fn 自定义值
         LV_KEY_LEFT,
         LV_KEY_DOWN,
