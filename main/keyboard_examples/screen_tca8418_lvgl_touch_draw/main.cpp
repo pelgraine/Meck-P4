@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-09-04 09:33:14
+ * @LastEditTime: 2025-09-04 15:50:08
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -496,12 +496,22 @@ void Lvgl_Keyboard_Init(void)
     lv_obj_remove_flag(ta, LV_OBJ_FLAG_CLICKABLE);
 
     // 查找类型为KEYPAD的输入设备
+    lv_indev_t *kb_indev = nullptr;
     lv_indev_t *indev_iter = lv_indev_get_next(NULL);
-    if (indev_iter != nullptr)
+    while (indev_iter)
     {
-        lv_group_t *g = lv_group_create();
-        lv_group_add_obj(g, ta);
-        lv_indev_set_group(indev_iter, g);
+        if (lv_indev_get_type(indev_iter) == LV_INDEV_TYPE_KEYPAD)
+        {
+            kb_indev = indev_iter;
+            break;
+        }
+        indev_iter = lv_indev_get_next(indev_iter);
+    }
+    if (kb_indev != nullptr)
+    {
+        lv_group_t *group = lv_group_create();
+        lv_group_add_obj(group, ta);
+        lv_indev_set_group(kb_indev, group);
     }
 
     // 创建一个标签并居中显示
