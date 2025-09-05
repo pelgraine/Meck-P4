@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-04 11:27:53
+ * @LastEditTime: 2025-09-05 10:13:47
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -153,6 +153,11 @@ namespace Lvgl_Ui
         _device_information_list[6].info = free_heap_size_str;
 
         _device_information_list[7].info = esp_get_idf_version();
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+        _registry.keyboard_group = lv_group_create();
+        set_keyboard_group(_registry.keyboard_group);
+#endif
 
         init_win_home();
         // lv_screen_load(_registry.win.home.root);
@@ -2949,6 +2954,7 @@ namespace Lvgl_Ui
                                     }
                                 } }, LV_EVENT_ALL, this);
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
         _registry.keyboard = lv_keyboard_create(_registry.win.lora.root);
         lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
         lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -2960,18 +2966,19 @@ namespace Lvgl_Ui
         lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
 
         lv_keyboard_set_textarea(_registry.keyboard, _registry.win.lora.chat_textarea);
+#endif
 
         lv_obj_add_event_cb(_registry.win.lora.chat_textarea, [](lv_event_t *e)
                             {
                                 System *self = static_cast<System *>(lv_event_get_user_data(e));
                                 lv_event_code_t code = lv_event_get_code(e);
-
-                                lv_obj_t *ta = lv_event_get_target_obj(e);
+                                lv_obj_t *textarea = lv_event_get_target_obj(e);
 
                                 switch (code)
                                 {
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
                                 case LV_EVENT_FOCUSED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, ta);
+                                        lv_keyboard_set_textarea(self->_registry.keyboard, textarea);
                                         lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
                                         lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
 
@@ -2982,7 +2989,15 @@ namespace Lvgl_Ui
                                         lv_obj_align_to(self->_registry.win.lora.send_box_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0);
                                         lv_obj_align_to(self->_registry.win.lora.chat_message_container, self->_registry.win.lora.send_box_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
                                     break;
-                                case LV_EVENT_DEFOCUSED:
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                                case LV_EVENT_CLICKED:
+                                    lv_group_remove_all_objs(self->_registry.keyboard_group);
+                                    lv_group_add_obj(self -> _registry.keyboard_group, textarea);
+                                    break;
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+                                // case LV_EVENT_DEFOCUSED:
                                     //     lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
 
                                     //     // 调整聊天框的大小
@@ -2990,10 +3005,10 @@ namespace Lvgl_Ui
                                     //     // 恢复容器位置
                                     //     lv_obj_align(self->_registry.win.lora.send_box_container, LV_ALIGN_BOTTOM_MID, 0, 0);
                                     //     lv_obj_align_to(self->_registry.win.lora.chat_message_container, self->_registry.win.lora.send_box_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-                                    break;
+                                    // break;
                                 case LV_EVENT_READY:
                                     {
-                                        // printf("Ready, current text: %s", lv_textarea_get_text(ta));
+                                        // printf("Ready, current text: %s", lv_textarea_get_text(textarea));
 
                                         // lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
 
@@ -3004,14 +3019,14 @@ namespace Lvgl_Ui
                                         // lv_obj_align_to(self->_registry.win.lora.chat_message_container, self->_registry.win.lora.send_box_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
 
                                         // 获取当前输入框内容
-                                        std::string text = lv_textarea_get_text(self->_registry.win.lora.chat_textarea);
+                                        std::string text = lv_textarea_get_text(textarea);
 
                                         //如果消息不为空
                                         if (!text.empty())
                                         {
                                             char buffer_time[15];
                                             snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", self->_time.hour , self-> _time.minute , self->_time.second);
-            
+
                                             Win_Lora_Chat_Message wlcm =
                                             {
                                                 .direction = Chat_Message_Direction::SEND,
@@ -3021,14 +3036,14 @@ namespace Lvgl_Ui
                                             self->_registry.win.lora.chat_message_data.push_back(wlcm);
 
                                             // 清空输入框
-                                            lv_textarea_set_text(self->_registry.win.lora.chat_textarea, "");
+                                            lv_textarea_set_text(textarea, "");
 
                                             // 更新聊天容器
                                             self->win_lora_chat_message_data_update(self->_registry.win.lora.chat_message_data);
                                         }
                                     }
                                     break;
-                                
+
                                 default:
                                     break;
                                 } }, LV_EVENT_ALL, this);
@@ -3042,6 +3057,7 @@ namespace Lvgl_Ui
         lv_obj_align_to(_registry.win.lora.chat_message_container, _registry.win.lora.send_box_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
         lv_obj_set_scrollbar_mode(_registry.win.lora.chat_message_container, LV_SCROLLBAR_MODE_ACTIVE);
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
         // 触摸聊天区域时隐藏键盘
         lv_obj_add_event_cb(_registry.win.lora.chat_message_container, [](lv_event_t *e)
                             {
@@ -3058,6 +3074,17 @@ namespace Lvgl_Ui
                                 lv_obj_align(self->_registry.win.lora.send_box_container, LV_ALIGN_BOTTOM_MID, 0, 0);
                                 lv_obj_align_to(self->_registry.win.lora.chat_message_container, self->_registry.win.lora.send_box_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
                                 } }, LV_EVENT_ALL, this);
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+        lv_obj_add_event_cb(_registry.win.lora.chat_message_container, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
+
+                                if (code == LV_EVENT_CLICKED)
+                                {
+                                    lv_group_remove_obj(self -> _registry.win.lora.chat_textarea);
+                                } }, LV_EVENT_ALL, this);
+#endif
 
         win_lora_chat_message_data_update(_registry.win.lora.chat_message_data);
 
@@ -3315,6 +3342,85 @@ namespace Lvgl_Ui
         _current_win = Current_Win::LORA_SETINGS;
     }
 
+    void System::init_win_lora_setings_keyboard_position_event_cb(lv_obj_t *parent)
+    {
+        lv_obj_add_event_cb(parent, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
+                                lv_obj_t *textarea = lv_event_get_target_obj(e); // 直接获取目标文本区域
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
+                                switch (code)
+                                {
+                                case LV_EVENT_CLICKED:
+                                    lv_keyboard_set_textarea(self->_registry.keyboard, textarea);
+                                    lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN);  // 显示键盘
+                                    lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
+
+                                    // 调整消息框的大小
+                                    lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
+                                    lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0);
+                                    lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
+                                    lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
+                                    lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
+
+                                    break;
+                                case LV_EVENT_FOCUSED:
+                                    lv_keyboard_set_textarea(self->_registry.keyboard, textarea);
+                                    lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN);  // 显示键盘
+                                    lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
+
+                                    // 调整消息框的大小
+                                    lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
+                                    lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0);
+                                    lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
+                                    lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
+                                    lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
+
+                                    break;
+
+                                // case LV_EVENT_DEFOCUSED:
+                                //         lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
+
+                                //     break;
+                                case LV_EVENT_READY:
+                                    // printf("Ready, current text: %s", lv_textarea_get_text(textarea));
+
+                                    lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
+
+                                    // 调整聊天框的大小
+                                    lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 900);
+                                    lv_obj_center(self->_registry.win.lora.setings.message_box.root_container);
+
+                                    break;
+
+                                default:
+                                    break;
+                                }
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                                switch (code)
+                                {
+                                case LV_EVENT_CLICKED:
+                                    lv_group_remove_all_objs(self->_registry.keyboard_group);
+                                    lv_group_add_obj(self->_registry.keyboard_group, textarea);
+                                    break;
+                                case LV_EVENT_READY:
+                                    // printf("Ready, current text: %s", lv_textarea_get_text(textarea));
+
+                                    lv_group_remove_obj(textarea);
+                                    break;
+
+                                default:
+                                    break;
+                                }
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+                            },
+                            LV_EVENT_ALL, this);
+    }
+
     void System::init_win_lora_setings_config_lora_params_message_box(void)
     {
         // 创建全屏灰色透明遮罩，禁止触摸
@@ -3336,7 +3442,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_bottom(_registry.win.lora.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_left(_registry.win.lora.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_right(_registry.win.lora.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_size(_registry.win.lora.setings.message_box.root_container, 450, 900);
+        lv_obj_set_size(_registry.win.lora.setings.message_box.root_container, 450, _height * 0.7);
         lv_obj_set_style_radius(_registry.win.lora.setings.message_box.root_container, 15, LV_PART_MAIN);
         lv_obj_set_style_bg_color(_registry.win.lora.setings.message_box.root_container, lv_color_white(), LV_PART_MAIN);
         lv_obj_set_style_border_width(_registry.win.lora.setings.message_box.root_container, 0, LV_PART_MAIN);
@@ -3459,6 +3565,7 @@ namespace Lvgl_Ui
 
                                 lv_obj_delete(self->_registry.win.lora.setings.message_box.root); }, LV_EVENT_CLICKED, this);
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
         _registry.keyboard = lv_keyboard_create(_registry.win.lora.setings.message_box.root);
         lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
         lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -3468,17 +3575,19 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
         lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
+#endif
 
         _registry.win.lora.setings.message_box.parameter_container = lv_obj_create(_registry.win.lora.setings.message_box.root_container);
         lv_obj_set_style_pad_top(_registry.win.lora.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.lora.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_left(_registry.win.lora.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_right(_registry.win.lora.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_size(_registry.win.lora.setings.message_box.parameter_container, 450, 780);
+        lv_obj_set_size(_registry.win.lora.setings.message_box.parameter_container, 450, _height * 0.5);
         lv_obj_set_style_border_width(_registry.win.lora.setings.message_box.parameter_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
         lv_obj_set_scrollbar_mode(_registry.win.lora.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
         lv_obj_align_to(_registry.win.lora.setings.message_box.parameter_container, _registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
         // 触摸lora设置消息框区域时隐藏键盘
         lv_obj_add_event_cb(_registry.win.lora.setings.message_box.parameter_container, [](lv_event_t *e)
                             {
@@ -3497,6 +3606,7 @@ namespace Lvgl_Ui
                                     lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
 
                                 } }, LV_EVENT_ALL, this);
+#endif
 
         lv_obj_t *msgbox_rf_switch_text = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_label_set_text(msgbox_rf_switch_text, "rf switch");
@@ -3560,58 +3670,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.lora.setings.config_lora_params.textarea.freq, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(_registry.win.lora.setings.config_lora_params.textarea.freq, msgbox_freq_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
 
-        lv_obj_add_event_cb(_registry.win.lora.setings.config_lora_params.textarea.freq, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.freq);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-                                case LV_EVENT_FOCUSED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.freq);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-
-                                // case LV_EVENT_DEFOCUSED:
-                                //         lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                //     break;
-                                case LV_EVENT_READY:
-                                        // printf("Ready, current text: %s", lv_textarea_get_text(ta));
-
-                                        lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                        // 调整聊天框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 900);
-                                        lv_obj_center(self->_registry.win.lora.setings.message_box.root_container);
-
-                                    break;
-                                
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
+        init_win_lora_setings_keyboard_position_event_cb(_registry.win.lora.setings.config_lora_params.textarea.freq);
 
         lv_obj_t *freq_unit_text = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_label_set_text(freq_unit_text, "mhz");
@@ -3699,58 +3758,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.lora.setings.config_lora_params.textarea.current_limit, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(_registry.win.lora.setings.config_lora_params.textarea.current_limit, msgbox_current_limit_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
 
-        lv_obj_add_event_cb(_registry.win.lora.setings.config_lora_params.textarea.current_limit, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.current_limit);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-                                case LV_EVENT_FOCUSED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.current_limit);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-
-                                // case LV_EVENT_DEFOCUSED:
-                                //         lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                //     break;
-                                case LV_EVENT_READY:
-                                        // printf("Ready, current text: %s", lv_textarea_get_text(ta));
-
-                                        lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                        // 调整聊天框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 900);
-                                        lv_obj_center(self->_registry.win.lora.setings.message_box.root_container);
-
-                                    break;
-                                
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
+        init_win_lora_setings_keyboard_position_event_cb(_registry.win.lora.setings.config_lora_params.textarea.current_limit);
 
         lv_obj_t *current_limit_unit_text = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_label_set_text(current_limit_unit_text, "ma");
@@ -3777,58 +3785,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.lora.setings.config_lora_params.textarea.power, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(_registry.win.lora.setings.config_lora_params.textarea.power, msgbox_power_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
 
-        lv_obj_add_event_cb(_registry.win.lora.setings.config_lora_params.textarea.power, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.power);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-                                case LV_EVENT_FOCUSED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.power);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-
-                                // case LV_EVENT_DEFOCUSED:
-                                //         lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                //     break;
-                                case LV_EVENT_READY:
-                                        // printf("Ready, current text: %s", lv_textarea_get_text(ta));
-
-                                        lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                        // 调整聊天框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 900);
-                                        lv_obj_center(self->_registry.win.lora.setings.message_box.root_container);
-
-                                    break;
-                                
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
+        init_win_lora_setings_keyboard_position_event_cb(_registry.win.lora.setings.config_lora_params.textarea.power);
 
         lv_obj_t *power_unit_text = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_label_set_text(power_unit_text, "dbm");
@@ -3992,58 +3949,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.lora.setings.config_lora_params.textarea.preamble_length, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(_registry.win.lora.setings.config_lora_params.textarea.preamble_length, msgbox_preamble_length, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
 
-        lv_obj_add_event_cb(_registry.win.lora.setings.config_lora_params.textarea.preamble_length, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.preamble_length);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-                                case LV_EVENT_FOCUSED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.preamble_length);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-
-                                // case LV_EVENT_DEFOCUSED:
-                                //         lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                //     break;
-                                case LV_EVENT_READY:
-                                        // printf("Ready, current text: %s", lv_textarea_get_text(ta));
-
-                                        lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                        // 调整聊天框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 900);
-                                        lv_obj_center(self->_registry.win.lora.setings.message_box.root_container);
-
-                                    break;
-                                
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
+        init_win_lora_setings_keyboard_position_event_cb(_registry.win.lora.setings.config_lora_params.textarea.preamble_length);
 
         lv_obj_t *msgbox_sync_word = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_label_set_text(msgbox_sync_word, "sync word");
@@ -4064,58 +3970,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.lora.setings.config_lora_params.textarea.sync_word, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(_registry.win.lora.setings.config_lora_params.textarea.sync_word, msgbox_sync_word, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
 
-        lv_obj_add_event_cb(_registry.win.lora.setings.config_lora_params.textarea.sync_word, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.sync_word);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-                                case LV_EVENT_FOCUSED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.config_lora_params.textarea.sync_word);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-
-                                // case LV_EVENT_DEFOCUSED:
-                                //         lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                //     break;
-                                case LV_EVENT_READY:
-                                        // printf("Ready, current text: %s", lv_textarea_get_text(ta));
-
-                                        lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                        // 调整聊天框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 900);
-                                        lv_obj_center(self->_registry.win.lora.setings.message_box.root_container);
-
-                                    break;
-                                
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
+        init_win_lora_setings_keyboard_position_event_cb(_registry.win.lora.setings.config_lora_params.textarea.sync_word);
     }
 
     void System::init_win_lora_setings_auto_send_message_box(void)
@@ -4139,7 +3994,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_bottom(_registry.win.lora.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_left(_registry.win.lora.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_right(_registry.win.lora.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_size(_registry.win.lora.setings.message_box.root_container, 450, 900);
+        lv_obj_set_size(_registry.win.lora.setings.message_box.root_container, 450, _height * 0.7);
         lv_obj_set_style_radius(_registry.win.lora.setings.message_box.root_container, 15, LV_PART_MAIN);
         lv_obj_set_style_bg_color(_registry.win.lora.setings.message_box.root_container, lv_color_white(), LV_PART_MAIN);
         lv_obj_set_style_border_width(_registry.win.lora.setings.message_box.root_container, 0, LV_PART_MAIN);
@@ -4208,6 +4063,7 @@ namespace Lvgl_Ui
 
                                 lv_obj_delete(self->_registry.win.lora.setings.message_box.root); }, LV_EVENT_CLICKED, this);
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
         _registry.keyboard = lv_keyboard_create(_registry.win.lora.setings.message_box.root);
         lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
         lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -4217,13 +4073,14 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
         lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
+#endif
 
         _registry.win.lora.setings.message_box.parameter_container = lv_obj_create(_registry.win.lora.setings.message_box.root_container);
         lv_obj_set_style_pad_top(_registry.win.lora.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.lora.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_left(_registry.win.lora.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_right(_registry.win.lora.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_size(_registry.win.lora.setings.message_box.parameter_container, 450, 780);
+        lv_obj_set_size(_registry.win.lora.setings.message_box.parameter_container, 450, _height * 0.5);
         lv_obj_set_style_border_width(_registry.win.lora.setings.message_box.parameter_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
         lv_obj_set_scrollbar_mode(_registry.win.lora.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
         lv_obj_align_to(_registry.win.lora.setings.message_box.parameter_container, _registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
@@ -4282,58 +4139,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.lora.setings.auto_send.textarea.auto_send_text, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(_registry.win.lora.setings.auto_send.textarea.auto_send_text, msgbox_auto_send_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
 
-        lv_obj_add_event_cb(_registry.win.lora.setings.auto_send.textarea.auto_send_text, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.auto_send.textarea.auto_send_text);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-                                case LV_EVENT_FOCUSED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.auto_send.textarea.auto_send_text);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-
-                                // case LV_EVENT_DEFOCUSED:
-                                //         lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                //     break;
-                                case LV_EVENT_READY:
-                                        // printf("Ready, current text: %s", lv_textarea_get_text(ta));
-
-                                        lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                        // 调整聊天框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 900);
-                                        lv_obj_center(self->_registry.win.lora.setings.message_box.root_container);
-
-                                    break;
-                                
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
+        init_win_lora_setings_keyboard_position_event_cb(_registry.win.lora.setings.auto_send.textarea.auto_send_text);
 
         lv_obj_t *msgbox_auto_send_interval = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_label_set_text(msgbox_auto_send_interval, "auto send interval");
@@ -4354,58 +4160,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.lora.setings.auto_send.textarea.auto_send_interval, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(_registry.win.lora.setings.auto_send.textarea.auto_send_interval, msgbox_auto_send_interval, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
 
-        lv_obj_add_event_cb(_registry.win.lora.setings.auto_send.textarea.auto_send_interval, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.auto_send.textarea.auto_send_interval);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-                                case LV_EVENT_FOCUSED:
-                                        lv_keyboard_set_textarea(self->_registry.keyboard, self->_registry.win.lora.setings.auto_send.textarea.auto_send_interval);
-                                        lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
-                                        lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                        // 调整消息框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 800);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0); 
-                                        lv_obj_align(self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.parameter_container, 450, 680);
-                                        lv_obj_align_to(self->_registry.win.lora.setings.message_box.parameter_container, self->_registry.win.lora.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
-
-                                // case LV_EVENT_DEFOCUSED:
-                                //         lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                //     break;
-                                case LV_EVENT_READY:
-                                        // printf("Ready, current text: %s", lv_textarea_get_text(ta));
-
-                                        lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                        // 调整聊天框的大小
-                                        lv_obj_set_size(self->_registry.win.lora.setings.message_box.root_container, 450, 900);
-                                        lv_obj_center(self->_registry.win.lora.setings.message_box.root_container);
-
-                                    break;
-                                
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
+        init_win_lora_setings_keyboard_position_event_cb(_registry.win.lora.setings.auto_send.textarea.auto_send_interval);
 
         lv_obj_t *auto_send_interval_unit_text = lv_label_create(_registry.win.lora.setings.message_box.parameter_container);
         lv_label_set_text(auto_send_interval_unit_text, "ms");
@@ -4780,14 +4535,8 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(textarea, &lv_font_montserrat_24, 0);
         lv_obj_center(textarea);
 
-        // 查找类型为KEYPAD的输入设备
-        lv_indev_t *indev_iter = lv_indev_get_next(NULL);
-        if (indev_iter != nullptr)
-        {
-            lv_group_t *group = lv_group_create();
-            lv_group_add_obj(group, textarea);
-            lv_indev_set_group(indev_iter, group);
-        }
+        lv_group_remove_all_objs(_registry.keyboard_group);
+        lv_group_add_obj(_registry.keyboard_group, textarea);
 
         add_win_cit_test_item_pass_fail_button(_registry.win.cit.keyboard_test.root);
 
@@ -4798,6 +4547,29 @@ namespace Lvgl_Ui
         lv_obj_update_layout(_registry.win.cit.keyboard_test.root);
 
         _current_win = Current_Win::CIT_KEYBOARD_TEST;
+    }
+
+    bool System::set_keyboard_group(lv_group_t *group)
+    {
+        // 查找类型为KEYPAD的输入设备
+        lv_indev_t *kb_indev = nullptr;
+        lv_indev_t *indev_iter = lv_indev_get_next(NULL);
+        while (indev_iter)
+        {
+            if (lv_indev_get_type(indev_iter) == LV_INDEV_TYPE_KEYPAD)
+            {
+                kb_indev = indev_iter;
+                break;
+            }
+            indev_iter = lv_indev_get_next(indev_iter);
+        }
+        if (kb_indev == nullptr)
+        {
+            return false;
+        }
+
+        lv_indev_set_group(kb_indev, group);
+        return true;
     }
 
 #endif

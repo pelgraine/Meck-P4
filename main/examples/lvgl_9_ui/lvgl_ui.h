@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-04 11:22:46
+ * @LastEditTime: 2025-09-04 18:09:06
  * @License: GPL 3.0
  */
 #pragma once
@@ -116,6 +116,7 @@ namespace Lvgl_Ui
         struct Registry
         {
             lv_obj_t *keyboard;
+            lv_group_t *keyboard_group;
 
             struct
             {
@@ -540,6 +541,7 @@ namespace Lvgl_Ui
         void win_lora_chat_message_data_update(std::vector<Win_Lora_Chat_Message> wlcm);
 
         void init_win_lora_setings(void);
+        void init_win_lora_setings_keyboard_position_event_cb(lv_obj_t *parent);
         void init_win_lora_setings_config_lora_params_message_box(void);
         void init_win_lora_setings_auto_send_message_box(void);
         bool set_config_lora_params(Device_Lora device_lora);
@@ -554,6 +556,7 @@ namespace Lvgl_Ui
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         void init_win_cit_keyboard_test(void);
+        bool set_keyboard_group(lv_group_t *group);
 #endif
     };
 
