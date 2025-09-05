@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-05 10:13:47
+ * @LastEditTime: 2025-09-05 10:34:19
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -2950,6 +2950,7 @@ namespace Lvgl_Ui
                                         // 更新聊天容器
                                         self->win_lora_chat_message_data_update(self->_registry.win.lora.chat_message_data);
 
+                                        //发送数据
                                         self->set_lora_send_data_callback(text);
                                     }
                                 } }, LV_EVENT_ALL, this);
@@ -3040,6 +3041,9 @@ namespace Lvgl_Ui
 
                                             // 更新聊天容器
                                             self->win_lora_chat_message_data_update(self->_registry.win.lora.chat_message_data);
+
+                                            //发送数据
+                                            self->set_lora_send_data_callback(text);
                                         }
                                     }
                                     break;
