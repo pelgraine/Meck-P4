@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-08 14:08:31
+ * @LastEditTime: 2025-09-08 14:22:18
  * @License: GPL 3.0
  */
 #pragma once
@@ -89,8 +89,8 @@ namespace Lvgl_Ui
             CIT_NFC_TEST,
 #endif
             CAMERA,
-            LORA,
-            LORA_SETINGS,
+            RF,
+            RF_SETINGS,
             MUSIC,
         };
 

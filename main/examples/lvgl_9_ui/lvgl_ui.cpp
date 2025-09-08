@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-08 14:14:34
+ * @LastEditTime: 2025-09-08 14:22:23
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -3141,7 +3141,7 @@ namespace Lvgl_Ui
 
         set_rf_status_callback(true);
 
-        _current_win = Current_Win::LORA;
+        _current_win = Current_Win::RF;
     }
 
     void System::win_rf_chat_message_data_update(std::vector<Win_Rf_Chat_Message> wlcm)
@@ -3390,7 +3390,7 @@ namespace Lvgl_Ui
 
         lv_obj_update_layout(_registry.win.rf.setings.root);
 
-        _current_win = Current_Win::LORA_SETINGS;
+        _current_win = Current_Win::RF_SETINGS;
     }
 
     void System::init_win_rf_setings_keyboard_position_event_cb(lv_obj_t *parent)

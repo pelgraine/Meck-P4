@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-08 11:59:08
+ * @LastEditTime: 2025-09-08 14:22:14
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -1502,7 +1502,7 @@ void device_sx1262_task(void *arg)
                         };
                     System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
 
-                    if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::LORA)
+                    if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::RF)
                     {
                         // 更新聊天容器
                         _lock_acquire(&lvgl_api_lock);
@@ -1655,7 +1655,7 @@ void device_sx1262_task(void *arg)
                             };
                         System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
 
-                        if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::LORA)
+                        if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::RF)
                         {
                             // 更新聊天容器
                             _lock_acquire(&lvgl_api_lock);
