@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-04 18:09:06
+ * @LastEditTime: 2025-09-05 15:21:35
  * @License: GPL 3.0
  */
 #pragma once
@@ -86,6 +86,7 @@ namespace Lvgl_Ui
             CIT_TOUCH_TEST,
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
             CIT_KEYBOARD_TEST,
+            CIT_NFC_TEST,
 #endif
             CAMERA,
             LORA,
@@ -241,6 +242,12 @@ namespace Lvgl_Ui
                         lv_obj_t *root;
                         lv_obj_t *data_label;
                     } keyboard_test;
+
+                    struct
+                    {
+                        lv_obj_t *root;
+                        lv_obj_t *data_label;
+                    } nfc_test;
 #endif
 
                 } cit;
@@ -555,8 +562,14 @@ namespace Lvgl_Ui
         void set_music_start_end(bool status);
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+        void (*_win_cit_nfc_test_callback)(bool status) = nullptr;
+
+        void set_nfc_test(bool status);
+
         void init_win_cit_keyboard_test(void);
         bool set_keyboard_group(lv_group_t *group);
+
+        void init_win_cit_nfc_test(void);
 #endif
     };
 

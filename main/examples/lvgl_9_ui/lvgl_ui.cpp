@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-05 10:34:19
+ * @LastEditTime: 2025-09-08 10:37:16
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -43,6 +43,7 @@ namespace Lvgl_Ui
 // {"sleep test", LV_SYMBOL_WARNING, 0xFFA500},
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
             {"keyboard test", LV_SYMBOL_WARNING, 0xFFA500},
+            {"nfc test", LV_SYMBOL_WARNING, 0xFFA500},
 #endif
     };
 
@@ -92,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202509041117"},
+            {"firmware build date:\n     ", "202509081037"},
     };
 
     void System::begin()
@@ -1110,6 +1111,24 @@ namespace Lvgl_Ui
                                 self->init_win_cit_keyboard_test();
 
                                 lv_screen_load_anim(self->_registry.win.cit.keyboard_test.root, LV_SCR_LOAD_ANIM_MOVE_LEFT, 100, 0, true);
+                                break;
+                                default:
+                                break;
+                                } }, LV_EVENT_ALL, this);
+
+        lv_obj_add_event_cb(list_button[13], [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
+
+                                switch (code)
+                                {
+                                case LV_EVENT_CLICKED:
+                                self->_registry.win.cit.current_test_item_index = 13;
+
+                                self->init_win_cit_nfc_test();
+
+                                lv_screen_load_anim(self->_registry.win.cit.nfc_test.root, LV_SCR_LOAD_ANIM_MOVE_LEFT, 100, 0, true);
                                 break;
                                 default:
                                 break;
@@ -2993,7 +3012,7 @@ namespace Lvgl_Ui
 #elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
                                 case LV_EVENT_CLICKED:
                                     lv_group_remove_all_objs(self->_registry.keyboard_group);
-                                    lv_group_add_obj(self -> _registry.keyboard_group, textarea);
+                                    lv_group_add_obj(self->_registry.keyboard_group, textarea);
                                     break;
 #else
 #error "unknown macro definition, please select the correct macro definition."
@@ -3086,7 +3105,7 @@ namespace Lvgl_Ui
 
                                 if (code == LV_EVENT_CLICKED)
                                 {
-                                    lv_group_remove_obj(self -> _registry.win.lora.chat_textarea);
+                                    lv_group_remove_obj(self->_registry.win.lora.chat_textarea);
                                 } }, LV_EVENT_ALL, this);
 #endif
 
@@ -4542,6 +4561,29 @@ namespace Lvgl_Ui
         lv_group_remove_all_objs(_registry.keyboard_group);
         lv_group_add_obj(_registry.keyboard_group, textarea);
 
+        lv_obj_add_event_cb(_registry.win.cit.keyboard_test.root, [](lv_event_t *e)
+                            {
+                                    System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                    lv_event_code_t code = lv_event_get_code(e);
+    
+                                    if (code == LV_EVENT_GESTURE)
+                                    {
+                                        lv_dir_t gesture_dir = lv_indev_get_gesture_dir(lv_indev_active());
+    
+                                        // 边缘检测以及左右滑动
+                                        if ((gesture_dir == LV_DIR_LEFT || gesture_dir == LV_DIR_RIGHT)&&(self->_edge_touch_flag == true))
+                                        {
+                                            lv_group_remove_all_objs(self->_registry.keyboard_group);
+                                            
+                                            self->set_vibration();
+                                            self->init_win_cit();
+                                            
+                                            lv_screen_load_anim(self->_registry.win.cit.root, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 100, 0, true);
+    
+                                            self->_edge_touch_flag = false;
+                                        }
+                                    } }, LV_EVENT_ALL, this);
+
         add_win_cit_test_item_pass_fail_button(_registry.win.cit.keyboard_test.root);
 
         add_event_cb_win_return_to_cit(_registry.win.cit.keyboard_test.root);
@@ -4574,6 +4616,82 @@ namespace Lvgl_Ui
 
         lv_indev_set_group(kb_indev, group);
         return true;
+    }
+
+    void System::set_nfc_test(bool status)
+    {
+        if (_win_cit_nfc_test_callback != nullptr)
+        {
+            _win_cit_nfc_test_callback(status);
+        }
+    }
+
+    void System::init_win_cit_nfc_test(void)
+    {
+        // 主界面
+        _registry.win.cit.nfc_test.root = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(_registry.win.cit.nfc_test.root, lv_color_hex(0xFF7F58), (lv_style_selector_t)LV_PART_MAIN);
+        lv_obj_set_size(_registry.win.cit.nfc_test.root, _width, _height);
+        lv_obj_set_scrollbar_mode(_registry.win.cit.nfc_test.root, LV_SCROLLBAR_MODE_OFF);
+
+        // 创建标题
+        lv_obj_t *title_label = lv_label_create(_registry.win.cit.nfc_test.root);
+        lv_label_set_text(title_label, "Nfc");
+        lv_obj_set_style_text_color(title_label, lv_color_white(), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_align(title_label, LV_TEXT_ALIGN_LEFT, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(title_label, &lv_font_montserrat_48, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(title_label, _width - 100, 40);
+        lv_obj_align(title_label, LV_ALIGN_TOP_LEFT, 20, 10 + 50);
+
+        // 创建容器
+        lv_obj_t *container = lv_obj_create(_registry.win.cit.nfc_test.root);
+        lv_obj_set_size(container, _width, _height - 50 - 80 - 140);
+        lv_obj_align(container, LV_ALIGN_TOP_MID, 0, 50 + 80);
+        lv_obj_set_style_bg_color(container, lv_color_white(), (lv_style_selector_t)LV_PART_MAIN); // 设置背景颜色为白色
+        lv_obj_set_style_radius(container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
+
+        // 创建一个标签用于显示nfc数据
+        _registry.win.cit.nfc_test.data_label = lv_label_create(container);
+        lv_obj_set_style_text_color(_registry.win.cit.nfc_test.data_label, lv_color_black(), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(_registry.win.cit.nfc_test.data_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_label_set_text(_registry.win.cit.nfc_test.data_label, "1. Tap a tag to read its content");
+        lv_obj_align(_registry.win.cit.nfc_test.data_label, LV_ALIGN_CENTER, 0, 0);
+
+        lv_obj_add_event_cb(_registry.win.cit.nfc_test.root, [](lv_event_t *e)
+                            {
+                                    System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                    lv_event_code_t code = lv_event_get_code(e);
+    
+                                    if (code == LV_EVENT_GESTURE)
+                                    {
+                                        lv_dir_t gesture_dir = lv_indev_get_gesture_dir(lv_indev_active());
+    
+                                        // 边缘检测以及左右滑动
+                                        if ((gesture_dir == LV_DIR_LEFT || gesture_dir == LV_DIR_RIGHT)&&(self->_edge_touch_flag == true))
+                                        {   
+                                            self->set_nfc_test(false);
+
+                                            self->set_vibration();
+                                            self->init_win_cit();
+                                            
+                                            lv_screen_load_anim(self->_registry.win.cit.root, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 100, 0, true);
+    
+                                            self->_edge_touch_flag = false;
+                                        }
+                                    } }, LV_EVENT_ALL, this);
+
+        add_win_cit_test_item_pass_fail_button(_registry.win.cit.nfc_test.root);
+
+        add_event_cb_win_return_to_cit(_registry.win.cit.nfc_test.root);
+
+        init_status_bar(_registry.win.cit.nfc_test.root);
+
+        lv_obj_update_layout(_registry.win.cit.nfc_test.root);
+
+        _current_win = Current_Win::CIT_NFC_TEST;
+
+        set_nfc_test(true);
     }
 
 #endif

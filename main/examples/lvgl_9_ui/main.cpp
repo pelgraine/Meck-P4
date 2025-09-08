@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-04 11:09:23
+ * @LastEditTime: 2025-09-05 18:20:41
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -41,6 +41,7 @@
 #include "t_display_p4_config.h"
 #elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
 #include "t_display_p4_keyboard_config.h"
+#include "st25r3916_driver.h"
 #endif
 
 #define SD_FILE_PATH_MUSIC "/sdcard/t_display_p4_lvgl_9_ui_resource/music/Eagles - Hotel California (Live on MTV, 1994).wav"
@@ -215,10 +216,6 @@ QueueHandle_t app_queue;
 
 esp_lcd_panel_handle_t Screen_Mipi_Dpi_Panel = NULL;
 
-#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-volatile bool TCA8418_Interrupt_Flag = false;
-#endif
-
 // IIC 1
 auto XL9535_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(XL9535_SDA, XL9535_SCL, I2C_NUM_0);
 auto BQ27220_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(BQ27220_SDA, BQ27220_SCL, I2C_NUM_0);
@@ -228,12 +225,6 @@ auto PCF8563_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(PCF8563_
 auto SGM38121_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(SGM38121_SDA, SGM38121_SCL, I2C_NUM_1);
 auto AW86224_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(AW86224_SDA, AW86224_SCL, I2C_NUM_1);
 auto ES8311_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(ES8311_SDA, ES8311_SCL, I2C_NUM_1);
-
-#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-//  Software IIC
-auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA, XL9555_SCL);
-auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SDA, TCA8418_SCL);
-#endif
 
 // IIS
 auto ES8311_IIS_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iis>(ES8311_ADC_DATA, ES8311_DAC_DATA, ES8311_WS_LRCK, ES8311_BCLK, ES8311_MCLK, I2S_NUM_0);
@@ -248,7 +239,7 @@ auto ESP32C6_AT_SDIO_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Sdio>(ESP32
                                                                            Cpp_Bus_Driver::Hardware_Sdio::Sdio_Port::SLOT_1);
 
 // SPI
-auto SX1262_SPI_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(SX1262_MOSI, SX1262_SCLK, SX1262_MISO, SPI3_HOST, 0);
+auto SX1262_SPI_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(SX1262_MOSI, SX1262_SCLK, SX1262_MISO, SPI2_HOST, 0);
 
 // IIC 1
 auto XL9535 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9535_IIC_Bus, XL9535_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
@@ -260,12 +251,6 @@ auto SGM38121 = std::make_unique<Cpp_Bus_Driver::Sgm38121>(SGM38121_IIC_Bus, SGM
 auto AW86224 = std::make_unique<Cpp_Bus_Driver::Aw862xx>(AW86224_IIC_Bus, AW86224_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 auto ES8311 = std::make_unique<Cpp_Bus_Driver::Es8311>(ES8311_IIC_Bus, ES8311_IIS_Bus, ES8311_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 auto ICM20948 = std::make_unique<ICM20948_WE>(&Wire1, ICM20948_IIC_ADDRESS);
-
-#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-//  Software IIC
-auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
-auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
-#endif
 
 // UART
 auto L76K = std::make_unique<Cpp_Bus_Driver::L76k>(L76K_Uart_Bus, [](bool Value) -> IRAM_ATTR bool
@@ -304,6 +289,29 @@ auto GT9895 = std::make_unique<Cpp_Bus_Driver::Gt9895>(GT9895_IIC_Bus, GT9895_II
                                                        DEFAULT_CPP_BUS_DRIVER_VALUE);
 #else
 #error "unknown macro definition, please select the correct macro definition."
+#endif
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+
+enum class Nfc_Mode
+{
+    TEST = 0,
+};
+
+volatile bool TCA8418_Interrupt_Flag = false;
+
+TaskHandle_t Nfc_Task_Handle = NULL;
+
+Nfc_Mode St25r3916_Nfc_Mode = Nfc_Mode::TEST;
+
+//  Software IIC
+auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA, XL9555_SCL);
+auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SDA, TCA8418_SCL);
+
+//  Software IIC
+auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
+auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
+
 #endif
 
 // esp_err_t register_gpio_wakeup(void)
@@ -2090,6 +2098,31 @@ void my_keyboard_read(lv_indev_t *indev, lv_indev_data_t *data)
         data->key = last_key; // 当前按下的键值
     }
 }
+
+void device_nfc_task(void *arg)
+{
+    printf("device_nfc_task start\n");
+    vTaskSuspend(Nfc_Task_Handle);
+
+    size_t cycle_time = 0;
+
+    while (1)
+    {
+        switch (St25r3916_Nfc_Mode)
+        {
+        case Nfc_Mode::TEST:
+        {
+            St25r3916_Loop();
+        }
+        break;
+
+        default:
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
 #endif
 
 // bool Usb_Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
@@ -2374,10 +2407,9 @@ void System_Ui_Callback_Init(void)
 #else
 #error "unknown macro definition, please select the correct macro definition."
 #endif
-            esp_err_t assert;
             if (status == true)
             {
-                assert = app_video_stream_task_restart(video_cam_fd0);
+                esp_err_t assert = app_video_stream_task_restart(video_cam_fd0);
                 if (assert != ESP_OK)
                 {
                     printf("app_video_stream_task_restart fail (error code: %#X)\n", assert);
@@ -2390,7 +2422,7 @@ void System_Ui_Callback_Init(void)
             }
             else
             {
-                assert = app_video_stream_task_stop(video_cam_fd0);
+                esp_err_t assert = app_video_stream_task_stop(video_cam_fd0);
                 if (assert != ESP_OK)
                 {
                     printf("app_video_stream_task_stop fail (error code: %#X)\n", assert);
@@ -2480,6 +2512,23 @@ void System_Ui_Callback_Init(void)
 
         Set_Music_Current_Time_S_Flag = true;
     };
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+    System_Ui->_win_cit_nfc_test_callback = [](bool status)
+    {
+        if (status == true)
+        {
+            St25r3916_Nfc_Mode = Nfc_Mode::TEST;
+
+            vTaskResume(Nfc_Task_Handle);
+        }
+        else
+        {
+            vTaskSuspend(Nfc_Task_Handle);
+        }
+    };
+
+#endif
 }
 
 void Lvgl_Init(void)
@@ -3182,7 +3231,7 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
     }
 }
 
-bool App_Video_Init()
+bool App_Video_Init(void)
 {
     esp_lcd_panel_handle_t mipi_dpi_panel = NULL;
 
@@ -3570,6 +3619,11 @@ extern "C" void app_main(void)
     TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_1, 2000);
     TCA8418->start_pwm_gradient_time(30, 1000);
 
+    XL9555->pin_mode(XL9555_T_MIXRF_EN, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_write(XL9555_T_MIXRF_EN, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+
+    St25r3916_Init();
+
 #endif
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
@@ -3681,6 +3735,7 @@ extern "C" void app_main(void)
     }
 
     XL9535->pin_mode(XL9535_SX1262_DIO1, Cpp_Bus_Driver::Xl95x5::Mode::INPUT);
+    SX1262_SPI_Bus->_spi_bus_init_flag = true;
     if (SX1262->begin(10000000) == false)
     {
         System_Ui->_device_lora.init_flag = false;
@@ -3719,6 +3774,9 @@ extern "C" void app_main(void)
     // xTaskCreate(esp32p4_sleep_task, "esp32p4_sleep_task", 4 * 1024, NULL, 3, &Sleep_Task_Handle);
     xTaskCreate(device_lora_task, "device_lora_task", 4 * 1024, NULL, 3, &Lora_Task_Handle);
     xTaskCreate(iis_transmission_data_stream_task, "iis_transmission_data_stream_task", 4 * 1024, NULL, 4, &Iis_Transmission_Data_Stream_Task);
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+    xTaskCreate(device_nfc_task, "device_nfc_task", 8 * 1024, NULL, 3, &Nfc_Task_Handle);
+#endif
 
     // 等待lvgl刷新完成
     while (lv_display_flush_is_last(lv_display_get_default()) == false)
