@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-08 11:57:56
+ * @LastEditTime: 2025-09-08 14:08:31
  * @License: GPL 3.0
  */
 #pragma once
@@ -104,6 +104,11 @@ namespace Lvgl_Ui
         {
             SEND,
             RECEIVE,
+        };
+
+        enum class Rf_Chip_Type
+        {
+            SX1262 = 0,
         };
 
         struct Win_Rf_Chat_Message
@@ -288,6 +293,15 @@ namespace Lvgl_Ui
                         {
                             struct
                             {
+                                lv_obj_t *rf_chip;
+                            } dropdown;
+
+                        } rf_chip_type;
+
+                        struct
+                        {
+                            struct
+                            {
                                 struct
                                 {
                                     lv_obj_t *freq;
@@ -437,6 +451,8 @@ namespace Lvgl_Ui
 
         Current_Win _current_win = Current_Win::UNKNOWN;
 
+        Rf_Chip_Type _rf_chip_type = Rf_Chip_Type::SX1262;
+
 #if defined CONFIG_SCREEN_TYPE_HI8561
         Hi8561_Touch::Touch_Point _touch_point;
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
@@ -552,6 +568,7 @@ namespace Lvgl_Ui
 
         void init_win_rf_setings(void);
         void init_win_rf_setings_keyboard_position_event_cb(lv_obj_t *parent);
+        void init_win_rf_setings_rf_chip_type_message_box(void);
         void init_win_rf_setings_config_lora_params_message_box(void);
         void init_win_rf_setings_auto_send_message_box(void);
         bool set_config_rf_params(Device_Sx1262 device_sx1262);

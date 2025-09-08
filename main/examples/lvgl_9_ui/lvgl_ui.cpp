@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-08 12:09:53
+ * @LastEditTime: 2025-09-08 14:14:34
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -3295,6 +3295,25 @@ namespace Lvgl_Ui
         lv_obj_set_style_radius(list, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ACTIVE);
 
+        lv_obj_t *list_button_rf_chip_type = lv_list_add_button(list, NULL, "rf chip type");
+        lv_obj_set_style_text_font(list_button_rf_chip_type, &lv_font_montserrat_30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+
+        lv_obj_add_event_cb(list_button_rf_chip_type, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
+
+                                switch (code)
+                                {
+                                case LV_EVENT_CLICKED:
+                                {
+                                    self->init_win_rf_setings_rf_chip_type_message_box();
+                                }
+                                    break;
+                                default:
+                                    break;
+                            } }, LV_EVENT_ALL, this);
+
         lv_obj_t *list_button_config_rf_params = lv_list_add_button(list, NULL, "config rf params");
         lv_obj_set_style_text_font(list_button_config_rf_params, &lv_font_montserrat_30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
 
@@ -3307,7 +3326,16 @@ namespace Lvgl_Ui
                                 {
                                 case LV_EVENT_CLICKED:
                                 {
+                                    switch (self->_rf_chip_type)
+                                    {
+                                    case Rf_Chip_Type::SX1262 :
                                     self->init_win_rf_setings_config_lora_params_message_box();
+                                        break;
+                                    
+                                    default:
+                                        break;
+                                    }
+
                                 }
                                     break;
                                 default:
@@ -3442,6 +3470,168 @@ namespace Lvgl_Ui
 #endif
                             },
                             LV_EVENT_ALL, this);
+    }
+
+    void System::init_win_rf_setings_rf_chip_type_message_box(void)
+    {
+        // 创建全屏灰色透明遮罩，禁止触摸
+        _registry.win.rf.setings.message_box.root = lv_obj_create(_registry.win.rf.setings.root);
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(_registry.win.rf.setings.message_box.root, _width, _height);
+        lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_50, LV_PART_MAIN);
+        lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
+        lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_add_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
+
+        _registry.win.rf.setings.message_box.root_container = lv_obj_create(_registry.win.rf.setings.message_box.root);
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(_registry.win.rf.setings.message_box.root_container, 450, _height * 0.7);
+        lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root_container, 15, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root_container, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root_container, 0, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(_registry.win.rf.setings.message_box.root_container, 16, LV_PART_MAIN);
+        lv_obj_center(_registry.win.rf.setings.message_box.root_container);
+
+        _registry.win.rf.setings.message_box.btn_container = lv_obj_create(_registry.win.rf.setings.message_box.root_container);
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(_registry.win.rf.setings.message_box.btn_container, 450, 110);
+        lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
+        lv_obj_align(_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+        lv_obj_t *btn_cancel = lv_button_create(_registry.win.rf.setings.message_box.btn_container);
+        lv_obj_set_size(btn_cancel, 150, 60);
+        lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 40, -30);
+        lv_obj_set_style_radius(btn_cancel, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_width(btn_cancel, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 去除按钮阴影
+        lv_obj_t *btn_cancel_label = lv_label_create(btn_cancel);
+        lv_label_set_text(btn_cancel_label, "cancel");
+        lv_obj_set_style_text_font(btn_cancel_label, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_center(btn_cancel_label);
+
+        // cancel 按钮回调
+        lv_obj_add_event_cb(btn_cancel, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_obj_delete(self->_registry.win.rf.setings.message_box.root); }, LV_EVENT_CLICKED, this);
+
+        lv_obj_t *btn_apply = lv_button_create(_registry.win.rf.setings.message_box.btn_container);
+        lv_obj_set_size(btn_apply, 150, 60);
+        lv_obj_align(btn_apply, LV_ALIGN_BOTTOM_RIGHT, -40, -30);
+        lv_obj_set_style_radius(btn_apply, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_width(btn_apply, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 去除按钮阴影
+        lv_obj_t *btn_apply_label = lv_label_create(btn_apply);
+        lv_label_set_text(btn_apply_label, "apply");
+        lv_obj_set_style_text_font(btn_apply_label, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_center(btn_apply_label);
+
+        // apply 按钮回调
+        lv_obj_add_event_cb(btn_apply, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+
+                                self->_rf_chip_type = static_cast<Rf_Chip_Type>(
+                                                            lv_dropdown_get_selected(self->_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip));
+
+                                lv_obj_delete(self->_registry.win.rf.setings.message_box.root); }, LV_EVENT_CLICKED, this);
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
+        _registry.keyboard = lv_keyboard_create(_registry.win.rf.setings.message_box.root);
+        lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
+        lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
+        // 设置键盘按钮间距更密集
+        lv_obj_set_style_pad_row(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_column(_registry.keyboard, 4, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
+        lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
+#endif
+
+        _registry.win.rf.setings.message_box.parameter_container = lv_obj_create(_registry.win.rf.setings.message_box.root_container);
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.5);
+        lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.parameter_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
+        lv_obj_set_scrollbar_mode(_registry.win.rf.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
+        lv_obj_align_to(_registry.win.rf.setings.message_box.parameter_container, _registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
+
+        // 触摸设置消息框区域时隐藏键盘
+        lv_obj_add_event_cb(_registry.win.rf.setings.message_box.parameter_container, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
+
+                                if (code == LV_EVENT_CLICKED)
+                                {
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
+                                    lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
+
+                                    // 调整聊天框的大小
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, 900);
+                                    lv_obj_center(self->_registry.win.rf.setings.message_box.root_container);
+                                    lv_obj_align(self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, 780);
+                                    lv_obj_align_to(self->_registry.win.rf.setings.message_box.parameter_container, self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                                    lv_group_remove_all_objs(self->_registry.keyboard_group);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+                                } }, LV_EVENT_ALL, this);
+
+        lv_obj_t *msgbox_rf_chip_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(msgbox_rf_chip_text, "rf chip");
+        lv_obj_set_size(msgbox_rf_chip_text, 300, 40);
+        lv_obj_set_style_text_font(msgbox_rf_chip_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align(msgbox_rf_chip_text, LV_ALIGN_TOP_LEFT, 0, 0);
+
+        _registry.win.rf.setings.rf_chip_type.dropdown.rf_chip = lv_dropdown_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_dropdown_set_dir(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, LV_DIR_BOTTOM);
+        lv_dropdown_set_options(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, "Sx1262");
+        lv_dropdown_set_selected(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, static_cast<uint32_t>(_rf_chip_type));
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_min_width(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, 200, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_min_height(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, 30, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);  // 输入框字体
+        lv_obj_set_style_text_font(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, &lv_font_montserrat_24, LV_PART_ITEMS | LV_STATE_DEFAULT); // 下拉列表字体
+        lv_obj_align_to(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, msgbox_rf_chip_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+
+        lv_obj_add_event_cb(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, [](lv_event_t *e)
+                            {
+                                lv_obj_t *dropdown = lv_event_get_target_obj(e);
+                                lv_event_code_t code = lv_event_get_code(e);
+                                
+                                if (code == LV_EVENT_CLICKED) 
+                                {
+                                    // // 强制下拉列表向下打开
+                                    // lv_dropdown_set_dir(dropdown, LV_DIR_BOTTOM);
+                                    // 获取弹出的下拉列表对象
+                                    lv_obj_t *list = lv_dropdown_get_list(dropdown);
+                                    // // 设置下拉列表最多显示100高度
+                                    // lv_obj_set_height(list, 300);
+
+                                    lv_obj_set_style_bg_color(list, lv_color_hex(0xEEE9E9), LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ACTIVE);
+                                    lv_obj_set_style_border_width(list, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    
+                                    lv_obj_set_style_text_font(list, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+                                    lv_obj_set_style_text_font(list, &lv_font_montserrat_24, LV_PART_ITEMS | LV_STATE_DEFAULT);
+                                } }, LV_EVENT_ALL, NULL);
     }
 
     void System::init_win_rf_setings_config_lora_params_message_box(void)
@@ -4135,15 +4325,15 @@ namespace Lvgl_Ui
 #endif
                                 } }, LV_EVENT_ALL, this);
 
-        lv_obj_t *msgbox_freq_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
-        lv_label_set_text(msgbox_freq_text, "auto send control");
-        lv_obj_set_size(msgbox_freq_text, 280, 30);
-        lv_obj_set_style_text_font(msgbox_freq_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_align(msgbox_freq_text, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_t *msgbox_auto_send_control_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(msgbox_auto_send_control_text, "auto send control");
+        lv_obj_set_size(msgbox_auto_send_control_text, 280, 30);
+        lv_obj_set_style_text_font(msgbox_auto_send_control_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align(msgbox_auto_send_control_text, LV_ALIGN_TOP_LEFT, 0, 0);
 
         _registry.win.rf.setings.auto_send.control_switch = lv_switch_create(_registry.win.rf.setings.message_box.parameter_container);
         lv_obj_set_size(_registry.win.rf.setings.auto_send.control_switch, 90, 50);
-        lv_obj_align_to(_registry.win.rf.setings.auto_send.control_switch, msgbox_freq_text, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
+        lv_obj_align_to(_registry.win.rf.setings.auto_send.control_switch, msgbox_auto_send_control_text, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
         if (_device_sx1262.auto_send.flag == true)
         {
             lv_obj_add_state(_registry.win.rf.setings.auto_send.control_switch, LV_STATE_CHECKED);
@@ -4157,7 +4347,7 @@ namespace Lvgl_Ui
         lv_label_set_text(msgbox_auto_send_text, "auto send text");
         lv_obj_set_size(msgbox_auto_send_text, 300, 40);
         lv_obj_set_style_text_font(msgbox_auto_send_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_align_to(msgbox_auto_send_text, msgbox_freq_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 30);
+        lv_obj_align_to(msgbox_auto_send_text, msgbox_auto_send_control_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 30);
 
         _registry.win.rf.setings.auto_send.textarea.auto_send_text = lv_textarea_create(_registry.win.rf.setings.message_box.parameter_container);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.auto_send.textarea.auto_send_text, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
