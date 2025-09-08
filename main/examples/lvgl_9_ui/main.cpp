@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-05 18:20:41
+ * @LastEditTime: 2025-09-08 11:59:08
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -210,7 +210,7 @@ bool Camera_Init_Status = false;
 bool Lora_Send_falg = false;
 uint8_t Lora_Send_Package[255] = {0};
 
-bool Device_Lora_Task_Stop_Flag = false;
+bool Device_Sx1262_Task_Stop_Flag = false;
 
 QueueHandle_t app_queue;
 
@@ -1413,9 +1413,9 @@ void device_at_task(void *arg)
 //     }
 // }
 
-void device_lora_task(void *arg)
+void device_sx1262_task(void *arg)
 {
-    printf("device_lora_task start\n");
+    printf("device_sx1262_task start\n");
 
     size_t cycle_time = 0;
     size_t auto_send_cycle_time = 0;
@@ -1469,7 +1469,7 @@ void device_lora_task(void *arg)
         //     cycle_time = esp_log_timestamp() + 1000;
         // }
 
-        if (System_Ui->_device_lora.auto_send.flag == true)
+        if (System_Ui->_device_sx1262.auto_send.flag == true)
         {
             if (Lora_Send_falg == false)
             {
@@ -1478,14 +1478,14 @@ void device_lora_task(void *arg)
                     memset(Lora_Send_Package, '\0', sizeof(Lora_Send_Package));
 
                     // 检查长度是否越界
-                    if (System_Ui->_device_lora.auto_send.text.size() <= 255)
+                    if (System_Ui->_device_sx1262.auto_send.text.size() <= 255)
                     {
-                        memcpy(Lora_Send_Package, System_Ui->_device_lora.auto_send.text.data(), System_Ui->_device_lora.auto_send.text.size());
+                        memcpy(Lora_Send_Package, System_Ui->_device_sx1262.auto_send.text.data(), System_Ui->_device_sx1262.auto_send.text.size());
                     }
                     else
                     {
                         // 处理错误：数据过长
-                        memcpy(Lora_Send_Package, System_Ui->_device_lora.auto_send.text.data(), 254);
+                        memcpy(Lora_Send_Package, System_Ui->_device_sx1262.auto_send.text.data(), 254);
                         Lora_Send_Package[254] = '\0';
 
                         printf("lora send out of bounds(data > Lora_Send_Package)\n");
@@ -1494,25 +1494,25 @@ void device_lora_task(void *arg)
                     char buffer_time[15];
                     snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", System_Ui->_time.hour, System_Ui->_time.minute, System_Ui->_time.second);
 
-                    Lvgl_Ui::System::Win_Lora_Chat_Message wlcm =
+                    Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
                         {
                             .direction = Lvgl_Ui::System::Chat_Message_Direction::SEND,
                             .time = buffer_time,
-                            .data = System_Ui->_device_lora.auto_send.text,
+                            .data = System_Ui->_device_sx1262.auto_send.text,
                         };
-                    System_Ui->_registry.win.lora.chat_message_data.push_back(wlcm);
+                    System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
 
                     if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::LORA)
                     {
                         // 更新聊天容器
                         _lock_acquire(&lvgl_api_lock);
-                        System_Ui->win_lora_chat_message_data_update(System_Ui->_registry.win.lora.chat_message_data);
+                        System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
                         _lock_release(&lvgl_api_lock);
                     }
 
                     Lora_Send_falg = true;
 
-                    auto_send_cycle_time = esp_log_timestamp() + System_Ui->_device_lora.auto_send.interval;
+                    auto_send_cycle_time = esp_log_timestamp() + System_Ui->_device_sx1262.auto_send.interval;
                 }
             }
         }
@@ -1646,20 +1646,20 @@ void device_lora_task(void *arg)
                         char buffer_rssi_snr[30];
                         snprintf(buffer_rssi_snr, sizeof(buffer_rssi_snr), "rssi[%.01f] snr[%.01f]", pm.lora.rssi_average, pm.lora.snr);
 
-                        Lvgl_Ui::System::Win_Lora_Chat_Message wlcm =
+                        Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
                             {
                                 .direction = Lvgl_Ui::System::Chat_Message_Direction::RECEIVE,
                                 .time = buffer_time,
                                 .data = message_str,
                                 .rssi_snr = buffer_rssi_snr,
                             };
-                        System_Ui->_registry.win.lora.chat_message_data.push_back(wlcm);
+                        System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
 
                         if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::LORA)
                         {
                             // 更新聊天容器
                             _lock_acquire(&lvgl_api_lock);
-                            System_Ui->win_lora_chat_message_data_update(System_Ui->_registry.win.lora.chat_message_data);
+                            System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
                             _lock_release(&lvgl_api_lock);
                         }
                     }
@@ -1672,7 +1672,7 @@ void device_lora_task(void *arg)
         // 如果有触发停止标志就等待lora一次发送或接收过程完成后再停止
         // 这样做为了防止spi意外终止导致的iic的0x107错误
         // 多任务处理spi和iic不能同时工作，spi工作的时候有概率会导致iic死机
-        if (Device_Lora_Task_Stop_Flag == true)
+        if (Device_Sx1262_Task_Stop_Flag == true)
         {
             vTaskSuspend(Lora_Task_Handle);
         }
@@ -2431,9 +2431,9 @@ void System_Ui_Callback_Init(void)
         }
     };
 
-    System_Ui->_win_lora_config_lora_params_callback = [](Lvgl_Ui::System::Device_Lora device_lora) -> bool
+    System_Ui->_win_rf_config_sx1262_params_callback = [](Lvgl_Ui::System::Device_Sx1262 device_sx1262) -> bool
     {
-        if (device_lora.params.rf_switch == 0)
+        if (device_sx1262.params.rf_switch == 0)
         {
             XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
         }
@@ -2442,9 +2442,9 @@ void System_Ui_Callback_Init(void)
             XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::LOW);
         }
 
-        if (SX1262->config_lora_params(device_lora.params.freq, device_lora.params.bw, device_lora.params.current_limit,
-                                       device_lora.params.power, device_lora.params.sf, device_lora.params.cr, device_lora.params.crc_type,
-                                       device_lora.params.preamble_length, device_lora.params.sync_word) == false)
+        if (SX1262->config_lora_params(device_sx1262.params.freq, device_sx1262.params.bw, device_sx1262.params.current_limit,
+                                       device_sx1262.params.power, device_sx1262.params.sf, device_sx1262.params.cr, device_sx1262.params.crc_type,
+                                       device_sx1262.params.preamble_length, device_sx1262.params.sync_word) == false)
         {
             printf("config_lora_params fail\n");
             return false;
@@ -2458,7 +2458,7 @@ void System_Ui_Callback_Init(void)
         return true;
     };
 
-    System_Ui->_win_lora_send_data_callback = [](std::string data)
+    System_Ui->_win_rf_send_data_callback = [](std::string data)
     {
         memset(Lora_Send_Package, '\0', sizeof(Lora_Send_Package));
 
@@ -2479,16 +2479,16 @@ void System_Ui_Callback_Init(void)
         Lora_Send_falg = true;
     };
 
-    System_Ui->_win_lora_status_callback = [](bool status)
+    System_Ui->_win_rf_status_callback = [](bool status)
     {
         if (status == true)
         {
-            Device_Lora_Task_Stop_Flag = false;
+            Device_Sx1262_Task_Stop_Flag = false;
             vTaskResume(Lora_Task_Handle);
         }
         else
         {
-            Device_Lora_Task_Stop_Flag = true;
+            Device_Sx1262_Task_Stop_Flag = true;
         }
     };
 
@@ -3725,7 +3725,7 @@ extern "C" void app_main(void)
 
     XL9535->pin_mode(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     // 默认使用RF1天线
-    if (System_Ui->_device_lora.params.rf_switch == 0)
+    if (System_Ui->_device_sx1262.params.rf_switch == 0)
     {
         XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
     }
@@ -3738,13 +3738,13 @@ extern "C" void app_main(void)
     SX1262_SPI_Bus->_spi_bus_init_flag = true;
     if (SX1262->begin(10000000) == false)
     {
-        System_Ui->_device_lora.init_flag = false;
+        System_Ui->_device_sx1262.init_flag = false;
         printf("SX1262 begin fail\n");
     }
 
-    if (SX1262->config_lora_params(System_Ui->_device_lora.params.freq, System_Ui->_device_lora.params.bw, System_Ui->_device_lora.params.current_limit,
-                                   System_Ui->_device_lora.params.power, System_Ui->_device_lora.params.sf, System_Ui->_device_lora.params.cr,
-                                   System_Ui->_device_lora.params.crc_type, System_Ui->_device_lora.params.preamble_length, System_Ui->_device_lora.params.sync_word) == false)
+    if (SX1262->config_lora_params(System_Ui->_device_sx1262.params.freq, System_Ui->_device_sx1262.params.bw, System_Ui->_device_sx1262.params.current_limit,
+                                   System_Ui->_device_sx1262.params.power, System_Ui->_device_sx1262.params.sf, System_Ui->_device_sx1262.params.cr,
+                                   System_Ui->_device_sx1262.params.crc_type, System_Ui->_device_sx1262.params.preamble_length, System_Ui->_device_sx1262.params.sync_word) == false)
     {
         printf("config_lora_params fail\n");
     }
@@ -3772,7 +3772,7 @@ extern "C" void app_main(void)
     xTaskCreate(device_rtc_task, "device_rtc_task", 4 * 1024, NULL, 3, NULL);
     xTaskCreate(device_at_task, "device_at_task", 4 * 1024, NULL, 3, &At_Task_Handle);
     // xTaskCreate(esp32p4_sleep_task, "esp32p4_sleep_task", 4 * 1024, NULL, 3, &Sleep_Task_Handle);
-    xTaskCreate(device_lora_task, "device_lora_task", 4 * 1024, NULL, 3, &Lora_Task_Handle);
+    xTaskCreate(device_sx1262_task, "device_sx1262_task", 4 * 1024, NULL, 3, &Lora_Task_Handle);
     xTaskCreate(iis_transmission_data_stream_task, "iis_transmission_data_stream_task", 4 * 1024, NULL, 4, &Iis_Transmission_Data_Stream_Task);
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     xTaskCreate(device_nfc_task, "device_nfc_task", 8 * 1024, NULL, 3, &Nfc_Task_Handle);

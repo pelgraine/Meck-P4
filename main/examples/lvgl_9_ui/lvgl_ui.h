@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-05 15:21:35
+ * @LastEditTime: 2025-09-08 11:57:56
  * @License: GPL 3.0
  */
 #pragma once
@@ -14,7 +14,7 @@
 extern const lv_image_dsc_t win_home_app_icon_cit_110x110px_rgb565a8;
 extern const lv_image_dsc_t win_home_app_icon_camera_110x110px_rgb565a8;
 extern const lv_image_dsc_t win_home_app_icon_setings_110x110px_rgb565a8;
-extern const lv_image_dsc_t win_home_app_icon_lora_110x110px_rgb565a8;
+extern const lv_image_dsc_t win_home_app_icon_rf_110x110px_rgb565a8;
 extern const lv_image_dsc_t win_home_app_icon_music_110x110px_rgb565a8;
 
 extern const lv_image_dsc_t win_music_play_start_1_140x140px_rgb565a8;
@@ -106,7 +106,7 @@ namespace Lvgl_Ui
             RECEIVE,
         };
 
-        struct Win_Lora_Chat_Message
+        struct Win_Rf_Chat_Message
         {
             Chat_Message_Direction direction;
             std::string time;
@@ -270,7 +270,7 @@ namespace Lvgl_Ui
 
                     std::string chat_textarea_data = "";
 
-                    std::vector<Win_Lora_Chat_Message> chat_message_data;
+                    std::vector<Win_Rf_Chat_Message> chat_message_data;
 
                     struct
                     {
@@ -288,23 +288,26 @@ namespace Lvgl_Ui
                         {
                             struct
                             {
-                                lv_obj_t *freq;
-                                lv_obj_t *current_limit;
-                                lv_obj_t *power;
-                                lv_obj_t *preamble_length;
-                                lv_obj_t *sync_word;
-                            } textarea;
+                                struct
+                                {
+                                    lv_obj_t *freq;
+                                    lv_obj_t *current_limit;
+                                    lv_obj_t *power;
+                                    lv_obj_t *preamble_length;
+                                    lv_obj_t *sync_word;
+                                } textarea;
 
-                            struct
-                            {
-                                lv_obj_t *rf_switch;
-                                lv_obj_t *bandwidth;
-                                lv_obj_t *spreading_factor;
-                                lv_obj_t *coding_rate;
-                                lv_obj_t *crc_type;
-                            } dropdown;
+                                struct
+                                {
+                                    lv_obj_t *rf_switch;
+                                    lv_obj_t *bandwidth;
+                                    lv_obj_t *spreading_factor;
+                                    lv_obj_t *coding_rate;
+                                    lv_obj_t *crc_type;
+                                } dropdown;
+                            } sx1262;
 
-                        } config_lora_params;
+                        } config_rf_params;
 
                         struct
                         {
@@ -318,7 +321,7 @@ namespace Lvgl_Ui
                         } auto_send;
 
                     } setings;
-                } lora;
+                } rf;
 
                 struct
                 {
@@ -393,7 +396,7 @@ namespace Lvgl_Ui
             std::string time_zone = "null"; // 时区
         };
 
-        struct Device_Lora
+        struct Device_Sx1262
         {
             bool init_flag = false;
 
@@ -430,7 +433,7 @@ namespace Lvgl_Ui
 
         Time _time;
 
-        Device_Lora _device_lora;
+        Device_Sx1262 _device_sx1262;
 
         Current_Win _current_win = Current_Win::UNKNOWN;
 
@@ -464,11 +467,11 @@ namespace Lvgl_Ui
 
         void (*_win_camera_status_callback)(bool status) = nullptr;
 
-        bool (*_win_lora_config_lora_params_callback)(Device_Lora device_lora) = nullptr;
+        bool (*_win_rf_config_sx1262_params_callback)(Device_Sx1262 device_sx1262) = nullptr;
 
-        void (*_win_lora_send_data_callback)(std::string data) = nullptr;
+        void (*_win_rf_send_data_callback)(std::string data) = nullptr;
 
-        void (*_win_lora_status_callback)(bool status) = nullptr;
+        void (*_win_rf_status_callback)(bool status) = nullptr;
 
         void (*_win_music_start_end_callback)(bool status) = nullptr;
 
@@ -544,16 +547,16 @@ namespace Lvgl_Ui
 
         void init_win_camera(void);
 
-        void init_win_lora(void);
-        void win_lora_chat_message_data_update(std::vector<Win_Lora_Chat_Message> wlcm);
+        void init_win_rf(void);
+        void win_rf_chat_message_data_update(std::vector<Win_Rf_Chat_Message> wlcm);
 
-        void init_win_lora_setings(void);
-        void init_win_lora_setings_keyboard_position_event_cb(lv_obj_t *parent);
-        void init_win_lora_setings_config_lora_params_message_box(void);
-        void init_win_lora_setings_auto_send_message_box(void);
-        bool set_config_lora_params(Device_Lora device_lora);
-        void set_lora_send_data_callback(std::string data);
-        void set_lora_status_callback(bool status);
+        void init_win_rf_setings(void);
+        void init_win_rf_setings_keyboard_position_event_cb(lv_obj_t *parent);
+        void init_win_rf_setings_config_lora_params_message_box(void);
+        void init_win_rf_setings_auto_send_message_box(void);
+        bool set_config_rf_params(Device_Sx1262 device_sx1262);
+        void set_rf_send_data_callback(std::string data);
+        void set_rf_status_callback(bool status);
 
         void init_win_music(void);
         void set_win_music_play_imagebutton_status(bool status);
