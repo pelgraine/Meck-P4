@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-08 11:56:36
+ * @LastEditTime: 2025-09-08 12:09:53
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -3610,8 +3610,7 @@ namespace Lvgl_Ui
         lv_obj_set_scrollbar_mode(_registry.win.rf.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
         lv_obj_align_to(_registry.win.rf.setings.message_box.parameter_container, _registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
 
-#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
-        // 触摸lora设置消息框区域时隐藏键盘
+        // 触摸设置消息框区域时隐藏键盘
         lv_obj_add_event_cb(_registry.win.rf.setings.message_box.parameter_container, [](lv_event_t *e)
                             {
                                 System *self = static_cast<System *>(lv_event_get_user_data(e));
@@ -3619,6 +3618,7 @@ namespace Lvgl_Ui
 
                                 if (code == LV_EVENT_CLICKED)
                                 {
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
                                     lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
 
                                     // 调整聊天框的大小
@@ -3627,9 +3627,12 @@ namespace Lvgl_Ui
                                     lv_obj_align(self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
                                     lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, 780);
                                     lv_obj_align_to(self->_registry.win.rf.setings.message_box.parameter_container, self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                } }, LV_EVENT_ALL, this);
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                                    lv_group_remove_all_objs(self->_registry.keyboard_group);
+#else
+#error "unknown macro definition, please select the correct macro definition."
 #endif
+                                } }, LV_EVENT_ALL, this);
 
         lv_obj_t *msgbox_rf_switch_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
         lv_label_set_text(msgbox_rf_switch_text, "rf switch");
@@ -4108,7 +4111,7 @@ namespace Lvgl_Ui
         lv_obj_set_scrollbar_mode(_registry.win.rf.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
         lv_obj_align_to(_registry.win.rf.setings.message_box.parameter_container, _registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
 
-        // 触摸lora设置消息框区域时隐藏键盘
+        // 触摸设置消息框区域时隐藏键盘
         lv_obj_add_event_cb(_registry.win.rf.setings.message_box.parameter_container, [](lv_event_t *e)
                             {
                                 System *self = static_cast<System *>(lv_event_get_user_data(e));
@@ -4116,6 +4119,7 @@ namespace Lvgl_Ui
 
                                 if (code == LV_EVENT_CLICKED)
                                 {
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
                                     lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
 
                                     // 调整聊天框的大小
@@ -4124,7 +4128,11 @@ namespace Lvgl_Ui
                                     lv_obj_align(self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
                                     lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, 780);
                                     lv_obj_align_to(self->_registry.win.rf.setings.message_box.parameter_container, self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                                    lv_group_remove_all_objs(self->_registry.keyboard_group);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
                                 } }, LV_EVENT_ALL, this);
 
         lv_obj_t *msgbox_freq_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
