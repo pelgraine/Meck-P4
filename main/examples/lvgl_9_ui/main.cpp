@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-08 14:22:14
+ * @LastEditTime: 2025-09-09 15:12:35
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -22,6 +22,14 @@
 #include "lvgl.h"
 #include "t_display_p4_driver.h"
 #include "cpp_bus_driver_library.h"
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
+#include "t_display_p4_config.h"
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+#include "t_display_p4_keyboard_config.h"
+#include "st25r3916_driver.h"
+#include "RadioLib.h"
+#include "radiolib_bridge_driver.h"
+#endif
 #include "lvgl_ui.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "esp_vfs_fat.h"
@@ -37,12 +45,6 @@
 #include "driver/ppa.h"
 #include "esp_private/esp_cache_private.h"
 #include <fstream>
-#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
-#include "t_display_p4_config.h"
-#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-#include "t_display_p4_keyboard_config.h"
-#include "st25r3916_driver.h"
-#endif
 
 #define SD_FILE_PATH_MUSIC "/sdcard/t_display_p4_lvgl_9_ui_resource/music/Eagles - Hotel California (Live on MTV, 1994).wav"
 
@@ -168,7 +170,7 @@ TaskHandle_t Gps_Task_Handle = NULL;
 TaskHandle_t Ethernet_Task_Handle = NULL;
 TaskHandle_t At_Task_Handle = NULL;
 TaskHandle_t Sleep_Task_Handle = NULL;
-TaskHandle_t Lora_Task_Handle = NULL;
+TaskHandle_t Rf_Task_Handle = NULL;
 TaskHandle_t Iis_Transmission_Data_Stream_Task = NULL;
 
 uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1];
@@ -207,10 +209,10 @@ int64_t start_time;
 int32_t video_cam_fd0;
 bool Camera_Init_Status = false;
 
-bool Lora_Send_falg = false;
-uint8_t Lora_Send_Package[255] = {0};
+bool Rf_Send_Flag = false;
+uint8_t Rf_Send_Package[255] = {0};
 
-bool Device_Sx1262_Task_Stop_Flag = false;
+bool Device_Rf_Task_Stop_Flag = false;
 
 QueueHandle_t app_queue;
 
@@ -298,7 +300,17 @@ enum class Nfc_Mode
     TEST = 0,
 };
 
+enum class Cc1101_Rf_Switch
+{
+    RF_SWITCH_315MHZ,
+    RF_SWITCH_434MHZ,
+    RF_SWITCH_868_915MHZ,
+};
+
 volatile bool TCA8418_Interrupt_Flag = false;
+volatile bool Cc1101_Interrupt_Flag = false;
+
+bool Device_Nfc_Task_Stop_Flag = false;
 
 TaskHandle_t Nfc_Task_Handle = NULL;
 
@@ -308,9 +320,18 @@ Nfc_Mode St25r3916_Nfc_Mode = Nfc_Mode::TEST;
 auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA, XL9555_SCL);
 auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SDA, TCA8418_SCL);
 
+// SPI
+auto Cc1101_SPI_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(T_MIXRF_CC1101_MOSI, T_MIXRF_CC1101_SCLK, T_MIXRF_CC1101_MISO, SPI2_HOST, 0);
+
 //  Software IIC
 auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
+
+// SPI
+RadioLibHal *Cc1101_Radiolib_Hal = new Radiolib_Cpp_Bus_Driver_Hal(Cc1101_SPI_Bus, 10000000, T_MIXRF_CC1101_CS);
+CC1101 Cc1101 = new Module(Cc1101_Radiolib_Hal, static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC), T_MIXRF_CC1101_BUSY);
+
+auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
 #endif
 
@@ -1413,245 +1434,96 @@ void device_at_task(void *arg)
 //     }
 // }
 
-void device_sx1262_task(void *arg)
+void device_rf_task(void *arg)
 {
-    printf("device_sx1262_task start\n");
+    printf("device_rf_task start\n");
 
     size_t cycle_time = 0;
     size_t auto_send_cycle_time = 0;
 
     while (1)
     {
-        // if (esp_log_timestamp() > cycle_time)
-        // {
-        //     printf("SX1262 ID: %#X\n", SX1262->get_device_id());
-
-        //     printf("SX1262 get current limit: %d\n", SX1262->get_current_limit());
-
-        //     switch (SX1262->get_packet_type())
-        //     {
-        //     case Cpp_Bus_Driver::Sx126x::Packet_Type::GFSK:
-        //         printf("SX1262 packet type: GFSK\n");
-        //         break;
-        //     case Cpp_Bus_Driver::Sx126x::Packet_Type::LORA:
-        //         printf("SX1262 packet type: LORA\n");
-        //         break;
-        //     case Cpp_Bus_Driver::Sx126x::Packet_Type::LR_FHSS:
-        //         printf("SX1262 packet type: LR_FHSS\n");
-        //         break;
-
-        //     default:
-        //         break;
-        //     }
-
-        //     switch (SX1262->parse_chip_mode_status(SX1262->get_status()))
-        //     {
-        //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::STBY_RC:
-        //         printf("SX1262 chip mode status: STBY_RC\n");
-        //         break;
-        //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::STBY_XOSC:
-        //         printf("SX1262 chip mode status: STBY_XOSC\n");
-        //         break;
-        //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::FS:
-        //         printf("SX1262 chip mode status: FS\n");
-        //         break;
-        //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::RX:
-        //         printf("SX1262 chip mode status: RX\n");
-        //         break;
-        //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::TX:
-        //         printf("SX1262 chip mode status: TX\n");
-        //         break;
-
-        //     default:
-        //         break;
-        //     }
-
-        //     cycle_time = esp_log_timestamp() + 1000;
-        // }
-
-        if (System_Ui->_device_sx1262.auto_send.flag == true)
+        switch (System_Ui->_rf_chip_type)
         {
-            if (Lora_Send_falg == false)
-            {
-                if (esp_log_timestamp() > auto_send_cycle_time)
-                {
-                    memset(Lora_Send_Package, '\0', sizeof(Lora_Send_Package));
-
-                    // 检查长度是否越界
-                    if (System_Ui->_device_sx1262.auto_send.text.size() <= 255)
-                    {
-                        memcpy(Lora_Send_Package, System_Ui->_device_sx1262.auto_send.text.data(), System_Ui->_device_sx1262.auto_send.text.size());
-                    }
-                    else
-                    {
-                        // 处理错误：数据过长
-                        memcpy(Lora_Send_Package, System_Ui->_device_sx1262.auto_send.text.data(), 254);
-                        Lora_Send_Package[254] = '\0';
-
-                        printf("lora send out of bounds(data > Lora_Send_Package)\n");
-                    }
-
-                    char buffer_time[15];
-                    snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", System_Ui->_time.hour, System_Ui->_time.minute, System_Ui->_time.second);
-
-                    Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
-                        {
-                            .direction = Lvgl_Ui::System::Chat_Message_Direction::SEND,
-                            .time = buffer_time,
-                            .data = System_Ui->_device_sx1262.auto_send.text,
-                        };
-                    System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
-
-                    if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::RF)
-                    {
-                        // 更新聊天容器
-                        _lock_acquire(&lvgl_api_lock);
-                        System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
-                        _lock_release(&lvgl_api_lock);
-                    }
-
-                    Lora_Send_falg = true;
-
-                    auto_send_cycle_time = esp_log_timestamp() + System_Ui->_device_sx1262.auto_send.interval;
-                }
-            }
-        }
-
-        if (Lora_Send_falg == true)
+        case Lvgl_Ui::System::Rf_Chip_Type::SX1262:
         {
-            // 设置发送模式，发送完成后进入快速切换模式（FS模式）
-            SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::TX, 0, Cpp_Bus_Driver::Sx126x::Fallback_Mode::FS);
-            SX1262->set_irq_pin_mode(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TX_DONE);
-            SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TX_DONE);
+            // if (esp_log_timestamp() > cycle_time)
+            // {
+            //     printf("sx1262 ID: %#X\n", SX1262->get_device_id());
 
-            printf("SX1262 send start\n");
-            printf("SX1262 send data size: %d\n", strlen(reinterpret_cast<const char *>(Lora_Send_Package)));
-            uint16_t timeout_count = 0;
-            if (SX1262->send_data(Lora_Send_Package, strlen(reinterpret_cast<const char *>(Lora_Send_Package))) == true)
+            //     printf("sx1262 get current limit: %d\n", SX1262->get_current_limit());
+
+            //     switch (SX1262->get_packet_type())
+            //     {
+            //     case Cpp_Bus_Driver::Sx126x::Packet_Type::GFSK:
+            //         printf("sx1262 packet type: GFSK\n");
+            //         break;
+            //     case Cpp_Bus_Driver::Sx126x::Packet_Type::LORA:
+            //         printf("sx1262 packet type: LORA\n");
+            //         break;
+            //     case Cpp_Bus_Driver::Sx126x::Packet_Type::LR_FHSS:
+            //         printf("sx1262 packet type: LR_FHSS\n");
+            //         break;
+
+            //     default:
+            //         break;
+            //     }
+
+            //     switch (SX1262->parse_chip_mode_status(SX1262->get_status()))
+            //     {
+            //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::STBY_RC:
+            //         printf("sx1262 chip mode status: STBY_RC\n");
+            //         break;
+            //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::STBY_XOSC:
+            //         printf("sx1262 chip mode status: STBY_XOSC\n");
+            //         break;
+            //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::FS:
+            //         printf("sx1262 chip mode status: FS\n");
+            //         break;
+            //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::RX:
+            //         printf("sx1262 chip mode status: RX\n");
+            //         break;
+            //     case Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::TX:
+            //         printf("sx1262 chip mode status: TX\n");
+            //         break;
+
+            //     default:
+            //         break;
+            //     }
+
+            //     cycle_time = esp_log_timestamp() + 1000;
+            // }
+
+            if (System_Ui->_device_sx1262.auto_send.flag == true)
             {
-                while (1) // 等待发送完成
+                if (Rf_Send_Flag == false)
                 {
-                    if (XL9535->pin_read(XL9535_SX1262_DIO1) == 1) // 发送完成中断
+                    if (esp_log_timestamp() > auto_send_cycle_time)
                     {
-                        // 方法1（速度比方法2快）
-                        //  获取芯片模式状态
-                        //  先前设置发送成功后进入FS模式，所以这里进入FS模式即判断成功发送
-                        if (SX1262->parse_chip_mode_status(SX1262->get_status()) == Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::FS)
+                        memset(Rf_Send_Package, '\0', sizeof(Rf_Send_Package));
+
+                        // 检查长度是否越界
+                        if (System_Ui->_device_sx1262.auto_send.text.size() <= 255)
                         {
-                            printf("SX1262 send success\n");
-                            break;
+                            memcpy(Rf_Send_Package, System_Ui->_device_sx1262.auto_send.text.data(), System_Ui->_device_sx1262.auto_send.text.size());
                         }
-
-                        // //方法2（速度比方法1慢）
-                        // // 检查中断
-                        // Cpp_Bus_Driver::Sx126x::Iqr_Status is;
-                        // if (SX1262->parse_irq_status(SX1262->get_irq_status(), is) == false)
-                        // {
-                        //     printf("parse_Iqr_status fail\n");
-                        // }
-                        // else
-                        // {
-                        //     if (is.all_flag.tx_done == true) // 发送完成
-                        //     {
-                        //         printf("SX1262 send success\n");
-                        //         break;
-                        //     }
-                        // }
-                    }
-
-                    timeout_count++;
-                    if (timeout_count > 1000) // 超时
-                    {
-                        printf("SX1262 send timeout\n");
-                        break;
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(10));
-                }
-            }
-            else
-            {
-                printf("SX1262 send fail\n");
-            }
-
-            // vTaskDelay(pdMS_TO_TICKS(1000));
-
-            // 还原接收模式
-            SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::RX);
-            SX1262->set_irq_pin_mode(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
-            SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
-
-            Lora_Send_falg = false;
-        }
-
-        if (XL9535->pin_read(XL9535_SX1262_DIO1) == 1) // 接收完成中断
-        {
-            // 检查中断
-            Cpp_Bus_Driver::Sx126x::Irq_Status is;
-            if (SX1262->parse_irq_status(SX1262->get_irq_flag(), is) == false)
-            {
-                printf("parse_irq_status fail\n");
-            }
-            else
-            {
-                if (is.all_flag.tx_rx_timeout == true)
-                {
-                    printf("receive timeout\n");
-                    SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TIMEOUT);
-                }
-                else if (is.all_flag.crc_error == true)
-                {
-                    printf("receive crc error\n");
-                    SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::CRC_ERROR);
-                }
-                else if (is.lora_reg_flag.header_error == true)
-                {
-                    printf("receive header error\n");
-                    SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::HEADER_ERROR);
-                }
-                else
-                {
-                    uint8_t receive_package[255] = {0};
-                    uint8_t length_buffer = SX1262->receive_data(receive_package);
-                    if (length_buffer == 0)
-                    {
-                        printf("SX1262 receive fail (error assert: %d)\n", SX1262->_assert);
-                    }
-                    else
-                    {
-                        Cpp_Bus_Driver::Sx126x::Packet_Metrics pm;
-                        if (SX1262->get_lora_packet_metrics(pm) == true)
+                        else
                         {
-                            printf("SX1262 receive rssi_average: %.01f rssi_instantaneous: %.01f snr: %.01f\n", pm.lora.rssi_average, pm.lora.rssi_instantaneous, pm.lora.snr);
-                        }
+                            // 处理错误：数据过长
+                            memcpy(Rf_Send_Package, System_Ui->_device_sx1262.auto_send.text.data(), 254);
+                            Rf_Send_Package[254] = '\0';
 
-                        for (uint8_t i = 0; i < length_buffer; i++)
-                        {
-                            printf("get SX1262 data[%d]: %d\n", i, receive_package[i]);
+                            printf("sx1262 send out of bounds(data > Rf_Send_Package)\n");
                         }
 
                         char buffer_time[15];
                         snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", System_Ui->_time.hour, System_Ui->_time.minute, System_Ui->_time.second);
 
-                        // 创建一个 vector 来存储数据，因为 std::remove 需要可修改的序列
-                        std::vector<uint8_t> buffer_vector(receive_package, receive_package + length_buffer);
-
-                        // 使用 std::remove 将 \0 字符移除
-                        buffer_vector.erase(std::remove(buffer_vector.begin(), buffer_vector.end(), 0), buffer_vector.end());
-
-                        // 使用 string 的构造函数从 vector 创建 string
-                        std::string message_str(buffer_vector.begin(), buffer_vector.end());
-
-                        message_str += '\0';
-
-                        char buffer_rssi_snr[30];
-                        snprintf(buffer_rssi_snr, sizeof(buffer_rssi_snr), "rssi[%.01f] snr[%.01f]", pm.lora.rssi_average, pm.lora.snr);
-
                         Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
                             {
-                                .direction = Lvgl_Ui::System::Chat_Message_Direction::RECEIVE,
+                                .direction = Lvgl_Ui::System::Chat_Message_Direction::SEND,
                                 .time = buffer_time,
-                                .data = message_str,
-                                .rssi_snr = buffer_rssi_snr,
+                                .data = System_Ui->_device_sx1262.auto_send.text,
                             };
                         System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
 
@@ -1662,19 +1534,310 @@ void device_sx1262_task(void *arg)
                             System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
                             _lock_release(&lvgl_api_lock);
                         }
+
+                        Rf_Send_Flag = true;
+
+                        auto_send_cycle_time = esp_log_timestamp() + System_Ui->_device_sx1262.auto_send.interval;
                     }
                 }
             }
 
-            SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
+            if (Rf_Send_Flag == true)
+            {
+                // 设置发送模式，发送完成后进入快速切换模式（FS模式）
+                SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::TX, 0, Cpp_Bus_Driver::Sx126x::Fallback_Mode::FS);
+                SX1262->set_irq_pin_mode(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TX_DONE);
+                SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TX_DONE);
+
+                printf("sx1262 send start\n");
+                printf("sx1262 send data size: %d\n", strlen(reinterpret_cast<const char *>(Rf_Send_Package)));
+                uint16_t timeout_count = 0;
+                if (SX1262->send_data(Rf_Send_Package, strlen(reinterpret_cast<const char *>(Rf_Send_Package))) == true)
+                {
+                    while (1) // 等待发送完成
+                    {
+                        if (XL9535->pin_read(XL9535_SX1262_DIO1) == 1) // 发送完成中断
+                        {
+                            // 方法1（速度比方法2快）
+                            //  获取芯片模式状态
+                            //  先前设置发送成功后进入FS模式，所以这里进入FS模式即判断成功发送
+                            if (SX1262->parse_chip_mode_status(SX1262->get_status()) == Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::FS)
+                            {
+                                printf("sx1262 send success\n");
+                                break;
+                            }
+
+                            // //方法2（速度比方法1慢）
+                            // // 检查中断
+                            // Cpp_Bus_Driver::Sx126x::Iqr_Status is;
+                            // if (SX1262->parse_irq_status(SX1262->get_irq_status(), is) == false)
+                            // {
+                            //     printf("parse_Iqr_status fail\n");
+                            // }
+                            // else
+                            // {
+                            //     if (is.all_flag.tx_done == true) // 发送完成
+                            //     {
+                            //         printf("sx1262 send success\n");
+                            //         break;
+                            //     }
+                            // }
+                        }
+
+                        timeout_count++;
+                        if (timeout_count > 1000) // 超时
+                        {
+                            printf("sx1262 send timeout\n");
+                            break;
+                        }
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    }
+                }
+                else
+                {
+                    printf("sx1262 send fail\n");
+                }
+
+                // vTaskDelay(pdMS_TO_TICKS(1000));
+
+                // 还原接收模式
+                SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::RX);
+                SX1262->set_irq_pin_mode(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
+                SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
+
+                Rf_Send_Flag = false;
+            }
+
+            if (XL9535->pin_read(XL9535_SX1262_DIO1) == 1) // 接收完成中断
+            {
+                // 检查中断
+                Cpp_Bus_Driver::Sx126x::Irq_Status is;
+                if (SX1262->parse_irq_status(SX1262->get_irq_flag(), is) == false)
+                {
+                    printf("parse_irq_status fail\n");
+                }
+                else
+                {
+                    if (is.all_flag.tx_rx_timeout == true)
+                    {
+                        printf("receive timeout\n");
+                        SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TIMEOUT);
+                    }
+                    else if (is.all_flag.crc_error == true)
+                    {
+                        printf("receive crc error\n");
+                        SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::CRC_ERROR);
+                    }
+                    else if (is.lora_reg_flag.header_error == true)
+                    {
+                        printf("receive header error\n");
+                        SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::HEADER_ERROR);
+                    }
+                    else
+                    {
+                        uint8_t receive_package[255] = {0};
+                        uint8_t length_buffer = SX1262->receive_data(receive_package);
+                        if (length_buffer == 0)
+                        {
+                            printf("sx1262 receive fail (error assert: %d)\n", SX1262->_assert);
+                        }
+                        else
+                        {
+                            Cpp_Bus_Driver::Sx126x::Packet_Metrics pm;
+                            if (SX1262->get_lora_packet_metrics(pm) == true)
+                            {
+                                printf("sx1262 receive rssi_average: %.01f rssi_instantaneous: %.01f snr: %.01f\n", pm.lora.rssi_average, pm.lora.rssi_instantaneous, pm.lora.snr);
+                            }
+
+                            for (uint8_t i = 0; i < length_buffer; i++)
+                            {
+                                printf("get sx1262 data[%d]: %d\n", i, receive_package[i]);
+                            }
+
+                            char buffer_time[15];
+                            snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", System_Ui->_time.hour, System_Ui->_time.minute, System_Ui->_time.second);
+
+                            // 创建一个 vector 来存储数据，因为 std::remove 需要可修改的序列
+                            std::vector<uint8_t> buffer_vector(receive_package, receive_package + length_buffer);
+
+                            // 使用 std::remove 将 \0 字符移除
+                            buffer_vector.erase(std::remove(buffer_vector.begin(), buffer_vector.end(), 0), buffer_vector.end());
+
+                            // 使用 string 的构造函数从 vector 创建 string
+                            std::string message_str(buffer_vector.begin(), buffer_vector.end());
+
+                            message_str += '\0';
+
+                            char buffer_data_info[30];
+                            snprintf(buffer_data_info, sizeof(buffer_data_info), "rssi[%.01f] snr[%.01f]", pm.lora.rssi_average, pm.lora.snr);
+
+                            Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
+                                {
+                                    .direction = Lvgl_Ui::System::Chat_Message_Direction::RECEIVE,
+                                    .time = buffer_time,
+                                    .data = message_str,
+                                    .data_info = buffer_data_info,
+                                };
+                            System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
+
+                            if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::RF)
+                            {
+                                // 更新聊天容器
+                                _lock_acquire(&lvgl_api_lock);
+                                System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
+                                _lock_release(&lvgl_api_lock);
+                            }
+                        }
+                    }
+                }
+
+                SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
+            }
+        }
+        break;
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+        case Lvgl_Ui::System::Rf_Chip_Type::CC1101:
+        {
+            if (System_Ui->_device_cc1101.auto_send.flag == true)
+            {
+                if (Rf_Send_Flag == false)
+                {
+                    if (esp_log_timestamp() > auto_send_cycle_time)
+                    {
+                        memset(Rf_Send_Package, '\0', sizeof(Rf_Send_Package));
+
+                        // 检查长度是否越界
+                        if (System_Ui->_device_cc1101.auto_send.text.size() <= 255)
+                        {
+                            memcpy(Rf_Send_Package, System_Ui->_device_cc1101.auto_send.text.data(), System_Ui->_device_cc1101.auto_send.text.size());
+                        }
+                        else
+                        {
+                            // 处理错误：数据过长
+                            memcpy(Rf_Send_Package, System_Ui->_device_cc1101.auto_send.text.data(), 254);
+                            Rf_Send_Package[254] = '\0';
+
+                            printf("cc1101 send out of bounds(data > Rf_Send_Package)\n");
+                        }
+
+                        char buffer_time[15];
+                        snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", System_Ui->_time.hour, System_Ui->_time.minute, System_Ui->_time.second);
+
+                        Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
+                            {
+                                .direction = Lvgl_Ui::System::Chat_Message_Direction::SEND,
+                                .time = buffer_time,
+                                .data = System_Ui->_device_cc1101.auto_send.text,
+                            };
+                        System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
+
+                        if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::RF)
+                        {
+                            // 更新聊天容器
+                            _lock_acquire(&lvgl_api_lock);
+                            System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
+                            _lock_release(&lvgl_api_lock);
+                        }
+
+                        Rf_Send_Flag = true;
+
+                        auto_send_cycle_time = esp_log_timestamp() + System_Ui->_device_cc1101.auto_send.interval;
+                    }
+                }
+            }
+
+            if (Rf_Send_Flag == true)
+            {
+                printf("cc1101 send start\n");
+                printf("cc1101 send data size: %d\n", strlen(reinterpret_cast<const char *>(Rf_Send_Package)));
+                Cc1101.finishTransmit();
+                int16_t assert = Cc1101.transmit(Rf_Send_Package, strlen(reinterpret_cast<const char *>(Rf_Send_Package)));
+                if (assert != RADIOLIB_ERR_NONE)
+                {
+                    printf("cc1101 transmit fail (error code: %d)\n", assert);
+                }
+
+                assert = Cc1101.startReceive();
+                if (assert != RADIOLIB_ERR_NONE)
+                {
+                    printf("cc1101 startReceive fail (error code: %d)\n", assert);
+                }
+
+                Cc1101_Interrupt_Flag = false;
+
+                Rf_Send_Flag = false;
+            }
+
+            if (Cc1101_Interrupt_Flag == true) // 接收完成中断
+            {
+                uint8_t receive_package[255] = {0};
+                uint8_t length_buffer = Cc1101.getPacketLength();
+                int16_t assert = Cc1101.readData(receive_package, length_buffer);
+                if (assert != RADIOLIB_ERR_NONE)
+                {
+                    printf("cc1101 receive fail (error assert: %d)\n", assert);
+                }
+                else
+                {
+                    float buffer_rssi = Cc1101.getRSSI();
+                    uint8_t buffer_lqi = Cc1101.getLQI();
+                    printf("cc1101 receive rssi: %.01f lqi: %d\n", buffer_rssi, buffer_lqi);
+
+                    for (uint8_t i = 0; i < length_buffer; i++)
+                    {
+                        printf("get cc1101 data[%d]: %d\n", i, receive_package[i]);
+                    }
+
+                    char buffer_time[15];
+                    snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", System_Ui->_time.hour, System_Ui->_time.minute, System_Ui->_time.second);
+
+                    // 创建一个 vector 来存储数据，因为 std::remove 需要可修改的序列
+                    std::vector<uint8_t> buffer_vector(receive_package, receive_package + length_buffer);
+
+                    // 使用 std::remove 将 \0 字符移除
+                    buffer_vector.erase(std::remove(buffer_vector.begin(), buffer_vector.end(), 0), buffer_vector.end());
+
+                    // 使用 string 的构造函数从 vector 创建 string
+                    std::string message_str(buffer_vector.begin(), buffer_vector.end());
+
+                    message_str += '\0';
+
+                    char buffer_data_info[30];
+                    snprintf(buffer_data_info, sizeof(buffer_data_info), "rssi[%.01f] lqi[%d]", buffer_rssi, buffer_lqi);
+
+                    Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
+                        {
+                            .direction = Lvgl_Ui::System::Chat_Message_Direction::RECEIVE,
+                            .time = buffer_time,
+                            .data = message_str,
+                            .data_info = buffer_data_info,
+                        };
+                    System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
+
+                    if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::RF)
+                    {
+                        // 更新聊天容器
+                        _lock_acquire(&lvgl_api_lock);
+                        System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
+                        _lock_release(&lvgl_api_lock);
+                    }
+                }
+
+                Cc1101_Interrupt_Flag = false;
+            }
+        }
+        break;
+#endif
+        default:
+            break;
         }
 
-        // 如果有触发停止标志就等待lora一次发送或接收过程完成后再停止
+        // 如果有触发停止标志就等待一次发送或接收过程完成后再停止
         // 这样做为了防止spi意外终止导致的iic的0x107错误
         // 多任务处理spi和iic不能同时工作，spi工作的时候有概率会导致iic死机
-        if (Device_Sx1262_Task_Stop_Flag == true)
+        if (Device_Rf_Task_Stop_Flag == true)
         {
-            vTaskSuspend(Lora_Task_Handle);
+            vTaskSuspend(Rf_Task_Handle);
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -1992,6 +2155,7 @@ void my_keyboard_read(lv_indev_t *indev, lv_indev_data_t *data)
     static uint32_t last_key = 0; // 静态变量记录上一次按键
     static bool pressed_state_flag = false;
     static bool caps_lock_flag = false;
+    static bool shift_press_flag = false;
 
     if (TCA8418_Interrupt_Flag == true)
     {
@@ -2051,19 +2215,36 @@ void my_keyboard_read(lv_indev_t *indev, lv_indev_data_t *data)
                                         }
                                     }
 
-                                    last_key = Tca8418_Map_Lvgl[tp.info[i].num - 1]; // 保存最后按下的键
-                                    if (caps_lock_flag == true)
+                                    if (Tca8418_Map[tp.info[i].num - 1] == "Shift")
                                     {
-                                        // 如果是小写字母，转为大写
-                                        if (last_key >= 'a' && last_key <= 'z')
+                                        shift_press_flag = true;
+                                    }
+
+                                    if (shift_press_flag == false)
+                                    {
+                                        last_key = Tca8418_Map_Lvgl[tp.info[i].num - 1]; // 保存最后按下的键
+                                        if (caps_lock_flag == true)
                                         {
-                                            last_key = last_key - 'a' + 'A';
+                                            // 如果是小写字母，转为大写
+                                            if (last_key >= 'a' && last_key <= 'z')
+                                            {
+                                                last_key = last_key - 'a' + 'A';
+                                            }
                                         }
+                                    }
+                                    else
+                                    {
+                                        last_key = Tca8418_Map_Lvgl_Shift[tp.info[i].num - 1]; // 保存最后按下的键
                                     }
                                 }
                                 else
                                 {
                                     pressed_state_flag = false;
+
+                                    if (Tca8418_Map[tp.info[i].num - 1] == "Shift")
+                                    {
+                                        shift_press_flag = false;
+                                    }
                                 }
                             }
 
@@ -2120,7 +2301,38 @@ void device_nfc_task(void *arg)
             break;
         }
 
+        // 如果有触发停止标志就等待一次发送或接收过程完成后再停止
+        // 这样做为了防止spi意外终止导致的iic的0x107错误
+        // 多任务处理spi和iic不能同时工作，spi工作的时候有概率会导致iic死机
+        if (Device_Nfc_Task_Stop_Flag == true)
+        {
+            vTaskSuspend(Nfc_Task_Handle);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void Cc1101_Rf_Switch_Control(Cc1101_Rf_Switch rf_switch)
+{
+    switch (rf_switch)
+    {
+    case Cc1101_Rf_Switch::RF_SWITCH_315MHZ:
+        XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_0, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+        XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_1, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+        break;
+    case Cc1101_Rf_Switch::RF_SWITCH_434MHZ:
+        XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_0, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+        XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_1, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+        break;
+    case Cc1101_Rf_Switch::RF_SWITCH_868_915MHZ:
+        XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_0, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+        XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_1, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+        break;
+
+    default:
+        printf("unknown rf switch\n");
+        break;
     }
 }
 #endif
@@ -2442,7 +2654,7 @@ void System_Ui_Callback_Init(void)
             XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::LOW);
         }
 
-        if (SX1262->config_lora_params(device_sx1262.params.freq, device_sx1262.params.bw, device_sx1262.params.current_limit,
+        if (SX1262->config_lora_params(device_sx1262.params.freq, device_sx1262.params.bandwidth, device_sx1262.params.current_limit,
                                        device_sx1262.params.power, device_sx1262.params.sf, device_sx1262.params.cr, device_sx1262.params.crc_type,
                                        device_sx1262.params.preamble_length, device_sx1262.params.sync_word) == false)
         {
@@ -2454,41 +2666,41 @@ void System_Ui_Callback_Init(void)
         SX1262->set_irq_pin_mode(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
         SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
 
-        printf("lora config_lora_params finish start lora transmit\n");
+        printf("config_lora_params finish start sx1262 transmit\n");
         return true;
     };
 
     System_Ui->_win_rf_send_data_callback = [](std::string data)
     {
-        memset(Lora_Send_Package, '\0', sizeof(Lora_Send_Package));
+        memset(Rf_Send_Package, '\0', sizeof(Rf_Send_Package));
 
         // 检查长度是否越界
         if (data.size() <= 255)
         {
-            memcpy(Lora_Send_Package, data.data(), data.size());
+            memcpy(Rf_Send_Package, data.data(), data.size());
         }
         else
         {
             // 处理错误：数据过长
-            memcpy(Lora_Send_Package, data.data(), 254);
-            Lora_Send_Package[254] = '\0';
+            memcpy(Rf_Send_Package, data.data(), 254);
+            Rf_Send_Package[254] = '\0';
 
-            printf("lora send out of bounds(data > Lora_Send_Package)\n");
+            printf("lora send out of bounds(data > Rf_Send_Package)\n");
         }
 
-        Lora_Send_falg = true;
+        Rf_Send_Flag = true;
     };
 
     System_Ui->_win_rf_status_callback = [](bool status)
     {
         if (status == true)
         {
-            Device_Sx1262_Task_Stop_Flag = false;
-            vTaskResume(Lora_Task_Handle);
+            Device_Rf_Task_Stop_Flag = false;
+            vTaskResume(Rf_Task_Handle);
         }
         else
         {
-            Device_Sx1262_Task_Stop_Flag = true;
+            Device_Rf_Task_Stop_Flag = true;
         }
     };
 
@@ -2520,12 +2732,100 @@ void System_Ui_Callback_Init(void)
         {
             St25r3916_Nfc_Mode = Nfc_Mode::TEST;
 
+            Device_Nfc_Task_Stop_Flag = false;
             vTaskResume(Nfc_Task_Handle);
         }
         else
         {
-            vTaskSuspend(Nfc_Task_Handle);
+            Device_Nfc_Task_Stop_Flag = true;
         }
+    };
+
+    System_Ui->_win_rf_config_cc1101_params_callback = [](Lvgl_Ui::System::Device_Cc1101 device_cc1101) -> bool
+    {
+        Cc1101_Rf_Switch_Control(static_cast<Cc1101_Rf_Switch>(device_cc1101.params.rf_switch));
+
+        float buffer_bandwidth = 0;
+
+        switch (device_cc1101.params.bandwidth)
+        {
+        case Lvgl_Ui::System::Cc1101_Bw::BW_58KHZ:
+            buffer_bandwidth = 58.0f; // 58 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_68KHZ:
+            buffer_bandwidth = 68.0f; // 68 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_81KHZ:
+            buffer_bandwidth = 81.0f; // 81 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_102KHZ:
+            buffer_bandwidth = 102.0f; // 102 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_116KHZ:
+            buffer_bandwidth = 116.0f; // 116 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_135KHZ:
+            buffer_bandwidth = 135.0f; // 135 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_162KHZ:
+            buffer_bandwidth = 162.0f; // 162 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_203KHZ:
+            buffer_bandwidth = 203.0f; // 203 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_232KHZ:
+            buffer_bandwidth = 232.0f; // 232 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_270KHZ:
+            buffer_bandwidth = 270.0f; // 270 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_325KHZ:
+            buffer_bandwidth = 325.0f; // 325 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_406KHZ:
+            buffer_bandwidth = 406.0f; // 406 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_464KHZ:
+            buffer_bandwidth = 464.0f; // 464 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_541KHZ:
+            buffer_bandwidth = 541.0f; // 541 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_650KHZ:
+            buffer_bandwidth = 650.0f; // 650 kHz
+            break;
+        case Lvgl_Ui::System::Cc1101_Bw::BW_812KHZ:
+            buffer_bandwidth = 812.0f; // 812 kHz
+            break;
+        default:
+            break;
+        }
+
+        int16_t assert = Cc1101.begin(device_cc1101.params.freq, device_cc1101.params.bit_rate, device_cc1101.params.freq_deviation_khz,
+                                      buffer_bandwidth, device_cc1101.params.power, device_cc1101.params.preamble_length);
+        if (assert != RADIOLIB_ERR_NONE)
+        {
+            printf("config_cc1101_params fail (error code: %d)\n", assert);
+            return false;
+        }
+
+        assert = Cc1101.setSyncWord(device_cc1101.params.sync_word >> 8, device_cc1101.params.sync_word);
+        if (assert != RADIOLIB_ERR_NONE)
+        {
+            printf("cc1101 setSyncWord fail (error code: %d)\n", assert);
+            return false;
+        }
+
+        assert = Cc1101.startReceive();
+        if (assert != RADIOLIB_ERR_NONE)
+        {
+            printf("cc1101 startReceive fail (error code: %d)\n", assert);
+        }
+
+        Cc1101_Interrupt_Flag = false;
+
+        printf("config_cc1101_params finish start cc1101 transmit\n");
+        return true;
     };
 
 #endif
@@ -3624,6 +3924,28 @@ extern "C" void app_main(void)
 
     St25r3916_Init();
 
+    XL9555->pin_mode(XL9555_T_MIXRF_CC1101_RF_SWITCH_0, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9555->pin_mode(XL9555_T_MIXRF_CC1101_RF_SWITCH_1, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+
+    ESP32P4->create_gpio_interrupt(T_MIXRF_CC1101_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::RISING,
+                                   [](void *arg) -> IRAM_ATTR void
+                                   {
+                                       Cc1101_Interrupt_Flag = true;
+                                   });
+
+    Cc1101_SPI_Bus->_spi_bus_init_flag = true;
+    int16_t status = Cc1101.begin();
+    if (status == RADIOLIB_ERR_NONE)
+    {
+        printf("cc1101 init success\n");
+    }
+    else
+    {
+        printf("cc1101 init fail (error code: %d)\n", status);
+    }
+
+    System_Ui->set_config_rf_params(System_Ui->_device_cc1101);
+
 #endif
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
@@ -3724,34 +4046,16 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(10));
 
     XL9535->pin_mode(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
-    // 默认使用RF1天线
-    if (System_Ui->_device_sx1262.params.rf_switch == 0)
-    {
-        XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
-    }
-    else
-    {
-        XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::LOW);
-    }
 
     XL9535->pin_mode(XL9535_SX1262_DIO1, Cpp_Bus_Driver::Xl95x5::Mode::INPUT);
     SX1262_SPI_Bus->_spi_bus_init_flag = true;
     if (SX1262->begin(10000000) == false)
     {
         System_Ui->_device_sx1262.init_flag = false;
-        printf("SX1262 begin fail\n");
+        printf("sx1262 begin fail\n");
     }
 
-    if (SX1262->config_lora_params(System_Ui->_device_sx1262.params.freq, System_Ui->_device_sx1262.params.bw, System_Ui->_device_sx1262.params.current_limit,
-                                   System_Ui->_device_sx1262.params.power, System_Ui->_device_sx1262.params.sf, System_Ui->_device_sx1262.params.cr,
-                                   System_Ui->_device_sx1262.params.crc_type, System_Ui->_device_sx1262.params.preamble_length, System_Ui->_device_sx1262.params.sync_word) == false)
-    {
-        printf("config_lora_params fail\n");
-    }
-    SX1262->clear_buffer();
-    SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::RX);
-    SX1262->set_irq_pin_mode(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
-    SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
+    System_Ui->set_config_rf_params(System_Ui->_device_sx1262);
 
     _lock_acquire(&lvgl_api_lock);
     Set_Lvgl_Startup_Progress_Bar(100);
@@ -3772,7 +4076,7 @@ extern "C" void app_main(void)
     xTaskCreate(device_rtc_task, "device_rtc_task", 4 * 1024, NULL, 3, NULL);
     xTaskCreate(device_at_task, "device_at_task", 4 * 1024, NULL, 3, &At_Task_Handle);
     // xTaskCreate(esp32p4_sleep_task, "esp32p4_sleep_task", 4 * 1024, NULL, 3, &Sleep_Task_Handle);
-    xTaskCreate(device_sx1262_task, "device_sx1262_task", 4 * 1024, NULL, 3, &Lora_Task_Handle);
+    xTaskCreate(device_rf_task, "device_rf_task", 4 * 1024, NULL, 3, &Rf_Task_Handle);
     xTaskCreate(iis_transmission_data_stream_task, "iis_transmission_data_stream_task", 4 * 1024, NULL, 4, &Iis_Transmission_Data_Stream_Task);
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     xTaskCreate(device_nfc_task, "device_nfc_task", 8 * 1024, NULL, 3, &Nfc_Task_Handle);

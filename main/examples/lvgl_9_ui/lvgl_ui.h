@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-08 14:22:18
+ * @LastEditTime: 2025-09-09 11:26:06
  * @License: GPL 3.0
  */
 #pragma once
@@ -109,6 +109,9 @@ namespace Lvgl_Ui
         enum class Rf_Chip_Type
         {
             SX1262 = 0,
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+            CC1101,
+#endif
         };
 
         struct Win_Rf_Chat_Message
@@ -116,7 +119,7 @@ namespace Lvgl_Ui
             Chat_Message_Direction direction;
             std::string time;
             std::string data;
-            std::string rssi_snr;
+            std::string data_info;
         };
 
         struct Registry
@@ -320,6 +323,26 @@ namespace Lvgl_Ui
                                     lv_obj_t *crc_type;
                                 } dropdown;
                             } sx1262;
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                            struct
+                            {
+                                struct
+                                {
+                                    lv_obj_t *freq;
+                                    lv_obj_t *bit_rate;
+                                    lv_obj_t *freq_deviation_khz;
+                                    lv_obj_t *power;
+                                    lv_obj_t *preamble_length;
+                                    lv_obj_t *sync_word;
+                                } textarea;
+
+                                struct
+                                {
+                                    lv_obj_t *rf_switch;
+                                    lv_obj_t *bandwidth;
+                                } dropdown;
+                            } cc1101;
+#endif
 
                         } config_rf_params;
 
@@ -425,7 +448,7 @@ namespace Lvgl_Ui
             {
                 bool rf_switch = 0; // 射频开关
                 double freq = 868.0;
-                Sx126x::Lora_Bw bw = Sx126x::Lora_Bw::BW_125000HZ;
+                Sx126x::Lora_Bw bandwidth = Sx126x::Lora_Bw::BW_125000HZ;
                 float current_limit = 140.0;
                 int8_t power = 22;
                 Sx126x::Sf sf = Sx126x::Sf::SF9;
@@ -448,6 +471,55 @@ namespace Lvgl_Ui
         Time _time;
 
         Device_Sx1262 _device_sx1262;
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+        // cc1101带宽
+        enum class Cc1101_Bw
+        {
+            BW_58KHZ,
+            BW_68KHZ,
+            BW_81KHZ,
+            BW_102KHZ,
+            BW_116KHZ,
+            BW_135KHZ,
+            BW_162KHZ,
+            BW_203KHZ,
+            BW_232KHZ,
+            BW_270KHZ,
+            BW_325KHZ,
+            BW_406KHZ,
+            BW_464KHZ,
+            BW_541KHZ,
+            BW_650KHZ,
+            BW_812KHZ,
+        };
+
+        struct Device_Cc1101
+        {
+            bool init_flag = false;
+
+            struct
+            {
+                bool flag = false;
+                std::string text = "ciallo";
+                uint32_t interval = 1000;
+            } auto_send;
+
+            struct
+            {
+                uint8_t rf_switch = 0; // 射频开关
+                double freq = 315.0;
+                Cc1101_Bw bandwidth = Cc1101_Bw::BW_58KHZ;
+                float bit_rate = 4.8;
+                float freq_deviation_khz = 5.0;
+                int8_t power = 10;
+                uint16_t preamble_length = 16;
+                uint16_t sync_word = 0xAABB;
+            } params;
+        };
+
+        Device_Cc1101 _device_cc1101;
+#endif
 
         Current_Win _current_win = Current_Win::UNKNOWN;
 
@@ -569,7 +641,7 @@ namespace Lvgl_Ui
         void init_win_rf_setings(void);
         void init_win_rf_setings_keyboard_position_event_cb(lv_obj_t *parent);
         void init_win_rf_setings_rf_chip_type_message_box(void);
-        void init_win_rf_setings_config_lora_params_message_box(void);
+        void init_win_rf_setings_config_sx1262_params_message_box(void);
         void init_win_rf_setings_auto_send_message_box(void);
         bool set_config_rf_params(Device_Sx1262 device_sx1262);
         void set_rf_send_data_callback(std::string data);
@@ -584,12 +656,18 @@ namespace Lvgl_Ui
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         void (*_win_cit_nfc_test_callback)(bool status) = nullptr;
 
+        bool (*_win_rf_config_cc1101_params_callback)(Device_Cc1101 device_cc1101) = nullptr;
+
         void set_nfc_test(bool status);
 
         void init_win_cit_keyboard_test(void);
         bool set_keyboard_group(lv_group_t *group);
 
         void init_win_cit_nfc_test(void);
+
+        void init_win_rf_setings_config_cc1101_params_message_box(void);
+
+        bool set_config_rf_params(Device_Cc1101 device_cc1101);
 #endif
     };
 
