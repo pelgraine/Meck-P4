@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-09 15:12:35
+ * @LastEditTime: 2025-09-09 15:43:19
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -4048,7 +4048,9 @@ extern "C" void app_main(void)
     XL9535->pin_mode(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
 
     XL9535->pin_mode(XL9535_SX1262_DIO1, Cpp_Bus_Driver::Xl95x5::Mode::INPUT);
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     SX1262_SPI_Bus->_spi_bus_init_flag = true;
+#endif
     if (SX1262->begin(10000000) == false)
     {
         System_Ui->_device_sx1262.init_flag = false;

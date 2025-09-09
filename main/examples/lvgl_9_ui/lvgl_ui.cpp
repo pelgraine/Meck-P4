@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-09 15:34:41
+ * @LastEditTime: 2025-09-09 16:24:58
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -3216,7 +3216,7 @@ namespace Lvgl_Ui
 
             // 判断 wlcm[i].data 的长度并插入换行符
             std::string message_text = wlcm[i].data;
-
+#if defined SCREEN_ROTATION_DIRECTION_0
             if (wlcm[i].data.size() > 15)
             {
                 for (size_t pos = 15; pos < message_text.length(); pos += 16)
@@ -3224,6 +3224,17 @@ namespace Lvgl_Ui
                     message_text.insert(pos, "\n");
                 }
             }
+#elif defined SCREEN_ROTATION_DIRECTION_90
+            if (wlcm[i].data.size() > 30)
+            {
+                for (size_t pos = 30; pos < message_text.length(); pos += 31)
+                {
+                    message_text.insert(pos, "\n");
+                }
+            }
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
             // 消息内容
             lv_obj_t *message_label = lv_label_create(message_btn);
@@ -3446,7 +3457,7 @@ namespace Lvgl_Ui
                                     lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
 
                                     // 调整聊天框的大小
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, 900);
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, self->_height * 0.7);
                                     lv_obj_center(self->_registry.win.rf.setings.message_box.root_container);
 
                                     break;
@@ -3567,7 +3578,13 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
+        lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.6);
+#elif defined SCREEN_ROTATION_DIRECTION_90
         lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.5);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.parameter_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
         lv_obj_set_scrollbar_mode(_registry.win.rf.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
         lv_obj_align_to(_registry.win.rf.setings.message_box.parameter_container, _registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
@@ -3584,10 +3601,10 @@ namespace Lvgl_Ui
                                     lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
 
                                     // 调整聊天框的大小
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, 900);
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, self->_height * 0.7);
                                     lv_obj_center(self->_registry.win.rf.setings.message_box.root_container);
                                     lv_obj_align(self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, 780);
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, self->_height * 0.6);
                                     lv_obj_align_to(self->_registry.win.rf.setings.message_box.parameter_container, self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
 #elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
                                     lv_group_remove_all_objs(self->_registry.keyboard_group);
@@ -3604,8 +3621,14 @@ namespace Lvgl_Ui
 
         _registry.win.rf.setings.rf_chip_type.dropdown.rf_chip = lv_dropdown_create(_registry.win.rf.setings.message_box.parameter_container);
         lv_dropdown_set_dir(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, LV_DIR_BOTTOM);
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
+        lv_dropdown_set_options(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, "sx1262");
+#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         lv_dropdown_set_options(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, "sx1262\n"
                                                                                         "cc1101");
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
         lv_dropdown_set_selected(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, static_cast<uint32_t>(_rf_chip_type));
         lv_obj_set_style_pad_top(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -3800,7 +3823,13 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
+        lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.6);
+#elif defined SCREEN_ROTATION_DIRECTION_90
         lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.5);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.parameter_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
         lv_obj_set_scrollbar_mode(_registry.win.rf.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
         lv_obj_align_to(_registry.win.rf.setings.message_box.parameter_container, _registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
@@ -3817,10 +3846,10 @@ namespace Lvgl_Ui
                                     lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
 
                                     // 调整聊天框的大小
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, 900);
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, self->_height * 0.7);
                                     lv_obj_center(self->_registry.win.rf.setings.message_box.root_container);
                                     lv_obj_align(self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, 780);
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, self->_height * 0.6);
                                     lv_obj_align_to(self->_registry.win.rf.setings.message_box.parameter_container, self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
 #elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
                                     lv_group_remove_all_objs(self->_registry.keyboard_group);
@@ -4341,7 +4370,13 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
+        lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.6);
+#elif defined SCREEN_ROTATION_DIRECTION_90
         lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.5);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.parameter_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
         lv_obj_set_scrollbar_mode(_registry.win.rf.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
         lv_obj_align_to(_registry.win.rf.setings.message_box.parameter_container, _registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
@@ -4358,10 +4393,10 @@ namespace Lvgl_Ui
                                     lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
 
                                     // 调整聊天框的大小
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, 900);
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, self->_height * 0.7);
                                     lv_obj_center(self->_registry.win.rf.setings.message_box.root_container);
                                     lv_obj_align(self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, 780);
+                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, self->_height * 0.6);
                                     lv_obj_align_to(self->_registry.win.rf.setings.message_box.parameter_container, self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
 #elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
                                     lv_group_remove_all_objs(self->_registry.keyboard_group);
@@ -5164,24 +5199,18 @@ namespace Lvgl_Ui
 
                                 lv_obj_delete(self->_registry.win.rf.setings.message_box.root); }, LV_EVENT_CLICKED, this);
 
-#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
-        _registry.keyboard = lv_keyboard_create(_registry.win.rf.setings.message_box.root);
-        lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
-        lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
-        // 设置键盘按钮间距更密集
-        lv_obj_set_style_pad_row(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_pad_column(_registry.keyboard, 4, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-        lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
-#endif
-
         _registry.win.rf.setings.message_box.parameter_container = lv_obj_create(_registry.win.rf.setings.message_box.root_container);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
+        lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.6);
+#elif defined SCREEN_ROTATION_DIRECTION_90
         lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.5);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.parameter_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
         lv_obj_set_scrollbar_mode(_registry.win.rf.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
         lv_obj_align_to(_registry.win.rf.setings.message_box.parameter_container, _registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
@@ -5194,20 +5223,7 @@ namespace Lvgl_Ui
 
                                 if (code == LV_EVENT_CLICKED)
                                 {
-#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
-                                    lv_obj_add_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 隐藏键盘
-
-                                    // 调整聊天框的大小
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, 900);
-                                    lv_obj_center(self->_registry.win.rf.setings.message_box.root_container);
-                                    lv_obj_align(self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, 780);
-                                    lv_obj_align_to(self->_registry.win.rf.setings.message_box.parameter_container, self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-#elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
                                     lv_group_remove_all_objs(self->_registry.keyboard_group);
-#else
-#error "unknown macro definition, please select the correct macro definition."
-#endif
                                 } }, LV_EVENT_ALL, this);
 
         lv_obj_t *msgbox_rf_switch_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
