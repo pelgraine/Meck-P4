@@ -2,7 +2,7 @@
  * @Description: radiolib_cc1101_send_receive
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-09-01 14:49:01
+ * @LastEditTime: 2025-09-09 09:42:08
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -20,7 +20,7 @@ enum class Cc1101_Rf_Switch
 {
     RF_SWITCH_315MHZ,
     RF_SWITCH_434MHZ,
-    RF_SWITCH_868MHZ_915MHZ,
+    RF_SWITCH_868_915MHZ,
 };
 
 // uint8_t Send_Package[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
@@ -87,7 +87,7 @@ void Cc1101_Rf_Switch_Control(Cc1101_Rf_Switch rf_switch)
         XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_0, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
         XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_1, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
         break;
-    case Cc1101_Rf_Switch::RF_SWITCH_868MHZ_915MHZ:
+    case Cc1101_Rf_Switch::RF_SWITCH_868_915MHZ:
         XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_0, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
         XL9555->pin_write(XL9555_T_MIXRF_CC1101_RF_SWITCH_1, Cpp_Bus_Driver::Xl95x5::Value::LOW);
         break;
@@ -118,15 +118,13 @@ extern "C" void app_main(void)
     XL9555->pin_mode(XL9555_T_MIXRF_CC1101_RF_SWITCH_0, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9555->pin_mode(XL9555_T_MIXRF_CC1101_RF_SWITCH_1, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
 
-    ESP32P4->pin_mode(T_MIXRF_CC1101_BUSY, Cpp_Bus_Driver::Tool::Pin_Mode::INPUT, Cpp_Bus_Driver::Tool::Pin_Status ::PULLDOWN);
-
-    Cc1101_Rf_Switch_Control(Cc1101_Rf_Switch::RF_SWITCH_868MHZ_915MHZ);
-
     ESP32P4->create_gpio_interrupt(T_MIXRF_CC1101_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::RISING,
                                    [](void *arg) -> IRAM_ATTR void
                                    {
                                        Interrupt_Flag = true;
                                    });
+
+    Cc1101_Rf_Switch_Control(Cc1101_Rf_Switch::RF_SWITCH_868_915MHZ);
 
     int16_t status = Cc1101.begin(868.0);
     // int16_t status = Cc1101.beginFSK4(868.0);
