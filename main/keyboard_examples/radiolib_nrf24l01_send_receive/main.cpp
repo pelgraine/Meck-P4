@@ -2,7 +2,7 @@
  * @Description: radiolib_nrf24l01_send_receive
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-09-01 14:04:53
+ * @LastEditTime: 2025-09-10 09:57:44
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -64,7 +64,8 @@ auto SPI_Bus_2 = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(T_MIXRF_NRF24L01
 auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(IIC_Bus_0, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
 RadioLibHal *Radiolib_Hal = new Radiolib_Cpp_Bus_Driver_Hal(SPI_Bus_2, 10000000, T_MIXRF_NRF24L01_CS);
-nRF24 Nrf24l01 = new Module(Radiolib_Hal, static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(T_MIXRF_NRF24L01_CE), static_cast<uint32_t>(RADIOLIB_NC));
+nRF24 Nrf24l01 = new Module(Radiolib_Hal, static_cast<uint32_t>(RADIOLIB_NC),
+                            static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(T_MIXRF_NRF24L01_CE), static_cast<uint32_t>(RADIOLIB_NC));
 
 auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
