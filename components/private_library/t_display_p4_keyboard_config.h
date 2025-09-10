@@ -2,7 +2,7 @@
  * @Description: t_display_p4_keyboard_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-09-09 15:07:39
+ * @LastEditTime: 2025-09-10 11:57:14
  */
 #pragma once
 #include "t_display_p4_config.h"
@@ -18,17 +18,17 @@
 #define XL9555_SDA IIC_3_SDA
 #define XL9555_SCL IIC_3_SCL
 // XL9555引脚功能
-#define XL9555_T_MIXRF_EN static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(0)
-#define XL9555_T_MIXRF_CC1101_RF_SWITCH_0 static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(1)
-#define XL9555_T_MIXRF_CC1101_RF_SWITCH_1 static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(2)
-#define XL9555_LED_1 static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(3)
-#define XL9555_LED_2 static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(4)
-#define XL9555_LED_3 static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(5)
-#define XL9555_TCA8418_RST static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(6)
-#define XL9555_T_MIXRF_LR1121_INT static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(7)
-#define XL9555_T_MIXRF_LR1121_RST static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(10)
-#define XL9555_T_MIXRF_LR1121_CS static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(11)
-#define XL9555_T_MIXRF_LR1121_BUSY static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(12)
+#define XL9555_T_MIXRF_EN Cpp_Bus_Driver::Xl95x5::Pin::IO0
+#define XL9555_T_MIXRF_CC1101_RF_SWITCH_0 Cpp_Bus_Driver::Xl95x5::Pin::IO1
+#define XL9555_T_MIXRF_CC1101_RF_SWITCH_1 Cpp_Bus_Driver::Xl95x5::Pin::IO2
+#define XL9555_LED_1 Cpp_Bus_Driver::Xl95x5::Pin::IO3
+#define XL9555_LED_2 Cpp_Bus_Driver::Xl95x5::Pin::IO4
+#define XL9555_LED_3 Cpp_Bus_Driver::Xl95x5::Pin::IO5
+#define XL9555_TCA8418_RST Cpp_Bus_Driver::Xl95x5::Pin::IO6
+#define XL9555_T_MIXRF_LR1121_INT Cpp_Bus_Driver::Xl95x5::Pin::IO7
+#define XL9555_T_MIXRF_LR1121_RST Cpp_Bus_Driver::Xl95x5::Pin::IO10
+#define XL9555_T_MIXRF_LR1121_CS Cpp_Bus_Driver::Xl95x5::Pin::IO11
+#define XL9555_T_MIXRF_LR1121_BUSY Cpp_Bus_Driver::Xl95x5::Pin::IO12
 
 // SY7200A
 #define SY7200A_EN_PWM EXT_1X4P_1_IO_47

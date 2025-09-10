@@ -2,7 +2,7 @@
  * @Description: t_display_p4_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-09-03 16:22:05
+ * @LastEditTime: 2025-09-10 11:56:28
  */
 #pragma once
 
@@ -22,22 +22,22 @@
 #define XL9535_SCL IIC_1_SCL
 #define XL9535_INT 5
 // XL9535引脚功能
-#define XL9535_3_3_V_POWER_EN static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(0)
-#define XL9535_SKY13453_VCTL static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(1)
-#define XL9535_SCREEN_RST static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(2)
-#define XL9535_TOUCH_RST static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(3)
-#define XL9535_TOUCH_INT static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(4)
-#define XL9535_ETHERNET_RST static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(5)
-#define XL9535_5_0_V_POWER_EN static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(6)
-#define XL9535_EXTERNAL_SENSOR_INT static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(7)
-#define XL9535_ESP32P4_VCCA_POWER_EN static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(10)
-#define XL9535_GPS_WAKE_UP static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(11)
-#define XL9535_RTC_INT static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(12)
-#define XL9535_ESP32C6_WAKE_UP static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(13)
-#define XL9535_ESP32C6_EN static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(14)
-#define XL9535_SD_EN static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(15)
-#define XL9535_SX1262_RST static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(16)
-#define XL9535_SX1262_DIO1 static_cast<Cpp_Bus_Driver::Xl95x5::Pin>(17)
+#define XL9535_3_3_V_POWER_EN Cpp_Bus_Driver::Xl95x5::Pin::IO0
+#define XL9535_SKY13453_VCTL Cpp_Bus_Driver::Xl95x5::Pin::IO1
+#define XL9535_SCREEN_RST Cpp_Bus_Driver::Xl95x5::Pin::IO2
+#define XL9535_TOUCH_RST Cpp_Bus_Driver::Xl95x5::Pin::IO3
+#define XL9535_TOUCH_INT Cpp_Bus_Driver::Xl95x5::Pin::IO4
+#define XL9535_ETHERNET_RST Cpp_Bus_Driver::Xl95x5::Pin::IO5
+#define XL9535_5_0_V_POWER_EN Cpp_Bus_Driver::Xl95x5::Pin::IO6
+#define XL9535_EXTERNAL_SENSOR_INT Cpp_Bus_Driver::Xl95x5::Pin::IO7
+#define XL9535_ESP32P4_VCCA_POWER_EN Cpp_Bus_Driver::Xl95x5::Pin::IO10
+#define XL9535_GPS_WAKE_UP Cpp_Bus_Driver::Xl95x5::Pin::IO11
+#define XL9535_RTC_INT Cpp_Bus_Driver::Xl95x5::Pin::IO12
+#define XL9535_ESP32C6_WAKE_UP Cpp_Bus_Driver::Xl95x5::Pin::IO13
+#define XL9535_ESP32C6_EN Cpp_Bus_Driver::Xl95x5::Pin::IO14
+#define XL9535_SD_EN Cpp_Bus_Driver::Xl95x5::Pin::IO15
+#define XL9535_SX1262_RST Cpp_Bus_Driver::Xl95x5::Pin::IO16
+#define XL9535_SX1262_DIO1 Cpp_Bus_Driver::Xl95x5::Pin::IO17
 
 // ES8311
 #define ES8311_SDA IIC_2_SDA
