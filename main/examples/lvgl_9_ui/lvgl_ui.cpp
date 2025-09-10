@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-09 16:24:58
+ * @LastEditTime: 2025-09-09 18:08:56
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -3346,6 +3346,9 @@ namespace Lvgl_Ui
                                     case Rf_Chip_Type::CC1101:
                                         self->init_win_rf_setings_config_cc1101_params_message_box();
                                         break;
+                                    case Rf_Chip_Type::NRF24L01:
+                                        self->init_win_rf_setings_config_nrf24l01_params_message_box();
+                                        break;
 #endif
                                     
                                     default:
@@ -3625,7 +3628,8 @@ namespace Lvgl_Ui
         lv_dropdown_set_options(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, "sx1262");
 #elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         lv_dropdown_set_options(_registry.win.rf.setings.rf_chip_type.dropdown.rf_chip, "sx1262\n"
-                                                                                        "cc1101");
+                                                                                        "cc1101\n"
+                                                                                        "nrf24l01");
 #else
 #error "unknown macro definition, please select the correct macro definition."
 #endif
@@ -4345,6 +4349,29 @@ namespace Lvgl_Ui
                                         }
                                     }
                                     break;
+                                case Rf_Chip_Type::NRF24L01:
+                                    {
+                                        self->_device_nrf24l01.auto_send.flag = lv_obj_has_state(self->_registry.win.rf.setings.auto_send.control_switch, LV_STATE_CHECKED);
+                                        
+                                        const char* auto_send_text = lv_textarea_get_text(self->_registry.win.rf.setings.auto_send.textarea.auto_send_text);
+                                        if((auto_send_text != nullptr) && (auto_send_text[0] != '\0'))  // 同时检查NULL和空字符串
+                                        {
+                                            self->_device_nrf24l01.auto_send.text = auto_send_text;
+                                        }
+
+                                        const char* auto_send_interval_text = lv_textarea_get_text(self->_registry.win.rf.setings.auto_send.textarea.auto_send_interval);
+                                        if (auto_send_interval_text != nullptr && auto_send_interval_text[0] != '\0') // 同时检查NULL和空字符串
+                                        {  
+                                            uint32_t buffer = std::stoi(auto_send_interval_text);  
+
+                                            // 限制范围
+                                            if((buffer >= 1) && (buffer <= 1000000))
+                                            {
+                                                self->_device_nrf24l01.auto_send.interval = buffer;
+                                            }
+                                        }
+                                    }
+                                    break;
 #endif
 
                             default:
@@ -4438,6 +4465,16 @@ namespace Lvgl_Ui
                 lv_obj_remove_state(_registry.win.rf.setings.auto_send.control_switch, LV_STATE_CHECKED);
             }
             break;
+        case Rf_Chip_Type::NRF24L01:
+            if (_device_nrf24l01.auto_send.flag == true)
+            {
+                lv_obj_add_state(_registry.win.rf.setings.auto_send.control_switch, LV_STATE_CHECKED);
+            }
+            else
+            {
+                lv_obj_remove_state(_registry.win.rf.setings.auto_send.control_switch, LV_STATE_CHECKED);
+            }
+            break;
 #endif
 
         default:
@@ -4466,6 +4503,9 @@ namespace Lvgl_Ui
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         case Rf_Chip_Type::CC1101:
             lv_textarea_set_text(_registry.win.rf.setings.auto_send.textarea.auto_send_text, _device_cc1101.auto_send.text.c_str()); // 设置初始内容
+            break;
+        case Rf_Chip_Type::NRF24L01:
+            lv_textarea_set_text(_registry.win.rf.setings.auto_send.textarea.auto_send_text, _device_nrf24l01.auto_send.text.c_str()); // 设置初始内容
             break;
 #endif
 
@@ -4502,6 +4542,9 @@ namespace Lvgl_Ui
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         case Rf_Chip_Type::CC1101:
             snprintf(auto_send_interval_str, sizeof(auto_send_interval_str), "%ld", _device_cc1101.auto_send.interval);
+            break;
+        case Rf_Chip_Type::NRF24L01:
+            snprintf(auto_send_interval_str, sizeof(auto_send_interval_str), "%ld", _device_nrf24l01.auto_send.interval);
             break;
 #endif
 
@@ -5484,11 +5527,348 @@ namespace Lvgl_Ui
         init_win_rf_setings_keyboard_position_event_cb(_registry.win.rf.setings.config_rf_params.cc1101.textarea.sync_word);
     }
 
+    void System::init_win_rf_setings_config_nrf24l01_params_message_box(void)
+    {
+        // 创建全屏灰色透明遮罩，禁止触摸
+        _registry.win.rf.setings.message_box.root = lv_obj_create(_registry.win.rf.setings.root);
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(_registry.win.rf.setings.message_box.root, _width, _height);
+        lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_50, LV_PART_MAIN);
+        lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
+        lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_add_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
+
+        _registry.win.rf.setings.message_box.root_container = lv_obj_create(_registry.win.rf.setings.message_box.root);
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(_registry.win.rf.setings.message_box.root_container, 450, _height * 0.7);
+        lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root_container, 15, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root_container, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root_container, 0, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(_registry.win.rf.setings.message_box.root_container, 16, LV_PART_MAIN);
+        lv_obj_center(_registry.win.rf.setings.message_box.root_container);
+
+        _registry.win.rf.setings.message_box.btn_container = lv_obj_create(_registry.win.rf.setings.message_box.root_container);
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(_registry.win.rf.setings.message_box.btn_container, 450, 110);
+        lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.btn_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
+        lv_obj_align(_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+        lv_obj_t *btn_cancel = lv_button_create(_registry.win.rf.setings.message_box.btn_container);
+        lv_obj_set_size(btn_cancel, 150, 60);
+        lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 40, -30);
+        lv_obj_set_style_radius(btn_cancel, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_width(btn_cancel, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 去除按钮阴影
+        lv_obj_t *btn_cancel_label = lv_label_create(btn_cancel);
+        lv_label_set_text(btn_cancel_label, "cancel");
+        lv_obj_set_style_text_font(btn_cancel_label, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_center(btn_cancel_label);
+
+        // cancel 按钮回调
+        lv_obj_add_event_cb(btn_cancel, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_obj_delete(self->_registry.win.rf.setings.message_box.root); }, LV_EVENT_CLICKED, this);
+
+        lv_obj_t *btn_apply = lv_button_create(_registry.win.rf.setings.message_box.btn_container);
+        lv_obj_set_size(btn_apply, 150, 60);
+        lv_obj_align(btn_apply, LV_ALIGN_BOTTOM_RIGHT, -40, -30);
+        lv_obj_set_style_radius(btn_apply, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_width(btn_apply, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 去除按钮阴影
+        lv_obj_t *btn_apply_label = lv_label_create(btn_apply);
+        lv_label_set_text(btn_apply_label, "apply");
+        lv_obj_set_style_text_font(btn_apply_label, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_center(btn_apply_label);
+
+        // apply 按钮回调
+        lv_obj_add_event_cb(btn_apply, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+
+                                Device_Nrf24l01 dn;
+
+                                const char* freq_text = lv_textarea_get_text(self->_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq);
+                                if (freq_text != nullptr && freq_text[0] != '\0') // 同时检查NULL和空字符串
+                                {  
+                                    double buffer = std::stod(freq_text, nullptr);  
+
+                                    // 限制范围
+                                    if((buffer >= 2400.0) && (buffer <= 2525.0))
+                                    {
+                                        dn.params.freq = buffer;
+                                    }
+                                }
+
+                                const char* bit_rate_text = lv_textarea_get_text(self->_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate);
+                                if (bit_rate_text != nullptr && bit_rate_text[0] != '\0') // 同时检查NULL和空字符串
+                                {  
+                                    float buffer = std::stof(bit_rate_text, nullptr);  
+
+                                    // 限制范围
+                                    if((buffer >= 250.0) && (buffer <= 2000.0))
+                                    {
+                                        // 如果在范围内，选择最接近的较大允许值
+                                        // 允许的值：250, 1000, 2000
+                                        if(buffer <= 250) 
+                                        {
+                                            dn.params.bit_rate = 250;
+                                        }
+                                        else if(buffer <= 1000) 
+                                        {
+                                            dn.params.bit_rate = 1000;
+                                        }
+                                        else
+                                        {
+                                            dn.params.bit_rate = 2000;
+                                        }
+                                    }
+                                }
+
+                                const char* power_text = lv_textarea_get_text(self->_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power);
+                                if (power_text != nullptr && power_text[0] != '\0') // 同时检查NULL和空字符串
+                                {  
+                                    int8_t buffer = std::stoi(power_text);  
+
+                                    // 限制范围
+                                    if((buffer >= -18) && (buffer <= 0))
+                                    {
+                                        // 如果在范围内，选择最接近的较大允许值
+                                        // 允许的值：-18, -12, -6, 0
+                                        if(buffer <= -18) 
+                                        {
+                                            dn.params.power = -18;
+                                        }
+                                        else if(buffer <= -12) 
+                                        {
+                                            dn.params.power = -12;
+                                        }
+                                        else if(buffer <= -6) 
+                                        {
+                                            dn.params.power = -6;
+                                        }
+                                        else 
+                                        {
+                                            dn.params.power = 0;
+                                        }
+                                    }
+                                }
+
+                                const char* address_width_text = lv_textarea_get_text(self->_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width);
+                                if (address_width_text != nullptr && address_width_text[0] != '\0') // 同时检查NULL和空字符串
+                                {  
+                                    uint8_t buffer = std::stoi(address_width_text);  
+
+                                    // 限制范围
+                                    if((buffer >= 3) && (buffer <= 5))
+                                    {
+                                        // 如果在范围内，选择最接近的较大允许值
+                                        // 允许的值：3, 4, 5
+                                        if(buffer <= 3) 
+                                        {
+                                            dn.params.address_width = 3;
+                                        }
+                                        else if(buffer <= 4) 
+                                        {
+                                            dn.params.address_width = 4;
+                                        }
+                                        else 
+                                        {
+                                            dn.params.address_width = 5;
+                                        }
+                                    }
+                                }
+
+                                const char* address_text = lv_textarea_get_text(self->_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address);
+                                if (address_text != nullptr && address_text[0] != '\0') // 同时检查NULL和空字符串
+                                {  
+                                    dn.params.address = std::stoull(address_text);  
+                                }
+
+                                if(self->set_config_rf_params(dn) == true)
+                                {
+                                    self->_device_nrf24l01.params = dn.params;
+                                }
+
+                                lv_obj_delete(self->_registry.win.rf.setings.message_box.root); }, LV_EVENT_CLICKED, this);
+
+        _registry.win.rf.setings.message_box.parameter_container = lv_obj_create(_registry.win.rf.setings.message_box.root_container);
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.parameter_container, 30, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
+        lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.6);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_set_size(_registry.win.rf.setings.message_box.parameter_container, 450, _height * 0.5);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+        lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.parameter_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
+        lv_obj_set_scrollbar_mode(_registry.win.rf.setings.message_box.parameter_container, LV_SCROLLBAR_MODE_ACTIVE);
+        lv_obj_align_to(_registry.win.rf.setings.message_box.parameter_container, _registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
+
+        // 触摸设置消息框区域时隐藏键盘
+        lv_obj_add_event_cb(_registry.win.rf.setings.message_box.parameter_container, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
+
+                                if (code == LV_EVENT_CLICKED)
+                                {
+                                    lv_group_remove_all_objs(self->_registry.keyboard_group);
+                                } }, LV_EVENT_ALL, this);
+
+        lv_obj_t *msgbox_freq_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(msgbox_freq_text, "freq");
+        lv_obj_set_size(msgbox_freq_text, 100, 40);
+        lv_obj_set_style_text_font(msgbox_freq_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align(msgbox_freq_text, LV_ALIGN_TOP_LEFT, 0, 0);
+
+        _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq = lv_textarea_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_textarea_set_accepted_chars(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, "0123456789."); // 只允许输入数字和小数点
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_width(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, 300);
+        lv_textarea_set_one_line(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, true);
+        char freq_str[15];
+        snprintf(freq_str, sizeof(freq_str), "%.6f", _device_nrf24l01.params.freq);
+        lv_textarea_set_text(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, freq_str);
+        lv_obj_set_style_text_font(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, msgbox_freq_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+
+        init_win_rf_setings_keyboard_position_event_cb(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq);
+
+        lv_obj_t *freq_unit_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(freq_unit_text, "mhz");
+        lv_obj_set_size(freq_unit_text, 70, 40);
+        lv_obj_set_style_text_font(freq_unit_text, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(freq_unit_text, _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, LV_ALIGN_OUT_RIGHT_BOTTOM, 10, 0);
+
+        lv_obj_t *msgbox_current_limit_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(msgbox_current_limit_text, "bit rate");
+        lv_obj_set_size(msgbox_current_limit_text, 300, 40);
+        lv_obj_set_style_text_font(msgbox_current_limit_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(msgbox_current_limit_text, _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.freq, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
+
+        _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate = lv_textarea_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_textarea_set_accepted_chars(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, "0123456789."); // 只允许输入数字和小数点
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_width(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, 300);
+        lv_textarea_set_one_line(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, true);
+        char bit_rate_str[10];
+        snprintf(bit_rate_str, sizeof(bit_rate_str), "%.1f", _device_nrf24l01.params.bit_rate);
+        lv_textarea_set_text(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, bit_rate_str); // 设置初始内容
+        lv_obj_set_style_text_font(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, msgbox_current_limit_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+
+        init_win_rf_setings_keyboard_position_event_cb(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate);
+
+        lv_obj_t *msgbox_power_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(msgbox_power_text, "power");
+        lv_obj_set_size(msgbox_power_text, 100, 40);
+        lv_obj_set_style_text_font(msgbox_power_text, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(msgbox_power_text, _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.bit_rate, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
+
+        _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power = lv_textarea_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_textarea_set_accepted_chars(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, "0123456789-"); // 只允许输入数字和负号
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_width(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, 300);
+        lv_textarea_set_one_line(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, true);
+        char power_str[10];
+        snprintf(power_str, sizeof(power_str), "%d", _device_nrf24l01.params.power);
+        lv_textarea_set_text(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, power_str); // 设置初始内容
+        lv_obj_set_style_text_font(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, msgbox_power_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+
+        init_win_rf_setings_keyboard_position_event_cb(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power);
+
+        lv_obj_t *power_unit_text = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(power_unit_text, "dbm");
+        lv_obj_set_size(power_unit_text, 70, 40);
+        lv_obj_set_style_text_font(power_unit_text, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(power_unit_text, _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, LV_ALIGN_OUT_RIGHT_BOTTOM, 10, 0);
+
+        lv_obj_t *msgbox_address_width = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(msgbox_address_width, "address width");
+        lv_obj_set_size(msgbox_address_width, 300, 40);
+        lv_obj_set_style_text_font(msgbox_address_width, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(msgbox_address_width, _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.power, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
+
+        _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width = lv_textarea_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_textarea_set_accepted_chars(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, "0123456789"); // 只允许输入数字
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_width(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, 300);
+        lv_textarea_set_one_line(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, true);
+        char address_width_str[10];
+        snprintf(address_width_str, sizeof(address_width_str), "%d", _device_nrf24l01.params.address_width);
+        lv_textarea_set_text(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, address_width_str); // 设置初始内容
+        lv_obj_set_style_text_font(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, msgbox_address_width, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+
+        init_win_rf_setings_keyboard_position_event_cb(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width);
+
+        lv_obj_t *msgbox_address = lv_label_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_label_set_text(msgbox_address, "address");
+        lv_obj_set_size(msgbox_address, 300, 40);
+        lv_obj_set_style_text_font(msgbox_address, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(msgbox_address, _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address_width, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
+
+        _registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address = lv_textarea_create(_registry.win.rf.setings.message_box.parameter_container);
+        lv_textarea_set_accepted_chars(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, "0123456789"); // 只允许输入数字
+        lv_obj_set_style_pad_top(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, 15, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_width(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, 300);
+        lv_textarea_set_one_line(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, true);
+        char address_str[20];
+        snprintf(address_str, sizeof(address_str), "%lld", _device_nrf24l01.params.address);
+        lv_textarea_set_text(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, address_str); // 设置初始内容
+        lv_obj_set_style_text_font(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address, msgbox_address, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
+
+        init_win_rf_setings_keyboard_position_event_cb(_registry.win.rf.setings.config_rf_params.nrf24l01.textarea.address);
+    }
+
     bool System::set_config_rf_params(Device_Cc1101 device_cc1101)
     {
         if (_win_rf_config_cc1101_params_callback != nullptr)
         {
             if (_win_rf_config_cc1101_params_callback(device_cc1101) == true)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool System::set_config_rf_params(Device_Nrf24l01 device_nrf24l01)
+    {
+        if (_win_rf_config_nrf24l01_params_callback != nullptr)
+        {
+            if (_win_rf_config_nrf24l01_params_callback(device_nrf24l01) == true)
             {
                 return true;
             }

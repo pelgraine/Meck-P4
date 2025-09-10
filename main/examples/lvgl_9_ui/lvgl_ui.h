@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-09 11:26:06
+ * @LastEditTime: 2025-09-10 09:16:41
  * @License: GPL 3.0
  */
 #pragma once
@@ -111,6 +111,7 @@ namespace Lvgl_Ui
             SX1262 = 0,
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
             CC1101,
+            NRF24L01,
 #endif
         };
 
@@ -342,6 +343,19 @@ namespace Lvgl_Ui
                                     lv_obj_t *bandwidth;
                                 } dropdown;
                             } cc1101;
+
+                            struct
+                            {
+                                struct
+                                {
+                                    lv_obj_t *freq;
+                                    lv_obj_t *bit_rate;
+                                    lv_obj_t *power;
+                                    lv_obj_t *address_width;
+                                    lv_obj_t *address;
+                                } textarea;
+
+                            } nrf24l01;
 #endif
 
                         } config_rf_params;
@@ -518,7 +532,29 @@ namespace Lvgl_Ui
             } params;
         };
 
+        struct Device_Nrf24l01
+        {
+            bool init_flag = false;
+
+            struct
+            {
+                bool flag = false;
+                std::string text = "ciallo";
+                uint32_t interval = 1000;
+            } auto_send;
+
+            struct
+            {
+                double freq = 2400.0;
+                float bit_rate = 1000.0;
+                int8_t power = 0;
+                uint8_t address_width = 5;
+                uint64_t address = 0xAABBCCDDEE;
+            } params;
+        };
+
         Device_Cc1101 _device_cc1101;
+        Device_Nrf24l01 _device_nrf24l01;
 #endif
 
         Current_Win _current_win = Current_Win::UNKNOWN;
@@ -657,6 +693,7 @@ namespace Lvgl_Ui
         void (*_win_cit_nfc_test_callback)(bool status) = nullptr;
 
         bool (*_win_rf_config_cc1101_params_callback)(Device_Cc1101 device_cc1101) = nullptr;
+        bool (*_win_rf_config_nrf24l01_params_callback)(Device_Nrf24l01 device_nrf24l01) = nullptr;
 
         void set_nfc_test(bool status);
 
@@ -666,8 +703,10 @@ namespace Lvgl_Ui
         void init_win_cit_nfc_test(void);
 
         void init_win_rf_setings_config_cc1101_params_message_box(void);
+        void init_win_rf_setings_config_nrf24l01_params_message_box(void);
 
         bool set_config_rf_params(Device_Cc1101 device_cc1101);
+        bool set_config_rf_params(Device_Nrf24l01 device_nrf24l01);
 #endif
     };
 

@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-09 15:43:19
+ * @LastEditTime: 2025-09-10 09:36:40
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -309,6 +309,7 @@ enum class Cc1101_Rf_Switch
 
 volatile bool TCA8418_Interrupt_Flag = false;
 volatile bool Cc1101_Interrupt_Flag = false;
+volatile bool Nrf24l01_Interrupt_Flag = false;
 
 bool Device_Nfc_Task_Stop_Flag = false;
 
@@ -322,14 +323,19 @@ auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SD
 
 // SPI
 auto Cc1101_SPI_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(T_MIXRF_CC1101_MOSI, T_MIXRF_CC1101_SCLK, T_MIXRF_CC1101_MISO, SPI2_HOST, 0);
+auto Nrf24l01_SPI_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(T_MIXRF_NRF24L01_MOSI, T_MIXRF_NRF24L01_SCLK, T_MIXRF_NRF24L01_MISO, SPI2_HOST, 0);
+RadioLibHal *Cc1101_Radiolib_Hal = new Radiolib_Cpp_Bus_Driver_Hal(Cc1101_SPI_Bus, 10000000, T_MIXRF_CC1101_CS);
+RadioLibHal *Nrf24l01_Radiolib_Hal = new Radiolib_Cpp_Bus_Driver_Hal(Nrf24l01_SPI_Bus, 10000000, T_MIXRF_NRF24L01_CS);
 
 //  Software IIC
 auto XL9555 = std::make_unique<Cpp_Bus_Driver::Xl95x5>(XL9555_IIC_Bus, XL9555_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 auto TCA8418 = std::make_unique<Cpp_Bus_Driver::Tca8418>(TCA8418_IIC_Bus, TCA8418_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 
 // SPI
-RadioLibHal *Cc1101_Radiolib_Hal = new Radiolib_Cpp_Bus_Driver_Hal(Cc1101_SPI_Bus, 10000000, T_MIXRF_CC1101_CS);
-CC1101 Cc1101 = new Module(Cc1101_Radiolib_Hal, static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC), T_MIXRF_CC1101_BUSY);
+CC1101 Cc1101 = new Module(Cc1101_Radiolib_Hal, static_cast<uint32_t>(RADIOLIB_NC),
+                           static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC), T_MIXRF_CC1101_BUSY);
+nRF24 Nrf24l01 = new Module(Nrf24l01_Radiolib_Hal, static_cast<uint32_t>(RADIOLIB_NC),
+                            static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(T_MIXRF_NRF24L01_CE), static_cast<uint32_t>(RADIOLIB_NC));
 
 auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
@@ -1827,6 +1833,137 @@ void device_rf_task(void *arg)
             }
         }
         break;
+        case Lvgl_Ui::System::Rf_Chip_Type::NRF24L01:
+        {
+            if (System_Ui->_device_nrf24l01.auto_send.flag == true)
+            {
+                if (Rf_Send_Flag == false)
+                {
+                    if (esp_log_timestamp() > auto_send_cycle_time)
+                    {
+                        memset(Rf_Send_Package, '\0', sizeof(Rf_Send_Package));
+
+                        // 检查长度是否越界
+                        if (System_Ui->_device_nrf24l01.auto_send.text.size() <= 255)
+                        {
+                            memcpy(Rf_Send_Package, System_Ui->_device_nrf24l01.auto_send.text.data(), System_Ui->_device_nrf24l01.auto_send.text.size());
+                        }
+                        else
+                        {
+                            // 处理错误：数据过长
+                            memcpy(Rf_Send_Package, System_Ui->_device_nrf24l01.auto_send.text.data(), 254);
+                            Rf_Send_Package[254] = '\0';
+
+                            printf("nrf24l01 send out of bounds(data > Rf_Send_Package)\n");
+                        }
+
+                        char buffer_time[15];
+                        snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", System_Ui->_time.hour, System_Ui->_time.minute, System_Ui->_time.second);
+
+                        Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
+                            {
+                                .direction = Lvgl_Ui::System::Chat_Message_Direction::SEND,
+                                .time = buffer_time,
+                                .data = System_Ui->_device_nrf24l01.auto_send.text,
+                            };
+                        System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
+
+                        if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::RF)
+                        {
+                            // 更新聊天容器
+                            _lock_acquire(&lvgl_api_lock);
+                            System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
+                            _lock_release(&lvgl_api_lock);
+                        }
+
+                        Rf_Send_Flag = true;
+
+                        auto_send_cycle_time = esp_log_timestamp() + System_Ui->_device_nrf24l01.auto_send.interval;
+                    }
+                }
+            }
+
+            if (Rf_Send_Flag == true)
+            {
+                printf("nrf24l01 send start\n");
+                printf("nrf24l01 send data size: %d\n", strlen(reinterpret_cast<const char *>(Rf_Send_Package)));
+                Nrf24l01.finishTransmit();
+                int16_t assert = Nrf24l01.transmit(Rf_Send_Package, strlen(reinterpret_cast<const char *>(Rf_Send_Package)), 0);
+                if (assert != RADIOLIB_ERR_NONE)
+                {
+                    printf("nrf24l01 transmit fail (error code: %d)\n", assert);
+                }
+
+                assert = Nrf24l01.startReceive();
+                if (assert != RADIOLIB_ERR_NONE)
+                {
+                    printf("nrf24l01 startReceive fail (error code: %d)\n", assert);
+                }
+
+                Nrf24l01_Interrupt_Flag = false;
+
+                Rf_Send_Flag = false;
+            }
+
+            if (Nrf24l01_Interrupt_Flag == true) // 接收完成中断
+            {
+                uint8_t receive_package[255] = {0};
+                uint8_t length_buffer = Nrf24l01.getPacketLength();
+                int16_t assert = Nrf24l01.readData(receive_package, length_buffer);
+                if (assert != RADIOLIB_ERR_NONE)
+                {
+                    printf("nrf24l01 receive fail (error assert: %d)\n", assert);
+                }
+                else
+                {
+                    float buffer_rssi = Nrf24l01.getRSSI();
+                    float buffer_lqi = Nrf24l01.getSNR();
+                    printf("nrf24l01 receive rssi: %.01f snr: %.01f\n", buffer_rssi, buffer_lqi);
+
+                    for (uint8_t i = 0; i < length_buffer; i++)
+                    {
+                        printf("get nrf24l01 data[%d]: %d\n", i, receive_package[i]);
+                    }
+
+                    char buffer_time[15];
+                    snprintf(buffer_time, sizeof(buffer_time), "%02d:%02d:%02d", System_Ui->_time.hour, System_Ui->_time.minute, System_Ui->_time.second);
+
+                    // 创建一个 vector 来存储数据，因为 std::remove 需要可修改的序列
+                    std::vector<uint8_t> buffer_vector(receive_package, receive_package + length_buffer);
+
+                    // 使用 std::remove 将 \0 字符移除
+                    buffer_vector.erase(std::remove(buffer_vector.begin(), buffer_vector.end(), 0), buffer_vector.end());
+
+                    // 使用 string 的构造函数从 vector 创建 string
+                    std::string message_str(buffer_vector.begin(), buffer_vector.end());
+
+                    message_str += '\0';
+
+                    char buffer_data_info[30];
+                    snprintf(buffer_data_info, sizeof(buffer_data_info), "rssi[%.01f] snr[%.01f]", buffer_rssi, buffer_lqi);
+
+                    Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
+                        {
+                            .direction = Lvgl_Ui::System::Chat_Message_Direction::RECEIVE,
+                            .time = buffer_time,
+                            .data = message_str,
+                            .data_info = buffer_data_info,
+                        };
+                    System_Ui->_registry.win.rf.chat_message_data.push_back(wlcm);
+
+                    if (System_Ui->_current_win == Lvgl_Ui::System::Current_Win::RF)
+                    {
+                        // 更新聊天容器
+                        _lock_acquire(&lvgl_api_lock);
+                        System_Ui->win_rf_chat_message_data_update(System_Ui->_registry.win.rf.chat_message_data);
+                        _lock_release(&lvgl_api_lock);
+                    }
+                }
+
+                Nrf24l01_Interrupt_Flag = false;
+            }
+        }
+        break;
 #endif
         default:
             break;
@@ -2805,7 +2942,7 @@ void System_Ui_Callback_Init(void)
                                       buffer_bandwidth, device_cc1101.params.power, device_cc1101.params.preamble_length);
         if (assert != RADIOLIB_ERR_NONE)
         {
-            printf("config_cc1101_params fail (error code: %d)\n", assert);
+            printf("cc1101 begin fail (error code: %d)\n", assert);
             return false;
         }
 
@@ -2825,6 +2962,42 @@ void System_Ui_Callback_Init(void)
         Cc1101_Interrupt_Flag = false;
 
         printf("config_cc1101_params finish start cc1101 transmit\n");
+        return true;
+    };
+
+    System_Ui->_win_rf_config_nrf24l01_params_callback = [](Lvgl_Ui::System::Device_Nrf24l01 device_nrf24l01) -> bool
+    {
+        int16_t assert = Nrf24l01.begin(device_nrf24l01.params.freq, device_nrf24l01.params.bit_rate, device_nrf24l01.params.power,
+                                        device_nrf24l01.params.address_width);
+        if (assert != RADIOLIB_ERR_NONE)
+        {
+            printf("nrf24l01 begin fail (error code: %d)\n", assert);
+            return false;
+        }
+
+        uint8_t address[] = {
+            static_cast<uint8_t>(device_nrf24l01.params.address >> 32),
+            static_cast<uint8_t>(device_nrf24l01.params.address >> 24),
+            static_cast<uint8_t>(device_nrf24l01.params.address >> 16),
+            static_cast<uint8_t>(device_nrf24l01.params.address >> 8),
+            static_cast<uint8_t>(device_nrf24l01.params.address),
+        };
+        assert = Nrf24l01.setTransmitPipe(address);
+        if (assert != RADIOLIB_ERR_NONE)
+        {
+            printf("nrf24l01 setTransmitPipe fail (error code: %d)\n", assert);
+            return false;
+        }
+
+        assert = Nrf24l01.startReceive();
+        if (assert != RADIOLIB_ERR_NONE)
+        {
+            printf("nrf24l01 startReceive fail (error code: %d)\n", assert);
+        }
+
+        Nrf24l01_Interrupt_Flag = false;
+
+        printf("config_nrf24l01_params finish start nrf24l01 transmit\n");
         return true;
     };
 
@@ -3934,17 +4107,38 @@ extern "C" void app_main(void)
                                    });
 
     Cc1101_SPI_Bus->_spi_bus_init_flag = true;
-    int16_t status = Cc1101.begin();
-    if (status == RADIOLIB_ERR_NONE)
+    int16_t assert_2 = Cc1101.begin();
+    if (assert_2 == RADIOLIB_ERR_NONE)
     {
+        System_Ui->_device_cc1101.init_flag = false;
         printf("cc1101 init success\n");
     }
     else
     {
-        printf("cc1101 init fail (error code: %d)\n", status);
+        System_Ui->_device_cc1101.init_flag = true;
+        printf("cc1101 init fail (error code: %d)\n", assert_2);
     }
 
     System_Ui->set_config_rf_params(System_Ui->_device_cc1101);
+
+    ESP32P4->create_gpio_interrupt(T_MIXRF_NRF24L01_INT, Cpp_Bus_Driver::Tool::Interrupt_Mode::FALLING,
+                                   [](void *arg) -> IRAM_ATTR void
+                                   {
+                                       Nrf24l01_Interrupt_Flag = true;
+                                   });
+
+    Nrf24l01_SPI_Bus->_spi_bus_init_flag = true;
+    assert_2 = Nrf24l01.begin();
+    if (assert_2 == RADIOLIB_ERR_NONE)
+    {
+        printf("nrf24l01 init success\n");
+    }
+    else
+    {
+        printf("nrf24l01 init fail (error code: %d)\n", assert_2);
+    }
+
+    System_Ui->set_config_rf_params(System_Ui->_device_nrf24l01);
 
 #endif
 
