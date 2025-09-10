@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-10 14:18:23
+ * @LastEditTime: 2025-09-10 15:24:04
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -4627,7 +4627,13 @@ namespace Lvgl_Ui
         lv_obj_t *album_cover_img = lv_image_create(_registry.win.music.root);
         lv_image_set_src(album_cover_img, &win_music_album_cover_540x540px_rgb565a8);
         lv_obj_set_size(album_cover_img, 540, 540);
+#if defined SCREEN_ROTATION_DIRECTION_0
         lv_obj_align(album_cover_img, LV_ALIGN_TOP_MID, 0, 50);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_align(album_cover_img, LV_ALIGN_TOP_MID, -330, 20);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
         lv_obj_set_size(_registry.win.music.root, _width, _height);
         lv_obj_set_scrollbar_mode(_registry.win.music.root, LV_SCROLLBAR_MODE_OFF);
@@ -4635,10 +4641,16 @@ namespace Lvgl_Ui
         lv_obj_t *song_name_btn = lv_button_create(_registry.win.music.root);
         lv_obj_set_size(song_name_btn, 270, 60);
         lv_obj_set_style_radius(song_name_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_align(song_name_btn, LV_ALIGN_TOP_LEFT, 30, 590);
         lv_obj_set_style_bg_color(song_name_btn, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_opa(song_name_btn, 60, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_shadow_width(song_name_btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
+        lv_obj_align(song_name_btn, LV_ALIGN_TOP_LEFT, 30, 590);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_align(song_name_btn, LV_ALIGN_TOP_LEFT, 560, 70);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
         lv_obj_t *song_name_label = lv_label_create(song_name_btn);
         lv_label_set_text(song_name_label, "Hotel California");
@@ -4650,10 +4662,10 @@ namespace Lvgl_Ui
         lv_obj_t *artist_btn = lv_button_create(_registry.win.music.root);
         lv_obj_set_size(artist_btn, 130, 50);
         lv_obj_set_style_radius(artist_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_align(artist_btn, LV_ALIGN_TOP_LEFT, 30, 660);
         lv_obj_set_style_bg_color(artist_btn, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_opa(artist_btn, 60, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_shadow_width(artist_btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_align_to(artist_btn, song_name_btn, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
 
         lv_obj_t *artist_label = lv_label_create(artist_btn);
         lv_label_set_text(artist_label, "Eagles");
@@ -4723,7 +4735,13 @@ namespace Lvgl_Ui
         lv_obj_set_style_bg_color(current_time_btn, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_radius(current_time_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_shadow_width(current_time_btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
         lv_obj_align(current_time_btn, LV_ALIGN_TOP_LEFT, 30, 795);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_align(current_time_btn, LV_ALIGN_TOP_LEFT, 560, 210);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
         _registry.win.music.label.current_time = lv_label_create(current_time_btn);
         // lv_label_set_text(_registry.win.music.label.current_time, "00:00");
@@ -4737,7 +4755,13 @@ namespace Lvgl_Ui
         lv_obj_set_style_bg_color(total_time_btn, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_radius(total_time_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_shadow_width(total_time_btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
         lv_obj_align(total_time_btn, LV_ALIGN_TOP_RIGHT, -30, 795);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_align(total_time_btn, LV_ALIGN_TOP_RIGHT, -30, 210);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
         _registry.win.music.label.total_time = lv_label_create(total_time_btn);
         // lv_label_set_text(_registry.win.music.label.total_time, "04:20");
@@ -4768,11 +4792,23 @@ namespace Lvgl_Ui
         lv_obj_set_style_radius(_registry.win.music.slider, 50, LV_PART_KNOB);
         lv_obj_set_style_width(_registry.win.music.slider, 8, LV_PART_KNOB);
         lv_obj_set_style_height(_registry.win.music.slider, 8, LV_PART_KNOB);
+#if defined SCREEN_ROTATION_DIRECTION_0
         lv_obj_set_size(_registry.win.music.slider, 460, 8);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_set_size(_registry.win.music.slider, 640, 8);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
         lv_obj_add_style(_registry.win.music.slider, &style_indic, LV_PART_INDICATOR);
         lv_obj_add_style(_registry.win.music.slider, &style_indic_pr, LV_PART_INDICATOR | LV_STATE_PRESSED);
-        // lv_slider_set_value(_registry.win.music.slider, 0, LV_ANIM_OFF);
+// lv_slider_set_value(_registry.win.music.slider, 0, LV_ANIM_OFF);
+#if defined SCREEN_ROTATION_DIRECTION_0
         lv_obj_align(_registry.win.music.slider, LV_ALIGN_TOP_LEFT, 40, 860);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_align(_registry.win.music.slider, LV_ALIGN_TOP_LEFT, 560, 270);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
         lv_obj_add_event_cb(_registry.win.music.slider, [](lv_event_t *e)
                             {
@@ -4793,11 +4829,18 @@ namespace Lvgl_Ui
 
         // 创建底部黑色长条按钮
         lv_obj_t *bottom_bar_btn = lv_button_create(_registry.win.music.root);
-        lv_obj_set_size(bottom_bar_btn, _width - 60, 70);
-        lv_obj_align(bottom_bar_btn, LV_ALIGN_BOTTOM_MID, 0, -30);
         lv_obj_set_style_bg_color(bottom_bar_btn, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_radius(bottom_bar_btn, 20, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_shadow_width(bottom_bar_btn, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+#if defined SCREEN_ROTATION_DIRECTION_0
+        lv_obj_set_size(bottom_bar_btn, _width - 60, 70);
+        lv_obj_align(bottom_bar_btn, LV_ALIGN_BOTTOM_MID, 0, -30);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+        lv_obj_set_size(bottom_bar_btn, _width / 2 + 20, 70);
+        lv_obj_align(bottom_bar_btn, LV_ALIGN_BOTTOM_MID, 260, -30);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
         // 长条按钮添加一个标签
         lv_obj_t *bottom_bar_label = lv_label_create(bottom_bar_btn);
@@ -4848,7 +4891,13 @@ namespace Lvgl_Ui
             lv_obj_remove_state(_registry.win.music.imagebutton.play, LV_STATE_CHECKED);
 
             lv_obj_set_size(_registry.win.music.imagebutton.play, 140, 140);
+#if defined SCREEN_ROTATION_DIRECTION_0
             lv_obj_align(_registry.win.music.imagebutton.play, LV_ALIGN_BOTTOM_MID, 0, -130);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+            lv_obj_align(_registry.win.music.imagebutton.play, LV_ALIGN_BOTTOM_MID, 260, -130);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
             lv_obj_align_to(_registry.win.music.imagebutton.switch_left, _registry.win.music.imagebutton.play, LV_ALIGN_OUT_LEFT_MID, -10, 0);
             lv_obj_align_to(_registry.win.music.imagebutton.switch_right, _registry.win.music.imagebutton.play, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
         }
@@ -4857,7 +4906,13 @@ namespace Lvgl_Ui
             lv_obj_add_state(_registry.win.music.imagebutton.play, LV_STATE_CHECKED);
 
             lv_obj_set_size(_registry.win.music.imagebutton.play, 117, 117);
+#if defined SCREEN_ROTATION_DIRECTION_0
             lv_obj_align(_registry.win.music.imagebutton.play, LV_ALIGN_BOTTOM_MID, 0, -142);
+#elif defined SCREEN_ROTATION_DIRECTION_90
+            lv_obj_align(_registry.win.music.imagebutton.play, LV_ALIGN_BOTTOM_MID, 260, -142);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
             lv_obj_align_to(_registry.win.music.imagebutton.switch_left, _registry.win.music.imagebutton.play, LV_ALIGN_OUT_LEFT_MID, -10, 0);
             lv_obj_align_to(_registry.win.music.imagebutton.switch_right, _registry.win.music.imagebutton.play, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
         }
