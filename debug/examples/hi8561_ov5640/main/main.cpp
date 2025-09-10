@@ -247,7 +247,7 @@ bool App_Video_Init()
         return false;
     }
 
-    assert = app_video_main(IIC_Bus_1->_iic_bus_handle);
+    assert = app_video_main(IIC_Bus_1->_bus_handle);
     if (assert != ESP_OK)
     {
         printf("video_init fail (error code: %#X)\n", assert);

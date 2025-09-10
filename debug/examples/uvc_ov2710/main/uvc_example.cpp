@@ -549,7 +549,7 @@ extern "C" void app_main(void)
     uvc_t *uvc = calloc(1, sizeof(uvc_t));
     assert(uvc);
 
-    csi_config[0].sccb_config.i2c_handle = SGM38121_IIC_Bus->_iic_bus_handle;
+    csi_config[0].sccb_config.i2c_handle = SGM38121_IIC_Bus->_bus_handle;
 
     ESP_ERROR_CHECK(esp_video_init(&cam_config));
     ESP_ERROR_CHECK(init_capture_video(uvc));

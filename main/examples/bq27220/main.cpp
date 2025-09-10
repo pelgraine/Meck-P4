@@ -2,7 +2,7 @@
  * @Description: bq27220
  * @Author: LILYGO_L
  * @Date: 2025-01-04 15:06:05
- * @LastEditTime: 2025-06-13 09:20:11
+ * @LastEditTime: 2025-09-10 13:31:07
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -49,7 +49,7 @@ extern "C" void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    BQ27220_Bus->_iic_bus_handle = XL9535_Bus->_iic_bus_handle;
+    BQ27220_Bus->set_bus_handle(XL9535_Bus->get_bus_handle());
 
     BQ27220->begin();
 

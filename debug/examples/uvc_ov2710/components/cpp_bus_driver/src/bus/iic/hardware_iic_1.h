@@ -19,8 +19,8 @@ namespace Cpp_Bus_Driver
         int16_t _address = DEFAULT_CPP_BUS_DRIVER_VALUE;
         int32_t _freq_hz = DEFAULT_CPP_BUS_DRIVER_VALUE;
 
-        i2c_master_dev_handle_t _iic_device_handle = nullptr;
-        i2c_master_bus_handle_t _iic_bus_handle = nullptr;
+        i2c_master_dev_handle_t _device_handle = nullptr;
+        i2c_master_bus_handle_t _bus_handle = nullptr;
 
         Hardware_Iic_1(int32_t sda, int32_t scl, i2c_port_t port = I2C_NUM_0)
             : _sda(sda), _scl(scl), _port(port)

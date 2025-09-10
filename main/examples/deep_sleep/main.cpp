@@ -2,7 +2,7 @@
  * @Description: deep_sleep
  * @Author: LILYGO_L
  * @Date: 2025-05-12 14:08:31
- * @LastEditTime: 2025-08-01 09:56:25
+ * @LastEditTime: 2025-09-10 13:36:20
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -732,7 +732,7 @@ bool App_Video_Init()
         return false;
     }
 
-    assert = app_video_main(SGM38121_IIC_Bus->_iic_bus_handle);
+    assert = app_video_main(SGM38121_IIC_Bus->get_bus_handle());
     if (assert != ESP_OK)
     {
         printf("video_init fail (error code: %#X)\n", assert);
@@ -943,13 +943,13 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(10));
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    HI8561_T_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
+    HI8561_T_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
 
     HI8561_T->begin();
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 
-    GT9895_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
+    GT9895_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
 
     GT9895->begin();
 
@@ -976,14 +976,14 @@ extern "C" void app_main(void)
     //     printf("Sdspi_Init fail\n");
     // }
 
-    PCF8563_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
+    PCF8563_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
     PCF8563->begin();
 
     // ESP32C6复位模式
     // XL9535->pin_mode(XL9535_ESP32C6_EN, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     Esp32c6_At_Init();
 
-    BQ27220_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
+    BQ27220_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
     BQ27220->begin();
 
     // 设置的电池容量会在没有电池插入的时候自动还原为默认值
@@ -991,17 +991,17 @@ extern "C" void app_main(void)
     BQ27220->set_temperature_mode(Cpp_Bus_Driver::Bq27220xxxx::Temperature_Mode::EXTERNAL_NTC);
     BQ27220->set_sleep_current_threshold(50);
 
-    AW86224_IIC_Bus->_iic_bus_handle = SGM38121_IIC_Bus->_iic_bus_handle;
+    AW86224_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
     AW86224->begin(500000);
     // printf("AW86224 input voltage: %.06f V\n", AW86224->get_input_voltage());
 
     // RAM播放
     AW86224->init_ram_mode(Cpp_Bus_Driver::aw862xx_haptic_ram_12k_0809_170, sizeof(Cpp_Bus_Driver::aw862xx_haptic_ram_12k_0809_170));
 
-    ES8311_IIC_Bus->_iic_bus_handle = SGM38121_IIC_Bus->_iic_bus_handle;
+    ES8311_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
     ES8311_Init();
 
-    ICM20948_IIC_Bus->_iic_bus_handle = SGM38121_IIC_Bus->_iic_bus_handle;
+    ICM20948_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
     ICM20948_Init();
 
     XL9535->pin_write(XL9535_GPS_WAKE_UP, Cpp_Bus_Driver::Xl95x5::Value::HIGH);

@@ -2,7 +2,7 @@
  * @Description: screen_camera
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:45:00
- * @LastEditTime: 2025-07-28 16:28:53
+ * @LastEditTime: 2025-09-10 13:36:42
  * @License: GPL 3.0
  */
 #include "esp_video_init.h"
@@ -157,7 +157,7 @@ bool App_Video_Init()
         return false;
     }
 
-    assert = app_video_main(IIC_Bus_1->_iic_bus_handle);
+    assert = app_video_main(IIC_Bus_1->get_bus_handle());
     if (assert != ESP_OK)
     {
         printf("video_init fail (error code: %#X)\n", assert);

@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-09-04 15:50:08
+ * @LastEditTime: 2025-09-10 13:39:50
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -581,13 +581,13 @@ extern "C" void app_main(void)
 #if defined CONFIG_SCREEN_TYPE_HI8561
     HI8561_T->create_pwm(HI8561_SCREEN_BL, ledc_channel_t::LEDC_CHANNEL_0, 2000);
 
-    HI8561_T_Bus->_iic_bus_handle = XL9535_Bus->_iic_bus_handle;
+    HI8561_T_Bus->set_bus_handle(XL9535_Bus->get_bus_handle());
 
     HI8561_T->begin();
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 
-    GT9895_Bus->_iic_bus_handle = XL9535_Bus->_iic_bus_handle;
+    GT9895_Bus->set_bus_handle(XL9535_Bus->get_bus_handle());
 
     GT9895->begin();
 

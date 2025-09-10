@@ -84,7 +84,7 @@ extern "C" void app_main(void)
             .device_address = p->sccb_addr,
             .scl_speed_hz = EXAMPLE_CAM_SCCB_FREQ,
         };
-        ESP_ERROR_CHECK(sccb_new_i2c_io(IIC_Bus_1->_iic_bus_handle, &i2c_config, &cam_config.sccb_handle));
+        ESP_ERROR_CHECK(sccb_new_i2c_io(IIC_Bus_1->_bus_handle, &i2c_config, &cam_config.sccb_handle));
 
         cam = (*(p->detect))(&cam_config);
         if (cam)

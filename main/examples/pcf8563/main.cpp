@@ -56,7 +56,7 @@ extern "C" void app_main(void)
 
     XL9535->pin_mode(XL9535_RTC_INT, Cpp_Bus_Driver::Xl95x5::Mode::INPUT);
 
-    IIC_Bus_0_1->_iic_bus_handle = IIC_Bus_0->_iic_bus_handle;
+    IIC_Bus_0_1->set_bus_handle(IIC_Bus_0->get_bus_handle());
     PCF8563->begin();
 
     // PCF8563->set_clock_frequency_output(Cpp_Bus_Driver::PCF8563x::Clock_Frequency::OUTPUT_OFF);

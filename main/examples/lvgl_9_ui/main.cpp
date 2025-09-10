@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-10 11:40:57
+ * @LastEditTime: 2025-09-10 13:36:25
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -3731,7 +3731,7 @@ bool App_Video_Init(void)
         return false;
     }
 
-    assert = app_video_main(SGM38121_IIC_Bus->_iic_bus_handle);
+    assert = app_video_main(SGM38121_IIC_Bus->get_bus_handle());
     if (assert != ESP_OK)
     {
         printf("video_init fail (error code: %#X)\n", assert);
@@ -4026,13 +4026,13 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(10));
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    HI8561_T_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
+    HI8561_T_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
 
     HI8561_T->begin();
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 
-    GT9895_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
+    GT9895_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
 
     GT9895->begin();
 
@@ -4156,7 +4156,7 @@ extern "C" void app_main(void)
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-    PCF8563_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
+    PCF8563_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
     PCF8563->begin();
 
     _lock_acquire(&lvgl_api_lock);
@@ -4171,7 +4171,7 @@ extern "C" void app_main(void)
     Set_Lvgl_Startup_Progress_Bar(40);
     _lock_release(&lvgl_api_lock);
 
-    BQ27220_IIC_Bus->_iic_bus_handle = XL9535_IIC_Bus->_iic_bus_handle;
+    BQ27220_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
     BQ27220->begin();
 
     // 设置的电池容量会在没有电池插入的时候自动还原为默认值
@@ -4183,7 +4183,7 @@ extern "C" void app_main(void)
     Set_Lvgl_Startup_Progress_Bar(50);
     _lock_release(&lvgl_api_lock);
 
-    AW86224_IIC_Bus->_iic_bus_handle = SGM38121_IIC_Bus->_iic_bus_handle;
+    AW86224_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
     AW86224->begin(500000);
     // printf("AW86224 input voltage: %.06f V\n", AW86224->get_input_voltage());
 
@@ -4194,7 +4194,7 @@ extern "C" void app_main(void)
     Set_Lvgl_Startup_Progress_Bar(60);
     _lock_release(&lvgl_api_lock);
 
-    ES8311_IIC_Bus->_iic_bus_handle = SGM38121_IIC_Bus->_iic_bus_handle;
+    ES8311_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
     ES8311_Init();
 
     // if (Play_Wav_File_2(SD_FILE_PATH_MUSIC) == false)
@@ -4210,7 +4210,7 @@ extern "C" void app_main(void)
     Set_Lvgl_Startup_Progress_Bar(70);
     _lock_release(&lvgl_api_lock);
 
-    Wire1._bus->_iic_bus_handle = SGM38121_IIC_Bus->_iic_bus_handle;
+    Wire1._bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
     ICM20948_Init();
 
     _lock_acquire(&lvgl_api_lock);
