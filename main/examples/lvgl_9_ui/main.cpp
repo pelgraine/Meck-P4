@@ -4108,7 +4108,7 @@ extern "C" void app_main(void)
                                        Cc1101_Interrupt_Flag = true;
                                    });
 
-    Cc1101_SPI_Bus->_spi_bus_init_flag = true;
+    Cc1101_SPI_Bus->_bus_init_flag = true;
     int16_t assert_2 = Cc1101.begin();
     if (assert_2 == RADIOLIB_ERR_NONE)
     {
@@ -4129,7 +4129,7 @@ extern "C" void app_main(void)
                                        Nrf24l01_Interrupt_Flag = true;
                                    });
 
-    Nrf24l01_SPI_Bus->_spi_bus_init_flag = true;
+    Nrf24l01_SPI_Bus->_bus_init_flag = true;
     assert_2 = Nrf24l01.begin();
     if (assert_2 == RADIOLIB_ERR_NONE)
     {
@@ -4245,7 +4245,7 @@ extern "C" void app_main(void)
 
     XL9535->pin_mode(XL9535_SX1262_DIO1, Cpp_Bus_Driver::Xl95x5::Mode::INPUT);
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-    SX1262_SPI_Bus->_spi_bus_init_flag = true;
+    SX1262_SPI_Bus->_bus_init_flag = true;
 #endif
     if (SX1262->begin(10000000) == false)
     {
