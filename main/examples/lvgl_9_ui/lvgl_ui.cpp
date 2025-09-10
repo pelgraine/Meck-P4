@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-09 18:08:56
+ * @LastEditTime: 2025-09-10 14:18:23
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -3745,9 +3745,17 @@ namespace Lvgl_Ui
                                     double buffer = std::stod(freq_text, nullptr);  
 
                                     // 限制范围
-                                    if((buffer >= 150.0) && (buffer <= 960.0))
+                                    if(buffer <= 150.0)
+                                    {
+                                        ds.params.freq = 150.0;
+                                    }
+                                    else if(buffer <= 960.0)
                                     {
                                         ds.params.freq = buffer;
+                                    }
+                                    else
+                                    {
+                                        ds.params.freq = 960.0;
                                     }
                                 }
 
@@ -3764,9 +3772,17 @@ namespace Lvgl_Ui
                                     float buffer = std::stof(current_limit_text, nullptr);  
 
                                     // 限制范围
-                                    if((buffer >= 0) && (buffer <= 140.0))
+                                    if(buffer <= 0)
+                                    {
+                                        ds.params.current_limit = 0;
+                                    }
+                                    else if(buffer <= 140.0)
                                     {
                                         ds.params.current_limit = buffer;
+                                    }
+                                    else
+                                    {
+                                        ds.params.current_limit = 140.0;
                                     }
                                 }
 
@@ -3776,9 +3792,17 @@ namespace Lvgl_Ui
                                     int8_t buffer = std::stoi(power_text);  
 
                                     // 限制范围
-                                    if((buffer >= -9) && (buffer <= 22))
+                                    if(buffer <= -9)
+                                    {
+                                        ds.params.power = -9;
+                                    }
+                                    else if(buffer <= 22)
                                     {
                                         ds.params.power = buffer;
+                                    }
+                                    else
+                                    {
+                                        ds.params.power = 22;
                                     }
                                 }
 
@@ -5145,9 +5169,33 @@ namespace Lvgl_Ui
                                     double buffer = std::stod(freq_text, nullptr);  
 
                                     // 限制范围
-                                    if(((buffer >= 300.0) && (buffer <= 348.0))||((buffer >= 387.0) && (buffer <= 464.0))||((buffer >= 779.0) && (buffer <= 928.0)))
+                                    if (buffer <= 300.0) 
+                                    {
+                                        dc.params.freq = 300.0;
+                                    } 
+                                    else if (buffer <= 348.0) 
                                     {
                                         dc.params.freq = buffer;
+                                    } 
+                                    else if (buffer < 387.0) 
+                                    {
+                                        dc.params.freq = 348.0;
+                                    } 
+                                    else if (buffer <= 464.0) 
+                                    {
+                                        dc.params.freq = buffer;
+                                    } 
+                                    else if (buffer < 779.0)
+                                    {
+                                        dc.params.freq = 464.0;
+                                    } 
+                                    else if (buffer <= 928.0) 
+                                    {
+                                        dc.params.freq = buffer;
+                                    } 
+                                    else 
+                                    {
+                                        dc.params.freq = 928.0;
                                     }
                                 }
 
@@ -5160,9 +5208,17 @@ namespace Lvgl_Ui
                                     float buffer = std::stof(bit_rate_text, nullptr);  
 
                                     // 限制范围
-                                    if((buffer >= 0.025) && (buffer <= 600.0))
+                                    if(buffer <= 0.025)
+                                    {
+                                        dc.params.bit_rate = 0.025;
+                                    }
+                                    else if(buffer <= 600.0)
                                     {
                                         dc.params.bit_rate = buffer;
+                                    }
+                                    else
+                                    {
+                                        dc.params.bit_rate = 600.0;
                                     }
                                 }
 
@@ -5172,9 +5228,17 @@ namespace Lvgl_Ui
                                     float buffer = std::stof(freq_deviation_khz_text, nullptr);  
 
                                     // 限制范围
-                                    if((buffer >= 1.587) && (buffer <= 380.8))
+                                    if(buffer <= 1.587)
+                                    {
+                                        dc.params.freq_deviation_khz = 1.587;
+                                    }
+                                    else if(buffer <= 380.8)
                                     {
                                         dc.params.freq_deviation_khz = buffer;
+                                    }
+                                    else
+                                    {
+                                        dc.params.freq_deviation_khz = 380.8;
                                     }
                                 }
 
@@ -5184,42 +5248,39 @@ namespace Lvgl_Ui
                                     int8_t buffer = std::stoi(power_text);  
 
                                     // 限制范围
-                                    if((buffer >= -30) && (buffer <= 10))
+                                    // 如果在范围内，选择最接近的较大允许值
+                                    // 允许的值：-30, -20, -15, -10, 0, 5, 7, 10
+                                    if(buffer <= -30) 
                                     {
-                                        // 如果在范围内，选择最接近的较大允许值
-                                        // 允许的值：-30, -20, -15, -10, 0, 5, 7, 10
-                                        if(buffer <= -30) 
-                                        {
-                                            dc.params.power = -30;
-                                        }
-                                        else if(buffer <= -20) 
-                                        {
-                                            dc.params.power = -20;
-                                        }
-                                        else if(buffer <= -15) 
-                                        {
-                                            dc.params.power = -15;
-                                        }
-                                        else if(buffer <= -10) 
-                                        {
-                                            dc.params.power = -10;
-                                        }
-                                        else if(buffer <= 0) 
-                                        {
-                                            dc.params.power = 0;
-                                        }
-                                        else if(buffer <= 5) 
-                                        {
-                                            dc.params.power = 5;
-                                        }
-                                        else if(buffer <= 7) 
-                                        {
-                                            dc.params.power = 7;
-                                        }
-                                        else 
-                                        {
-                                            dc.params.power = 10;
-                                        }
+                                        dc.params.power = -30;
+                                    }
+                                    else if(buffer <= -20) 
+                                    {
+                                        dc.params.power = -20;
+                                    }
+                                    else if(buffer <= -15) 
+                                    {
+                                        dc.params.power = -15;
+                                    }
+                                    else if(buffer <= -10) 
+                                    {
+                                        dc.params.power = -10;
+                                    }
+                                    else if(buffer <= 0) 
+                                    {
+                                        dc.params.power = 0;
+                                    }
+                                    else if(buffer <= 5) 
+                                    {
+                                        dc.params.power = 5;
+                                    }
+                                    else if(buffer <= 7) 
+                                    {
+                                        dc.params.power = 7;
+                                    }
+                                    else 
+                                    {
+                                        dc.params.power = 10;
                                     }
                                 }
 
@@ -5419,7 +5480,7 @@ namespace Lvgl_Ui
         lv_obj_set_width(_registry.win.rf.setings.config_rf_params.cc1101.textarea.bit_rate, 300);
         lv_textarea_set_one_line(_registry.win.rf.setings.config_rf_params.cc1101.textarea.bit_rate, true);
         char bit_rate_str[10];
-        snprintf(bit_rate_str, sizeof(bit_rate_str), "%.1f", _device_cc1101.params.bit_rate);
+        snprintf(bit_rate_str, sizeof(bit_rate_str), "%.3f", _device_cc1101.params.bit_rate);
         lv_textarea_set_text(_registry.win.rf.setings.config_rf_params.cc1101.textarea.bit_rate, bit_rate_str); // 设置初始内容
         lv_obj_set_style_text_font(_registry.win.rf.setings.config_rf_params.cc1101.textarea.bit_rate, &lv_font_montserrat_24, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_align_to(_registry.win.rf.setings.config_rf_params.cc1101.textarea.bit_rate, msgbox_current_limit_text, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 0);
@@ -5603,9 +5664,17 @@ namespace Lvgl_Ui
                                     double buffer = std::stod(freq_text, nullptr);  
 
                                     // 限制范围
-                                    if((buffer >= 2400.0) && (buffer <= 2525.0))
+                                    if(buffer <= 2400.0)
+                                    {
+                                        dn.params.freq = 2400.0;
+                                    }
+                                    else if(buffer <= 2525.0)
                                     {
                                         dn.params.freq = buffer;
+                                    }
+                                    else
+                                    {
+                                        dn.params.freq = 2525.0;
                                     }
                                 }
 
@@ -5615,22 +5684,19 @@ namespace Lvgl_Ui
                                     float buffer = std::stof(bit_rate_text, nullptr);  
 
                                     // 限制范围
-                                    if((buffer >= 250.0) && (buffer <= 2000.0))
+                                    // 如果在范围内，选择最接近的较大允许值
+                                    // 允许的值：250, 1000, 2000
+                                    if(buffer <= 250) 
                                     {
-                                        // 如果在范围内，选择最接近的较大允许值
-                                        // 允许的值：250, 1000, 2000
-                                        if(buffer <= 250) 
-                                        {
-                                            dn.params.bit_rate = 250;
-                                        }
-                                        else if(buffer <= 1000) 
-                                        {
-                                            dn.params.bit_rate = 1000;
-                                        }
-                                        else
-                                        {
-                                            dn.params.bit_rate = 2000;
-                                        }
+                                        dn.params.bit_rate = 250;
+                                    }
+                                    else if(buffer <= 1000) 
+                                    {
+                                        dn.params.bit_rate = 1000;
+                                    }
+                                    else
+                                    {
+                                        dn.params.bit_rate = 2000;
                                     }
                                 }
 
@@ -5640,26 +5706,23 @@ namespace Lvgl_Ui
                                     int8_t buffer = std::stoi(power_text);  
 
                                     // 限制范围
-                                    if((buffer >= -18) && (buffer <= 0))
+                                    // 如果在范围内，选择最接近的较大允许值
+                                    // 允许的值：-18, -12, -6, 0
+                                    if(buffer <= -18) 
                                     {
-                                        // 如果在范围内，选择最接近的较大允许值
-                                        // 允许的值：-18, -12, -6, 0
-                                        if(buffer <= -18) 
-                                        {
-                                            dn.params.power = -18;
-                                        }
-                                        else if(buffer <= -12) 
-                                        {
-                                            dn.params.power = -12;
-                                        }
-                                        else if(buffer <= -6) 
-                                        {
-                                            dn.params.power = -6;
-                                        }
-                                        else 
-                                        {
-                                            dn.params.power = 0;
-                                        }
+                                        dn.params.power = -18;
+                                    }
+                                    else if(buffer <= -12) 
+                                    {
+                                        dn.params.power = -12;
+                                    }
+                                    else if(buffer <= -6) 
+                                    {
+                                        dn.params.power = -6;
+                                    }
+                                    else 
+                                    {
+                                        dn.params.power = 0;
                                     }
                                 }
 
@@ -5669,22 +5732,19 @@ namespace Lvgl_Ui
                                     uint8_t buffer = std::stoi(address_width_text);  
 
                                     // 限制范围
-                                    if((buffer >= 3) && (buffer <= 5))
+                                    // 如果在范围内，选择最接近的较大允许值
+                                    // 允许的值：3, 4, 5
+                                    if(buffer <= 3) 
                                     {
-                                        // 如果在范围内，选择最接近的较大允许值
-                                        // 允许的值：3, 4, 5
-                                        if(buffer <= 3) 
-                                        {
-                                            dn.params.address_width = 3;
-                                        }
-                                        else if(buffer <= 4) 
-                                        {
-                                            dn.params.address_width = 4;
-                                        }
-                                        else 
-                                        {
-                                            dn.params.address_width = 5;
-                                        }
+                                        dn.params.address_width = 3;
+                                    }
+                                    else if(buffer <= 4) 
+                                    {
+                                        dn.params.address_width = 4;
+                                    }
+                                    else 
+                                    {
+                                        dn.params.address_width = 5;
                                     }
                                 }
 
