@@ -2,7 +2,7 @@
  * @Description: t_display_p4_keyboard_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-09-10 11:57:14
+ * @LastEditTime: 2025-09-11 15:16:30
  */
 #pragma once
 #include "t_display_p4_config.h"
@@ -63,6 +63,10 @@
 #define T_MIXRF_ST25R3916_MOSI EXT_2X8P_SPI_MOSI
 #define T_MIXRF_ST25R3916_MISO EXT_2X8P_SPI_MISO
 #define T_MIXRF_ST25R3916_INT EXT_2X8P_IO_26
+
+#define T_MIXRF_LR1121_SCLK EXT_2X8P_SPI_SCLK
+#define T_MIXRF_LR1121_MOSI EXT_2X8P_SPI_MOSI
+#define T_MIXRF_LR1121_MISO EXT_2X8P_SPI_MISO
 
 ////////////////////////////////////////////////// gpio config //////////////////////////////////////////////////
 
@@ -135,14 +139,14 @@ constexpr const uint32_t Tca8418_Map_Lvgl_Shift[] =
         0x8F, 0x90, 0x91, 0x92, '.', '<', '>',
         0x93, // Ctrl  自定义值
         0x94,
-        0x95,        // Fn  自定义值
-        0x96,        // Win  自定义值
-        0x97,        // Shift  自定义值
+        0x95, // Fn  自定义值
+        0x96, // Win  自定义值
+        0x97, // Shift  自定义值
         0x98, // Tab
-        0x99,         // Space
-        0x9A,         // Space
-        0x9B,         // Space
-        0x9C,        // Fn 自定义值
+        0x99, // Space
+        0x9A, // Space
+        0x9B, // Space
+        0x9C, // Fn 自定义值
         0x9D,
         0x9E,
 

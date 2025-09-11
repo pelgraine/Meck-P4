@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-10 13:36:25
+ * @LastEditTime: 2025-09-11 16:14:51
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -3913,6 +3913,49 @@ bool Play_Wav_File_2(const char *file_path)
     return true;
 }
 
+bool Set_T_Mixrf_Lr1121_Sleep()
+{
+    XL9555->pin_mode(XL9555_T_MIXRF_LR1121_RST, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    // XL9555->pin_write(XL9555_T_MIXRF_LR1121_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    // vTaskDelay(pdMS_TO_TICKS(10));
+    XL9555->pin_write(XL9555_T_MIXRF_LR1121_RST, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+    // vTaskDelay(pdMS_TO_TICKS(10));
+    // XL9555->pin_write(XL9555_T_MIXRF_LR1121_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    // vTaskDelay(pdMS_TO_TICKS(10));
+
+    // XL9555->pin_mode(XL9555_T_MIXRF_LR1121_CS, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    // XL9555->pin_write(XL9555_T_MIXRF_LR1121_CS, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+
+    // auto lr1121_spi_bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(T_MIXRF_LR1121_MOSI, T_MIXRF_LR1121_SCLK, T_MIXRF_LR1121_MISO, SPI2_HOST, 0);
+    // RadioLibHal *lr1121_radiolib_hal = new Radiolib_Cpp_Bus_Driver_Hal(lr1121_spi_bus, 10000000, -1);
+    // LR1121 lr1121 = new Module(lr1121_radiolib_hal, static_cast<uint32_t>(RADIOLIB_NC),
+    //                            static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC));
+
+    // XL9555->pin_write(XL9555_T_MIXRF_LR1121_CS, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+    // lr1121_spi_bus->_bus_init_flag = true;
+    // int16_t assert = lr1121.begin(434.0, 125.0, 9, 7, RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, 10, 8, 3.3);
+    // if (assert == RADIOLIB_ERR_NONE)
+    // {
+    //     printf("lr1121 init success\n");
+    // }
+    // else
+    // {
+    //     printf("lr1121 init fail (error code: %d)\n", assert);
+    //     XL9555->pin_write(XL9555_T_MIXRF_LR1121_CS, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    //     return false;
+    // }
+    // assert = lr1121.sleep();
+    // if (assert != RADIOLIB_ERR_NONE)
+    // {
+    //     printf("lr1121 sleep fail (error code: %d)\n", assert);
+    //     XL9555->pin_write(XL9555_T_MIXRF_LR1121_CS, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    //     return false;
+    // }
+
+    // XL9555->pin_write(XL9555_T_MIXRF_LR1121_CS, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+    return true;
+}
+
 extern "C" void app_main(void)
 {
     printf("Ciallo\n");
@@ -4096,6 +4139,8 @@ extern "C" void app_main(void)
     XL9555->pin_write(XL9555_T_MIXRF_EN, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
 
     St25r3916_Init();
+
+    Set_T_Mixrf_Lr1121_Sleep();
 
     XL9555->pin_mode(XL9555_T_MIXRF_CC1101_RF_SWITCH_0, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9555->pin_mode(XL9555_T_MIXRF_CC1101_RF_SWITCH_1, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
