@@ -1,6 +1,6 @@
 dependencies:
   lvgl/lvgl:
-    version: "9.2.2"
+    version: "9.3.0"
 
   espressif/esp_tinyusb:
     version: "^1"

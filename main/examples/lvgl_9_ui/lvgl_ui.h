@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-10 09:16:41
+ * @LastEditTime: 2025-09-11 14:29:23
  * @License: GPL 3.0
  */
 #pragma once
@@ -44,6 +44,9 @@ namespace Lvgl_Ui
 #define GET_MUSIC_COVER_PATH(path) GET_PATH("music cover/") path
 
 #define APP_STYLE_ICON_WIDTH_HEIGHT 110 // 应用图标尺寸 对应图标图片像素的大小
+
+        static constexpr char *DEFAULT_KEYBOARD_ALLOWED_CHARS =
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_-+=[]{}|;:',.<>?/\" \\`~ ";
 
         struct Win_Home_App_Icon
         {
@@ -688,6 +691,8 @@ namespace Lvgl_Ui
         void set_win_music_current_total_time(double current_time_s, double total_time_s);
         void set_music_current_time_s(double current_time_s);
         void set_music_start_end(bool status);
+
+        void create_keyboard(lv_obj_t *parent);
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         void (*_win_cit_nfc_test_callback)(bool status) = nullptr;

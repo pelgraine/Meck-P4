@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-10 15:24:04
+ * @LastEditTime: 2025-09-11 14:57:50
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -93,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202509091534"},
+            {"firmware build date:\n     ", "202509101652"},
     };
 
     void System::begin()
@@ -2975,17 +2975,10 @@ namespace Lvgl_Ui
                                 } }, LV_EVENT_ALL, this);
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
-        _registry.keyboard = lv_keyboard_create(_registry.win.rf.root);
-        lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
-        lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
-        // 设置键盘按钮间距更密集
-        lv_obj_set_style_pad_row(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_pad_column(_registry.keyboard, 4, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-        lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
+        create_keyboard(_registry.win.rf.root);
 
         lv_keyboard_set_textarea(_registry.keyboard, _registry.win.rf.chat_textarea);
+        lv_textarea_set_accepted_chars(_registry.win.rf.chat_textarea, DEFAULT_KEYBOARD_ALLOWED_CHARS); // 只允许默认字符输入
 #endif
 
         lv_obj_add_event_cb(_registry.win.rf.chat_textarea, [](lv_event_t *e)
@@ -2999,6 +2992,7 @@ namespace Lvgl_Ui
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
                                 case LV_EVENT_FOCUSED:
                                         lv_keyboard_set_textarea(self->_registry.keyboard, textarea);
+                                        lv_textarea_set_accepted_chars(textarea, DEFAULT_KEYBOARD_ALLOWED_CHARS); // 只允许默认字符输入
                                         lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN); // 显示键盘
                                         lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
 
@@ -3423,23 +3417,11 @@ namespace Lvgl_Ui
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
                                 switch (code)
                                 {
-                                case LV_EVENT_CLICKED:
-                                    lv_keyboard_set_textarea(self->_registry.keyboard, textarea);
-                                    lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN);  // 显示键盘
-                                    lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-
-                                    // 调整消息框的大小
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, 800);
-                                    lv_obj_align_to(self->_registry.win.rf.setings.message_box.root_container, self->_registry.keyboard, LV_ALIGN_OUT_TOP_MID, 0, 0);
-                                    lv_obj_align(self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-                                    lv_obj_set_size(self->_registry.win.rf.setings.message_box.parameter_container, 450, 680);
-                                    lv_obj_align_to(self->_registry.win.rf.setings.message_box.parameter_container, self->_registry.win.rf.setings.message_box.btn_container, LV_ALIGN_OUT_TOP_MID, 0, 0);
-
-                                    break;
                                 case LV_EVENT_FOCUSED:
                                     lv_keyboard_set_textarea(self->_registry.keyboard, textarea);
-                                    lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN);  // 显示键盘
-                                    lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
+                                    lv_textarea_set_accepted_chars(textarea, DEFAULT_KEYBOARD_ALLOWED_CHARS); // 只允许默认字符输入
+                                    lv_obj_remove_flag(self->_registry.keyboard, LV_OBJ_FLAG_HIDDEN);         // 显示键盘
+                                    lv_obj_align(self->_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);        // 对齐到屏幕底部
 
                                     // 调整消息框的大小
                                     lv_obj_set_size(self->_registry.win.rf.setings.message_box.root_container, 450, 800);
@@ -3565,15 +3547,7 @@ namespace Lvgl_Ui
                                 lv_obj_delete(self->_registry.win.rf.setings.message_box.root); }, LV_EVENT_CLICKED, this);
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
-        _registry.keyboard = lv_keyboard_create(_registry.win.rf.setings.message_box.root);
-        lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
-        lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
-        // 设置键盘按钮间距更密集
-        lv_obj_set_style_pad_row(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_pad_column(_registry.keyboard, 4, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-        lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
+        create_keyboard(_registry.win.rf.setings.message_box.root);
 #endif
 
         _registry.win.rf.setings.message_box.parameter_container = lv_obj_create(_registry.win.rf.setings.message_box.root_container);
@@ -3835,15 +3809,7 @@ namespace Lvgl_Ui
                                 lv_obj_delete(self->_registry.win.rf.setings.message_box.root); }, LV_EVENT_CLICKED, this);
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
-        _registry.keyboard = lv_keyboard_create(_registry.win.rf.setings.message_box.root);
-        lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
-        lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
-        // 设置键盘按钮间距更密集
-        lv_obj_set_style_pad_row(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_pad_column(_registry.keyboard, 4, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-        lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
+        create_keyboard(_registry.win.rf.setings.message_box.root);
 #endif
 
         _registry.win.rf.setings.message_box.parameter_container = lv_obj_create(_registry.win.rf.setings.message_box.root_container);
@@ -4405,15 +4371,7 @@ namespace Lvgl_Ui
                                 lv_obj_delete(self->_registry.win.rf.setings.message_box.root); }, LV_EVENT_CLICKED, this);
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
-        _registry.keyboard = lv_keyboard_create(_registry.win.rf.setings.message_box.root);
-        lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
-        lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
-        // 设置键盘按钮间距更密集
-        lv_obj_set_style_pad_row(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_pad_column(_registry.keyboard, 4, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
-        lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
+        create_keyboard(_registry.win.rf.setings.message_box.root);
 #endif
 
         _registry.win.rf.setings.message_box.parameter_container = lv_obj_create(_registry.win.rf.setings.message_box.root_container);
@@ -4954,6 +4912,14 @@ namespace Lvgl_Ui
         lv_slider_set_value(_registry.win.music.slider, sliding_percentage, LV_ANIM_OFF);
     }
 
+    void System::set_music_current_time_s(double current_time_s)
+    {
+        if (_set_music_current_time_s_callback != nullptr)
+        {
+            _set_music_current_time_s_callback(current_time_s);
+        }
+    }
+
     void System::set_music_start_end(bool status)
     {
         if (_win_music_start_end_callback != nullptr)
@@ -4962,12 +4928,167 @@ namespace Lvgl_Ui
         }
     }
 
-    void System::set_music_current_time_s(double current_time_s)
+    void System::create_keyboard(lv_obj_t *parent)
     {
-        if (_set_music_current_time_s_callback != nullptr)
-        {
-            _set_music_current_time_s_callback(current_time_s);
+        _registry.keyboard = lv_keyboard_create(parent);
+        lv_obj_set_size(_registry.keyboard, _width, _height / 3.5);
+        lv_obj_set_style_radius(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
+        // 设置键盘按钮间距更密集
+        lv_obj_set_style_pad_row(_registry.keyboard, 8, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_column(_registry.keyboard, 4, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(_registry.keyboard, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_align(_registry.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0); // 对齐到屏幕底部
+        lv_obj_add_flag(_registry.keyboard, LV_OBJ_FLAG_HIDDEN);     // 初始隐藏键盘
+
+        static const char *kb_map_lower[] = {
+            "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "\n",
+            " ", "a", "s", "d", "f", "g", "h", "j", "k", "l", " ", "\n",
+            LV_SYMBOL_EJECT, "z", "x", "c", "v", "b", "n", "m", LV_SYMBOL_BACKSPACE, "\n",
+            LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, " ", LV_SYMBOL_RIGHT, LV_SYMBOL_NEW_LINE, NULL};
+
+        static const char *kb_map_upper[] = {
+            "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "\n",
+            " ", "A", "S", "D", "F", "G", "H", "J", "K", "L", " ", "\n",
+            LV_SYMBOL_EJECT, "Z", "X", "C", "V", "B", "N", "M", LV_SYMBOL_BACKSPACE, "\n",
+            LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, " ", LV_SYMBOL_RIGHT, LV_SYMBOL_NEW_LINE, NULL};
+
+        static const char *kb_map_num[] = {
+            "1", "2", "3", LV_SYMBOL_BACKSPACE, "\n",
+            "4", "5", "6", LV_SYMBOL_LEFT, LV_SYMBOL_RIGHT, "\n",
+            "7", "8", "9", LV_SYMBOL_NEW_LINE, "\n",
+            "+/-", "0", ".", LV_SYMBOL_KEYBOARD, NULL};
+
+        static const char *kb_map_sym[] = {
+            "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "\n",
+            "_", "-", "+", "=", "[", "]", "{", "}", "|", ";", "\n",
+            ":", "'", "\"", ",", "<", ">", ".", "?", "/", "\\", "`", "~", "\n",
+            LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, LV_SYMBOL_RIGHT, LV_SYMBOL_BACKSPACE, NULL};
+
+        static const lv_buttonmatrix_ctrl_t kb_ctrl[] =
+            {
+                // 字母键盘第一行
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+                // 字母键盘第二行
+                LV_BUTTONMATRIX_CTRL_HIDDEN | LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_HIDDEN | LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+                // 字母键盘第三行
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2,
+
+                // 字母键盘第四行
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2, // 键盘切换按钮
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_1, // 左箭头
+                LV_BUTTONMATRIX_CTRL_WIDTH_3,                                // Space
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_1, // 右箭头
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2, // New line
+            };
+
+        // 为数字键盘创建单独的控制数组
+        static const lv_buttonmatrix_ctrl_t kb_ctrl_num[] =
+            {
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2,
+
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2,
+
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2};
+
+        // 为符号键盘创建单独的控制数组
+        static const lv_buttonmatrix_ctrl_t kb_ctrl_sym[] =
+            {
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2};
+
+        lv_keyboard_set_map(_registry.keyboard, LV_KEYBOARD_MODE_USER_1, kb_map_lower, kb_ctrl);
+        lv_keyboard_set_map(_registry.keyboard, LV_KEYBOARD_MODE_USER_2, kb_map_upper, kb_ctrl);
+        lv_keyboard_set_map(_registry.keyboard, LV_KEYBOARD_MODE_USER_3, kb_map_num, kb_ctrl_num);
+        lv_keyboard_set_map(_registry.keyboard, LV_KEYBOARD_MODE_USER_4, kb_map_sym, kb_ctrl_sym);
+
+        lv_keyboard_set_mode(_registry.keyboard, LV_KEYBOARD_MODE_USER_1);
+
+        // 使用lambda表达式添加事件处理回调
+        lv_obj_add_event_cb(_registry.keyboard, [](lv_event_t *e)
+                            {
+        lv_obj_t * kb = lv_event_get_target(e);
+        uint16_t btn_id = lv_keyboard_get_selected_btn(kb);
+        
+        // 安全地获取按钮文本
+        const char * txt = lv_keyboard_get_btn_text(kb, btn_id);
+        if(txt == nullptr) {
+            return;  // 如果文本为空，直接返回
         }
+        
+        // 处理键盘切换按钮
+        if(strcmp(txt, LV_SYMBOL_KEYBOARD) == 0) 
+        {
+            // 获取当前模式并循环切换
+            lv_keyboard_mode_t current_mode = lv_keyboard_get_mode(kb);
+            lv_keyboard_mode_t next_mode;
+            
+            switch(current_mode) {
+                case LV_KEYBOARD_MODE_USER_1: // 小写英文 -> 数字
+                    next_mode = LV_KEYBOARD_MODE_USER_3;
+                    break;
+                case LV_KEYBOARD_MODE_USER_2: // 大写英文 -> 数字
+                    next_mode = LV_KEYBOARD_MODE_USER_3;
+                    break;
+                case LV_KEYBOARD_MODE_USER_3: // 数字 -> 符号
+                    next_mode = LV_KEYBOARD_MODE_USER_4;
+                    break;
+                case LV_KEYBOARD_MODE_USER_4: // 符号 -> 小写英文
+                    next_mode = LV_KEYBOARD_MODE_USER_1;
+                    break;
+                default: // 默认回到小写英文
+                    next_mode = LV_KEYBOARD_MODE_USER_1;
+                    break;
+            }
+            
+            lv_keyboard_set_mode(kb, next_mode);
+        }
+        else if(strcmp(txt, LV_SYMBOL_EJECT) == 0) 
+        {
+            // 大小写切换功能保持不变
+            lv_keyboard_mode_t mode = lv_keyboard_get_mode(kb);
+            if(mode == LV_KEYBOARD_MODE_USER_1) 
+            {
+                lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_2);
+            } 
+            else if(mode == LV_KEYBOARD_MODE_USER_2) 
+            {
+                lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
+            }
+        } }, LV_EVENT_VALUE_CHANGED, nullptr);
     }
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
