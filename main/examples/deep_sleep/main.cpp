@@ -2,7 +2,7 @@
  * @Description: deep_sleep
  * @Author: LILYGO_L
  * @Date: 2025-05-12 14:08:31
- * @LastEditTime: 2025-09-10 13:36:20
+ * @LastEditTime: 2025-09-12 09:15:14
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -64,7 +64,6 @@ auto PCF8563_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(PCF8563_
 auto SGM38121_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(SGM38121_SDA, SGM38121_SCL, I2C_NUM_1);
 auto AW86224_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(AW86224_SDA, AW86224_SCL, I2C_NUM_1);
 auto ES8311_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(ES8311_SDA, ES8311_SCL, I2C_NUM_1);
-auto ICM20948_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iic_1>(ICM20948_SDA, ICM20948_SCL, I2C_NUM_1);
 
 // IIS
 auto ES8311_IIS_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Iis>(ES8311_ADC_DATA, ES8311_DAC_DATA, ES8311_WS_LRCK, ES8311_BCLK, ES8311_MCLK, I2S_NUM_0);
@@ -90,7 +89,7 @@ auto PCF8563 = std::make_unique<Cpp_Bus_Driver::Pcf8563x>(PCF8563_IIC_Bus, PCF85
 auto SGM38121 = std::make_unique<Cpp_Bus_Driver::Sgm38121>(SGM38121_IIC_Bus, SGM38121_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 auto AW86224 = std::make_unique<Cpp_Bus_Driver::Aw862xx>(AW86224_IIC_Bus, AW86224_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
 auto ES8311 = std::make_unique<Cpp_Bus_Driver::Es8311>(ES8311_IIC_Bus, ES8311_IIS_Bus, ES8311_IIC_ADDRESS, DEFAULT_CPP_BUS_DRIVER_VALUE);
-auto ICM20948 = std::make_unique<ICM20948_WE>(ICM20948_IIC_Bus, ICM20948_IIC_ADDRESS);
+auto ICM20948 = std::make_unique<ICM20948_WE>(&Wire1, ICM20948_IIC_ADDRESS);
 
 // UART
 auto L76K = std::make_unique<Cpp_Bus_Driver::L76k>(L76K_Uart_Bus, [](bool Value) -> IRAM_ATTR bool
@@ -466,7 +465,8 @@ void ES8311_Init(void)
 
 bool ICM20948_Init(void)
 {
-    if (ICM20948->begin() == false)
+    Wire1.begin(ICM20948_SDA, ICM20948_SCL);
+    if (ICM20948->init() == false)
     {
         printf("ICM20948 AG initialization failed\n");
         return false;
@@ -1001,7 +1001,7 @@ extern "C" void app_main(void)
     ES8311_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
     ES8311_Init();
 
-    ICM20948_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
+    Wire1._bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
     ICM20948_Init();
 
     XL9535->pin_write(XL9535_GPS_WAKE_UP, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
@@ -1080,8 +1080,6 @@ extern "C" void app_main(void)
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-#endif
-
 #if defined CONFIG_SCREEN_TYPE_HI8561
     ESP32P4->start_pwm_gradient_time(100, 500);
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
@@ -1092,6 +1090,8 @@ extern "C" void app_main(void)
     }
 #else
 #error "unknown macro definition, please select the correct macro definition."
+#endif
+
 #endif
 
     vTaskDelay(pdMS_TO_TICKS(1000));

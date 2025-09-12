@@ -125,7 +125,7 @@ menu "Example Configuration"
                 depends on BOARD_TYPE_T_DISPLAY_P4
             config EXAMPLE_BUILD_DEEP_SLEEP
                 bool "deep_sleep"
-                depends on BOARD_TYPE_T_DISPLAY_P4
+                depends on BOARD_TYPE_T_DISPLAY_P4 || BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
             config EXAMPLE_BUILD_ES8311
                 bool "es8311"
                 depends on BOARD_TYPE_T_DISPLAY_P4
