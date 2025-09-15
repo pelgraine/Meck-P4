@@ -2,7 +2,7 @@
  * @Description: xl9535
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-09-01 15:31:56
+ * @LastEditTime: 2025-09-15 17:28:35
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -64,7 +64,7 @@ extern "C" void app_main(void)
     TCA8418->set_irq_pin_mode(Cpp_Bus_Driver::Tca8418::Irq_Mask::KEY_EVENTS);
     TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
 
-    TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_0, 2000);
+    TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_0, 20000);
     TCA8418->start_pwm_gradient_time(100, 1000);
 
     while (1)
