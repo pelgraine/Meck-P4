@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-15 15:39:34
+ * @LastEditTime: 2025-09-16 16:47:55
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -2622,6 +2622,7 @@ bool Sdspi_Init(const char *base_path)
     }
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SPI3_HOST;
 
     // host.max_freq_khz=SDMMC_FREQ_52M;
 
@@ -2644,6 +2645,7 @@ bool Sdspi_Init(const char *base_path)
     }
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.host_id = SPI3_HOST;
     slot_config.gpio_cs = SD_CS;
     slot_config.host_id = host.slot;
 
