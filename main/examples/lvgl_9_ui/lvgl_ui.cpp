@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-19 11:37:57
+ * @LastEditTime: 2025-09-25 13:53:10
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -5180,7 +5180,10 @@ namespace Lvgl_Ui
         // OK按钮回调函数，删除整个消息框
         lv_obj_add_event_cb(ok_btn, [](lv_event_t *e)
                             {
+                                lv_obj_t * ok_btn = lv_event_get_target_obj(e);
                                 System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                
+                                lv_obj_add_flag(ok_btn, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
 
                                 // 创建向下消失的动画
                                 lv_anim_t anim;
