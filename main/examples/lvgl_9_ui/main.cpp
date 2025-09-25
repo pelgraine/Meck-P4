@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-16 16:47:55
+ * @LastEditTime: 2025-09-19 11:40:42
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -4329,12 +4329,15 @@ extern "C" void app_main(void)
 #endif
 
     // 等待lvgl刷新完成
-    while (lv_display_flush_is_last(lv_display_get_default()) == false)
-    {
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+    // while (lv_display_flush_is_last(lv_display_get_default()) == false)
+    // {
+    //     vTaskDelay(pdMS_TO_TICKS(10));
+    // }
 
+    printf("system ui init finish\n");
     System_Ui->set_vibration();
+
+    // System_Ui->create_system_message_box(System_Ui->_registry.win.home.root, "system massage", "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww");
 
     //     while (1)
     //     {

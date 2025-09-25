@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-11 14:29:23
+ * @LastEditTime: 2025-09-19 11:14:37
  * @License: GPL 3.0
  */
 #pragma once
@@ -130,6 +130,13 @@ namespace Lvgl_Ui
         {
             lv_obj_t *keyboard;
             lv_group_t *keyboard_group;
+
+            struct
+            {
+                lv_obj_t *message_box;
+
+                size_t system_message_height = 0;
+            } system_message_box;
 
             struct
             {
@@ -693,6 +700,8 @@ namespace Lvgl_Ui
         void set_music_start_end(bool status);
 
         void create_keyboard(lv_obj_t *parent);
+
+        void create_system_message_box(lv_obj_t *parent, std::string message_title, std::string message_data);
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         void (*_win_cit_nfc_test_callback)(bool status) = nullptr;

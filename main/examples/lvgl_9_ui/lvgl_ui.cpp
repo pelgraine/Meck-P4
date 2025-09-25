@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-15 17:29:56
+ * @LastEditTime: 2025-09-19 11:37:57
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -93,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202509151729"},
+            {"firmware build date:\n     ", "202509191137"},
     };
 
     void System::begin()
@@ -3483,7 +3483,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_size(_registry.win.rf.setings.message_box.root, _width, _height);
         lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_50, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_30, LV_PART_MAIN);
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
@@ -3651,7 +3651,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_size(_registry.win.rf.setings.message_box.root, _width, _height);
         lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_50, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_30, LV_PART_MAIN);
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
@@ -4232,7 +4232,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_size(_registry.win.rf.setings.message_box.root, _width, _height);
         lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_50, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_30, LV_PART_MAIN);
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
@@ -5040,55 +5040,217 @@ namespace Lvgl_Ui
         // 使用lambda表达式添加事件处理回调
         lv_obj_add_event_cb(_registry.keyboard, [](lv_event_t *e)
                             {
-        lv_obj_t * kb = lv_event_get_target(e);
-        uint16_t btn_id = lv_keyboard_get_selected_btn(kb);
-        
-        // 安全地获取按钮文本
-        const char * txt = lv_keyboard_get_btn_text(kb, btn_id);
-        if(txt == nullptr) {
-            return;  // 如果文本为空，直接返回
-        }
-        
-        // 处理键盘切换按钮
-        if(strcmp(txt, LV_SYMBOL_KEYBOARD) == 0) 
-        {
-            // 获取当前模式并循环切换
-            lv_keyboard_mode_t current_mode = lv_keyboard_get_mode(kb);
-            lv_keyboard_mode_t next_mode;
-            
-            switch(current_mode) {
-                case LV_KEYBOARD_MODE_USER_1: // 小写英文 -> 数字
-                    next_mode = LV_KEYBOARD_MODE_USER_3;
-                    break;
-                case LV_KEYBOARD_MODE_USER_2: // 大写英文 -> 数字
-                    next_mode = LV_KEYBOARD_MODE_USER_3;
-                    break;
-                case LV_KEYBOARD_MODE_USER_3: // 数字 -> 符号
-                    next_mode = LV_KEYBOARD_MODE_USER_4;
-                    break;
-                case LV_KEYBOARD_MODE_USER_4: // 符号 -> 小写英文
-                    next_mode = LV_KEYBOARD_MODE_USER_1;
-                    break;
-                default: // 默认回到小写英文
-                    next_mode = LV_KEYBOARD_MODE_USER_1;
-                    break;
-            }
-            
-            lv_keyboard_set_mode(kb, next_mode);
-        }
-        else if(strcmp(txt, LV_SYMBOL_EJECT) == 0) 
-        {
-            // 大小写切换功能保持不变
-            lv_keyboard_mode_t mode = lv_keyboard_get_mode(kb);
-            if(mode == LV_KEYBOARD_MODE_USER_1) 
-            {
-                lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_2);
-            } 
-            else if(mode == LV_KEYBOARD_MODE_USER_2) 
-            {
-                lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
-            }
-        } }, LV_EVENT_VALUE_CHANGED, nullptr);
+                                lv_obj_t * kb = lv_event_get_target_obj(e);
+                                uint16_t btn_id = lv_keyboard_get_selected_button(kb);
+                                
+                                // 安全地获取按钮文本
+                                const char * txt = lv_keyboard_get_button_text(kb, btn_id);
+                                if(txt == nullptr) 
+                                {
+                                    return;  // 如果文本为空，直接返回
+                                }
+                                
+                                // 处理键盘切换按钮
+                                if(strcmp(txt, LV_SYMBOL_KEYBOARD) == 0) 
+                                {
+                                    // 获取当前模式并循环切换
+                                    lv_keyboard_mode_t current_mode = lv_keyboard_get_mode(kb);
+                                    lv_keyboard_mode_t next_mode;
+                                    
+                                    switch(current_mode) {
+                                        case LV_KEYBOARD_MODE_USER_1: // 小写英文 -> 数字
+                                            next_mode = LV_KEYBOARD_MODE_USER_3;
+                                            break;
+                                        case LV_KEYBOARD_MODE_USER_2: // 大写英文 -> 数字
+                                            next_mode = LV_KEYBOARD_MODE_USER_3;
+                                            break;
+                                        case LV_KEYBOARD_MODE_USER_3: // 数字 -> 符号
+                                            next_mode = LV_KEYBOARD_MODE_USER_4;
+                                            break;
+                                        case LV_KEYBOARD_MODE_USER_4: // 符号 -> 小写英文
+                                            next_mode = LV_KEYBOARD_MODE_USER_1;
+                                            break;
+                                        default: // 默认回到小写英文
+                                            next_mode = LV_KEYBOARD_MODE_USER_1;
+                                            break;
+                                    }
+                                    
+                                    lv_keyboard_set_mode(kb, next_mode);
+                                }
+                                else if(strcmp(txt, LV_SYMBOL_EJECT) == 0) 
+                                {
+                                    // 大小写切换功能保持不变
+                                    lv_keyboard_mode_t mode = lv_keyboard_get_mode(kb);
+                                    if(mode == LV_KEYBOARD_MODE_USER_1) 
+                                    {
+                                        lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_2);
+                                    } 
+                                    else if(mode == LV_KEYBOARD_MODE_USER_2) 
+                                    {
+                                        lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_USER_1);
+                                    }
+                                } }, LV_EVENT_VALUE_CHANGED, nullptr);
+    }
+
+    void System::create_system_message_box(lv_obj_t *parent, std::string message_title, std::string message_data)
+    {
+        // 创建全屏灰色透明遮罩，禁止触摸
+        lv_obj_t *message_box_mask = lv_obj_create(parent);
+        lv_obj_set_style_pad_top(message_box_mask, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_bottom(message_box_mask, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_left(message_box_mask, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_right(message_box_mask, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_size(message_box_mask, _width, _height);
+        lv_obj_set_style_bg_color(message_box_mask, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(message_box_mask, LV_OPA_30, LV_PART_MAIN);
+        lv_obj_set_style_border_width(message_box_mask, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(message_box_mask, 0, LV_PART_MAIN);
+        lv_obj_align(message_box_mask, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_remove_flag(message_box_mask, LV_OBJ_FLAG_SCROLLABLE); // 禁止滚动
+
+        // 灰色透明遮罩回调函数，删除整个消息框
+        lv_obj_add_event_cb(message_box_mask, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+
+                                // 创建向下消失的动画
+                                lv_anim_t anim;
+                                lv_anim_init(&anim);
+                                lv_anim_set_var(&anim, self->_registry.system_message_box.message_box);
+                                lv_anim_set_exec_cb(&anim, (lv_anim_exec_xcb_t)lv_obj_set_y);
+                                // 从当前位置移动到屏幕底部
+                                lv_anim_set_values(&anim, -((self->_width / 7) / 4), self->_registry.system_message_box.system_message_height);             // 屏幕底部
+                                lv_anim_set_duration(&anim, 300);
+                                lv_anim_set_delay(&anim, 0);
+                                lv_anim_set_path_cb(&anim, lv_anim_path_ease_in);
+
+                                lv_anim_set_completed_cb(&anim, [](lv_anim_t *anim)
+                                {
+                                    lv_obj_t *message_box = (lv_obj_t *)anim->var;
+                                    lv_obj_t *message_box_mask = lv_obj_get_parent(message_box);
+                                    lv_obj_delete(message_box_mask);
+                                });
+
+                                lv_anim_start(&anim); }, LV_EVENT_CLICKED, this);
+
+        // 创建消息框容器
+        _registry.system_message_box.message_box = lv_obj_create(message_box_mask);
+        lv_obj_set_style_pad_all(_registry.system_message_box.message_box, 0, LV_PART_MAIN);
+        lv_obj_set_size(_registry.system_message_box.message_box, _width - (_width / 7), _registry.system_message_box.system_message_height);
+        lv_obj_set_style_bg_color(_registry.system_message_box.message_box, lv_color_white(), LV_PART_MAIN);
+        lv_obj_set_style_radius(_registry.system_message_box.message_box, 45, LV_PART_MAIN);
+        lv_obj_set_style_border_width(_registry.system_message_box.message_box, 0, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(_registry.system_message_box.message_box, 16, LV_PART_MAIN);
+
+        // 创建消息标题标签，顶部居中
+        lv_obj_t *message_title_label = lv_label_create(_registry.system_message_box.message_box);
+        lv_label_set_text(message_title_label, message_title.c_str());
+        lv_obj_set_style_text_font(message_title_label, &lv_font_montserrat_36, LV_PART_MAIN);
+        lv_obj_set_style_text_color(message_title_label, lv_color_black(), LV_PART_MAIN);
+        lv_obj_align(message_title_label, LV_ALIGN_TOP_MID, 0, 35);
+
+        // 创建消息内容标签，居中显示
+        lv_obj_t *message_label = lv_label_create(_registry.system_message_box.message_box);
+        lv_label_set_text(message_label, message_data.c_str());
+        lv_obj_set_width(message_label, _width - (_width / 7) - 80);
+        lv_label_set_long_mode(message_label, LV_LABEL_LONG_WRAP); // 自动换行
+        lv_obj_set_style_text_font(message_label, &lv_font_montserrat_26, LV_PART_MAIN);
+        lv_obj_set_style_text_color(message_label, lv_color_black(), LV_PART_MAIN);
+        lv_obj_align_to(message_label, message_title_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 30);
+
+        // 创建OK按钮
+        lv_obj_t *ok_btn = lv_button_create(_registry.system_message_box.message_box);
+        lv_obj_set_size(ok_btn, (_width - _width / 8) * (2.0 / 3.0), 70);
+        lv_obj_align(ok_btn, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_radius(ok_btn, 20, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(ok_btn, 0, LV_PART_MAIN);
+        lv_obj_align(ok_btn, LV_ALIGN_BOTTOM_MID, 0, -30);
+
+        lv_obj_t *ok_label = lv_label_create(ok_btn);
+        lv_label_set_text(ok_label, "OK");
+        lv_obj_set_style_text_font(ok_label, &lv_font_montserrat_26, LV_PART_MAIN);
+        lv_obj_center(ok_label);
+
+        // 重新设置消息框正确高度
+        _registry.system_message_box.system_message_height = 35 + 30 + lv_obj_get_height(message_label) + 40 + lv_obj_get_height(message_label) + 30;
+        lv_obj_set_height(_registry.system_message_box.message_box, _registry.system_message_box.system_message_height);
+        // 初始位置：隐藏在屏幕下方
+        lv_obj_align(_registry.system_message_box.message_box, LV_ALIGN_BOTTOM_MID, 0, _registry.system_message_box.system_message_height);
+
+        // OK按钮回调函数，删除整个消息框
+        lv_obj_add_event_cb(ok_btn, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+
+                                // 创建向下消失的动画
+                                lv_anim_t anim;
+                                lv_anim_init(&anim);
+                                lv_anim_set_var(&anim, self->_registry.system_message_box.message_box);
+                                lv_anim_set_exec_cb(&anim, (lv_anim_exec_xcb_t)lv_obj_set_y);
+                                // 从当前位置移动到屏幕底部
+                                lv_anim_set_values(&anim, -((self->_width / 7) / 4), self->_registry.system_message_box.system_message_height); 
+                                lv_anim_set_duration(&anim, 300);
+                                lv_anim_set_delay(&anim, 0);
+                                lv_anim_set_path_cb(&anim, lv_anim_path_ease_in);
+
+                                lv_anim_set_completed_cb(&anim, [](lv_anim_t *anim)
+                                {
+                                    lv_obj_t *message_box = (lv_obj_t *)anim->var;
+                                    lv_obj_t *message_box_mask = lv_obj_get_parent(message_box);
+                                    lv_obj_delete(message_box_mask);
+                                });
+
+                                lv_anim_start(&anim); }, LV_EVENT_CLICKED, this);
+
+        lv_obj_add_event_cb(parent, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
+
+                                if (code == LV_EVENT_GESTURE)
+                                {
+                                    lv_dir_t gesture_dir = lv_indev_get_gesture_dir(lv_indev_active());
+
+                                    // 边缘检测以及左右滑动
+                                    if ((gesture_dir == LV_DIR_LEFT || gesture_dir == LV_DIR_RIGHT)&&(self->_edge_touch_flag == true))
+                                    {   
+                                        // 创建向下消失的动画
+                                        lv_anim_t anim;
+                                        lv_anim_init(&anim);
+                                        lv_anim_set_var(&anim, self->_registry.system_message_box.message_box);
+                                        lv_anim_set_exec_cb(&anim, (lv_anim_exec_xcb_t)lv_obj_set_y);
+                                        // 从当前位置移动到屏幕底部
+                                        lv_anim_set_values(&anim, -((self->_width / 7) / 4), self->_registry.system_message_box.system_message_height);             // 屏幕底部
+                                        lv_anim_set_duration(&anim, 300);
+                                        lv_anim_set_delay(&anim, 0);
+                                        lv_anim_set_path_cb(&anim, lv_anim_path_ease_in);
+
+                                        lv_anim_set_completed_cb(&anim, [](lv_anim_t *anim)
+                                        {
+                                            lv_obj_t *message_box = (lv_obj_t *)anim->var;
+                                            lv_obj_t *message_box_mask = lv_obj_get_parent(message_box);
+                                            lv_obj_delete(message_box_mask);
+                                        });
+
+                                        lv_anim_start(&anim); 
+
+                                        self->set_vibration();
+
+                                        self->_edge_touch_flag = false;
+                                    }
+                                } }, LV_EVENT_ALL, this);
+
+        // 创建向上弹出的动画
+        lv_anim_t anim;
+        lv_anim_init(&anim);
+        lv_anim_set_var(&anim, _registry.system_message_box.message_box);
+        lv_anim_set_exec_cb(&anim, (lv_anim_exec_xcb_t)lv_obj_set_y);
+        lv_anim_set_values(&anim, _registry.system_message_box.system_message_height, -((_width / 7) / 4)); // 从下方移动到正常位置
+        lv_anim_set_duration(&anim, 300);
+        lv_anim_set_delay(&anim, 1000);
+        lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+
+        lv_anim_start(&anim);
     }
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
@@ -5277,7 +5439,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_size(_registry.win.rf.setings.message_box.root, _width, _height);
         lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_50, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_30, LV_PART_MAIN);
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
@@ -5774,7 +5936,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_pad_right(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_size(_registry.win.rf.setings.message_box.root, _width, _height);
         lv_obj_set_style_bg_color(_registry.win.rf.setings.message_box.root, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_50, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(_registry.win.rf.setings.message_box.root, LV_OPA_30, LV_PART_MAIN);
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
