@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-26 10:07:30
+ * @LastEditTime: 2025-09-26 12:16:02
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -93,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202509261007"},
+            {"firmware build date:\n     ", "202509261215"},
     };
 
     void System::begin()
@@ -3475,7 +3475,7 @@ namespace Lvgl_Ui
 
     void System::init_win_rf_setings_rf_chip_type_message_box(void)
     {
-        // 创建全屏灰色透明遮罩，禁止触摸
+        // 创建全屏灰色透明遮罩
         _registry.win.rf.setings.message_box.root = lv_obj_create(_registry.win.rf.setings.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -3487,7 +3487,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_remove_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
+        lv_obj_add_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 添加触摸标志来禁止其他界面触摸
 
         _registry.win.rf.setings.message_box.root_container = lv_obj_create(_registry.win.rf.setings.message_box.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -3643,7 +3643,7 @@ namespace Lvgl_Ui
 
     void System::init_win_rf_setings_config_sx1262_params_message_box(void)
     {
-        // 创建全屏灰色透明遮罩，禁止触摸
+        // 创建全屏灰色透明遮罩
         _registry.win.rf.setings.message_box.root = lv_obj_create(_registry.win.rf.setings.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -3655,7 +3655,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_remove_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
+        lv_obj_add_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 添加触摸标志来禁止其他界面触摸
 
         _registry.win.rf.setings.message_box.root_container = lv_obj_create(_registry.win.rf.setings.message_box.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -4224,7 +4224,7 @@ namespace Lvgl_Ui
 
     void System::init_win_rf_setings_auto_send_message_box(void)
     {
-        // 创建全屏灰色透明遮罩，禁止触摸
+        // 创建全屏灰色透明遮罩
         _registry.win.rf.setings.message_box.root = lv_obj_create(_registry.win.rf.setings.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -4236,7 +4236,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_remove_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
+        lv_obj_add_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 添加触摸标志来禁止其他界面触摸
 
         _registry.win.rf.setings.message_box.root_container = lv_obj_create(_registry.win.rf.setings.message_box.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -5445,7 +5445,7 @@ namespace Lvgl_Ui
 
     void System::init_win_rf_setings_config_cc1101_params_message_box(void)
     {
-        // 创建全屏灰色透明遮罩，禁止触摸
+        // 创建全屏灰色透明遮罩
         _registry.win.rf.setings.message_box.root = lv_obj_create(_registry.win.rf.setings.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -5457,7 +5457,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_remove_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
+        lv_obj_add_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 添加触摸标志来禁止其他界面触摸
 
         _registry.win.rf.setings.message_box.root_container = lv_obj_create(_registry.win.rf.setings.message_box.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -5942,7 +5942,7 @@ namespace Lvgl_Ui
 
     void System::init_win_rf_setings_config_nrf24l01_params_message_box(void)
     {
-        // 创建全屏灰色透明遮罩，禁止触摸
+        // 创建全屏灰色透明遮罩
         _registry.win.rf.setings.message_box.root = lv_obj_create(_registry.win.rf.setings.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_obj_set_style_pad_bottom(_registry.win.rf.setings.message_box.root, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
@@ -5954,7 +5954,7 @@ namespace Lvgl_Ui
         lv_obj_set_style_border_width(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_set_style_radius(_registry.win.rf.setings.message_box.root, 0, LV_PART_MAIN);
         lv_obj_align(_registry.win.rf.setings.message_box.root, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_remove_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
+        lv_obj_add_flag(_registry.win.rf.setings.message_box.root, LV_OBJ_FLAG_CLICKABLE); // 添加触摸标志来禁止其他界面触摸
 
         _registry.win.rf.setings.message_box.root_container = lv_obj_create(_registry.win.rf.setings.message_box.root);
         lv_obj_set_style_pad_top(_registry.win.rf.setings.message_box.root_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
