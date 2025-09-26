@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-25 15:53:32
+ * @LastEditTime: 2025-09-26 10:07:30
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -93,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202509191137"},
+            {"firmware build date:\n     ", "202509261007"},
     };
 
     void System::begin()
@@ -5111,7 +5111,7 @@ namespace Lvgl_Ui
         // 灰色透明遮罩回调函数，删除整个消息框
         lv_obj_add_event_cb(message_box_mask, [](lv_event_t *e)
                             {
-                                lv_obj_t * message_box_mask = lv_event_get_target_obj(e);
+                                lv_obj_t *message_box_mask = lv_event_get_target_obj(e);
                                 System *self = static_cast<System *>(lv_event_get_user_data(e));
 
                                 lv_obj_remove_flag(message_box_mask, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
@@ -5122,19 +5122,20 @@ namespace Lvgl_Ui
                                 lv_anim_set_var(&anim, self->_registry.system_message_box.message_box);
                                 lv_anim_set_exec_cb(&anim, (lv_anim_exec_xcb_t)lv_obj_set_y);
                                 // 从当前位置移动到屏幕底部
-                                lv_anim_set_values(&anim, -((self->_width / 7) / 4), self->_registry.system_message_box.system_message_height);             // 屏幕底部
+                                lv_anim_set_values(&anim, -((self->_width / 7) / 4), self->_registry.system_message_box.system_message_height); // 屏幕底部
                                 lv_anim_set_duration(&anim, 300);
                                 lv_anim_set_delay(&anim, 0);
                                 lv_anim_set_path_cb(&anim, lv_anim_path_ease_in);
 
                                 lv_anim_set_completed_cb(&anim, [](lv_anim_t *anim)
-                                {
+                                                         {
                                     lv_obj_t *message_box = (lv_obj_t *)anim->var;
                                     lv_obj_t *message_box_mask = lv_obj_get_parent(message_box);
-                                    lv_obj_delete(message_box_mask);
-                                });
+                                    lv_obj_delete(message_box_mask); });
 
-                                lv_anim_start(&anim); }, LV_EVENT_CLICKED, this);
+                                lv_anim_start(&anim);
+
+                                self->_registry.system_message_box.occupancy_flag = false; }, LV_EVENT_CLICKED, this);
 
         // 创建消息框容器
         _registry.system_message_box.message_box = lv_obj_create(message_box_mask);
@@ -5148,6 +5149,7 @@ namespace Lvgl_Ui
         // 创建消息标题标签，顶部居中
         lv_obj_t *message_title_label = lv_label_create(_registry.system_message_box.message_box);
         lv_label_set_text(message_title_label, message_title.c_str());
+        lv_obj_set_style_text_align(message_title_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
         lv_obj_set_style_text_font(message_title_label, &lv_font_montserrat_36, LV_PART_MAIN);
         lv_obj_set_style_text_color(message_title_label, lv_color_black(), LV_PART_MAIN);
         lv_obj_align(message_title_label, LV_ALIGN_TOP_MID, 0, 35);
@@ -5155,6 +5157,7 @@ namespace Lvgl_Ui
         // 创建消息内容标签，居中显示
         lv_obj_t *message_label = lv_label_create(_registry.system_message_box.message_box);
         lv_label_set_text(message_label, message_data.c_str());
+        lv_obj_set_style_text_align(message_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
         lv_obj_set_width(message_label, _width - (_width / 7) - 80);
         lv_label_set_long_mode(message_label, LV_LABEL_LONG_WRAP); // 自动换行
         lv_obj_set_style_text_font(message_label, &lv_font_montserrat_26, LV_PART_MAIN);
@@ -5175,7 +5178,7 @@ namespace Lvgl_Ui
         lv_obj_center(ok_label);
 
         // 重新设置消息框正确高度
-        _registry.system_message_box.system_message_height = 35 + 30 + lv_obj_get_height(message_label) + 40 + lv_obj_get_height(message_label) + 30;
+        _registry.system_message_box.system_message_height = 35 + 30 + lv_obj_get_height(message_title_label) + 40 + lv_obj_get_height(message_label) + 30 + 30 + 70;
         lv_obj_set_height(_registry.system_message_box.message_box, _registry.system_message_box.system_message_height);
         // 初始位置：隐藏在屏幕下方
         lv_obj_align(_registry.system_message_box.message_box, LV_ALIGN_BOTTOM_MID, 0, _registry.system_message_box.system_message_height);
@@ -5183,9 +5186,9 @@ namespace Lvgl_Ui
         // OK按钮回调函数，删除整个消息框
         lv_obj_add_event_cb(ok_btn, [](lv_event_t *e)
                             {
-                                lv_obj_t * ok_btn = lv_event_get_target_obj(e);
+                                lv_obj_t *ok_btn = lv_event_get_target_obj(e);
                                 System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                
+
                                 lv_obj_remove_flag(ok_btn, LV_OBJ_FLAG_CLICKABLE); // 禁止触摸
 
                                 // 创建向下消失的动画
@@ -5194,19 +5197,20 @@ namespace Lvgl_Ui
                                 lv_anim_set_var(&anim, self->_registry.system_message_box.message_box);
                                 lv_anim_set_exec_cb(&anim, (lv_anim_exec_xcb_t)lv_obj_set_y);
                                 // 从当前位置移动到屏幕底部
-                                lv_anim_set_values(&anim, -((self->_width / 7) / 4), self->_registry.system_message_box.system_message_height); 
+                                lv_anim_set_values(&anim, -((self->_width / 7) / 4), self->_registry.system_message_box.system_message_height);
                                 lv_anim_set_duration(&anim, 300);
                                 lv_anim_set_delay(&anim, 0);
                                 lv_anim_set_path_cb(&anim, lv_anim_path_ease_in);
 
                                 lv_anim_set_completed_cb(&anim, [](lv_anim_t *anim)
-                                {
+                                                         {
                                     lv_obj_t *message_box = (lv_obj_t *)anim->var;
                                     lv_obj_t *message_box_mask = lv_obj_get_parent(message_box);
-                                    lv_obj_delete(message_box_mask);
-                                });
+                                    lv_obj_delete(message_box_mask); });
 
-                                lv_anim_start(&anim); }, LV_EVENT_CLICKED, this);
+                                lv_anim_start(&anim);
+
+                                self->_registry.system_message_box.occupancy_flag = false; }, LV_EVENT_CLICKED, this);
 
         lv_obj_add_event_cb(parent, [](lv_event_t *e)
                             {
@@ -5240,6 +5244,8 @@ namespace Lvgl_Ui
 
                                         lv_anim_start(&anim); 
 
+                                        self->_registry.system_message_box.occupancy_flag = false;
+
                                         self->set_vibration();
 
                                         self->_edge_touch_flag = false;
@@ -5257,6 +5263,8 @@ namespace Lvgl_Ui
         lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
 
         lv_anim_start(&anim);
+
+        _registry.system_message_box.occupancy_flag = true;
     }
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD

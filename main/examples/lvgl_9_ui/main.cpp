@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-25 15:55:23
+ * @LastEditTime: 2025-09-26 11:50:41
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -153,7 +153,91 @@ struct Wav_Header
     uint32_t data_size;       // 数据块的大小，即音频数据的字节数
 };
 
+struct System_Status
+{
+    struct
+    {
+        bool init_flag = false;
+    } sgm38121;
+
+    struct
+    {
+        bool init_flag = false;
+    } sx1262;
+
+    struct
+    {
+        bool init_flag = false;
+    } camera;
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+    struct
+    {
+        bool init_flag = false;
+    } xl9555;
+
+    struct
+    {
+        bool init_flag = false;
+    } tca8418;
+
+    struct
+    {
+        bool init_flag = false;
+    } st25r3916;
+
+    struct
+    {
+        bool init_flag = false;
+    } cc1101;
+
+    struct
+    {
+        bool init_flag = false;
+    } nrf24l01;
+#endif
+
+    struct
+    {
+        bool init_flag = false;
+    } pcf8563;
+
+    struct
+    {
+        bool init_flag = false;
+    } bq27220;
+
+    struct
+    {
+        bool init_flag = false;
+    } aw86224;
+
+    struct
+    {
+        bool init_flag = false;
+    } es8311;
+
+    struct
+    {
+        bool init_flag = false;
+    } icm20948;
+
+    struct
+    {
+        bool init_flag = false;
+    } l76k;
+
+    struct
+    {
+        bool init_flag = false;
+
+        bool wifi_connect_status = false;
+    } esp32c6;
+};
+
 Ethernet_Info Eth_Info;
+
+System_Status Sys_Status;
 
 // LVGL library is not thread-safe, this example will call LVGL APIs from different tasks, so use a mutex to protect it
 _lock_t lvgl_api_lock;
@@ -207,7 +291,6 @@ void *lcd_buffer[CONFIG_EXAMPLE_CAM_BUF_COUNT];
 int32_t fps_count;
 int64_t start_time;
 int32_t video_cam_fd0;
-bool Camera_Init_Status = false;
 
 bool Rf_Send_Flag = false;
 uint8_t Rf_Send_Package[255] = {0};
@@ -525,12 +608,6 @@ void Save_Real_Time(Cpp_Bus_Driver::Esp_At::Real_Time time)
     System_Ui->_time.minute = time.minute;
     System_Ui->_time.second = time.second;
     System_Ui->_time.time_zone = time.time_zone;
-
-    System_Ui->set_wifi_connect_status(true);
-
-    // _lock_acquire(&lvgl_api_lock);
-    // System_Ui->status_bar_wifi_connect_status_update();
-    // _lock_release(&lvgl_api_lock);
 }
 
 bool Play_Wav_File(const char *file_path)
@@ -2492,7 +2569,6 @@ bool Set_T_Mixrf_Lr1121_Sleep()
     //                            static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC), static_cast<uint32_t>(RADIOLIB_NC));
 
     // XL9555->pin_write(XL9555_T_MIXRF_LR1121_CS, Cpp_Bus_Driver::Xl95x5::Value::LOW);
-    // lr1121_spi_bus->_bus_init_flag = true;
     // int16_t assert = lr1121.begin(434.0, 125.0, 9, 7, RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, 10, 8, 3.3);
     // if (assert == RADIOLIB_ERR_NONE)
     // {
@@ -2794,7 +2870,7 @@ void System_Ui_Callback_Init(void)
 
     System_Ui->_win_camera_status_callback = [](bool status)
     {
-        if (Camera_Init_Status == true)
+        if (Sys_Status.camera.init_flag == true)
         {
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
 #elif defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
@@ -3194,10 +3270,12 @@ void ES8311_Init(void)
     if (ES8311->begin(50000) == true)
     {
         printf("es8311 initialization success\n");
+        Sys_Status.es8311.init_flag = true;
     }
     else
     {
         printf("es8311 initialization fail\n");
+        Sys_Status.es8311.init_flag = false;
     }
 
     ES8311->set_master_clock_source(Cpp_Bus_Driver::Es8311::Clock_Source::ADC_DAC_MCLK);
@@ -3249,13 +3327,13 @@ bool ICM20948_Init(void)
     Wire1.begin(ICM20948_SDA, ICM20948_SCL);
     if (ICM20948->init() == false)
     {
-        printf("ICM20948 AG initialization failed\n");
+        printf("icm20948 ag init fail\n");
         return false;
     }
 
     if (ICM20948->initMagnetometer() == false)
     {
-        printf("ICM20948 M initialization failed\n");
+        printf("icm20948 m init fail\n");
         return false;
     }
 
@@ -3454,11 +3532,15 @@ void Esp32c6_At_Init(void)
     if (ESP32C6_AT->set_wifi_connect(ssid, password) == true)
     {
         printf("set_wifi_connect success\nconnected to wifi ssid: [%s],password: [%s]\n", ssid.c_str(), password.c_str());
+        Sys_Status.esp32c6.wifi_connect_status = true;
     }
     else
     {
         printf("set_wifi_connect fail\n");
+        Sys_Status.esp32c6.wifi_connect_status = false;
     }
+
+    System_Ui->set_wifi_connect_status(Sys_Status.esp32c6.wifi_connect_status);
 
     Cpp_Bus_Driver::Esp_At::Real_Time rt;
     if (ESP32C6_AT->get_real_time(rt) == true)
@@ -3518,12 +3600,6 @@ void Esp32c6_At_Init(void)
             System_Ui->_time.minute = t.minute;
             System_Ui->_time.second = t.second;
         }
-
-        System_Ui->set_wifi_connect_status(false);
-
-        // _lock_acquire(&lvgl_api_lock);
-        // System_Ui->status_bar_wifi_connect_status_update();
-        // _lock_release(&lvgl_api_lock);
     }
 }
 
@@ -3959,6 +4035,236 @@ bool Play_Wav_File_2(const char *file_path)
     return true;
 }
 
+void System_Startup_Message_Init(void)
+{
+    if (Sys_Status.sgm38121.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "sgm38121 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.camera.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "camera init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.esp32c6.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "esp32c6 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.esp32c6.wifi_connect_status == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "system massage", "esp32c6 connect wifi fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+
+    if (Sys_Status.xl9555.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "xl9555 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.tca8418.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "tca8418 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.st25r3916.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "st25r3916 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.cc1101.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "cc1101 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.nrf24l01.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "nrf24l01 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+#endif
+
+    if (Sys_Status.pcf8563.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "pcf8563 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.bq27220.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "bq27220 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.aw86224.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "aw86224 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.es8311.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "es8311 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.icm20948.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "icm20948 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.l76k.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "l76k init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    if (Sys_Status.sx1262.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "sx1262 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+}
+
 extern "C" void app_main(void)
 {
     printf("Ciallo\n");
@@ -4014,7 +4320,17 @@ extern "C" void app_main(void)
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-    SGM38121->begin();
+    if (SGM38121->begin() == false)
+    {
+        printf("sgm38121 init fail\n");
+        Sys_Status.sgm38121.init_flag = false;
+    }
+    else
+    {
+        printf("sgm38121 init success\n");
+        Sys_Status.sgm38121.init_flag = true;
+    }
+
 #if defined CONFIG_CAMERA_TYPE_SC2336
     SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, 1800);
     SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, 2800);
@@ -4047,11 +4363,12 @@ extern "C" void app_main(void)
     if (App_Video_Init() == false)
     {
         printf("App_Video_Init fail\n");
-        Camera_Init_Status = false;
+        Sys_Status.camera.init_flag = false;
     }
     else
     {
-        Camera_Init_Status = true;
+        printf("App_Video_Init success\n");
+        Sys_Status.camera.init_flag = true;
     }
 
     Screen_Init(&Screen_Mipi_Dpi_Panel);
@@ -4087,7 +4404,17 @@ extern "C" void app_main(void)
 #endif
 
     // SDMMC_HOST_SLOT_1必须要先于SDMMC_HOST_SLOT_0初始化
-    ESP32C6_AT->begin();
+
+    if (ESP32C6_AT->begin() == false)
+    {
+        printf("esp32c6 init fail\n");
+        Sys_Status.esp32c6.init_flag = false;
+    }
+    else
+    {
+        printf("esp32c6 init success\n");
+        Sys_Status.esp32c6.init_flag = true;
+    }
 
     XL9535->pin_mode(XL9535_SD_EN, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9535->pin_write(XL9535_SD_EN, Cpp_Bus_Driver::Xl95x5::Value::LOW);
@@ -4108,7 +4435,17 @@ extern "C" void app_main(void)
     xTaskCreate(lvgl_ui_task, "lvgl_ui_task", 100 * 1024, NULL, 1, NULL);
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-    XL9555->begin();
+    if (XL9555->begin() == false)
+    {
+        printf("xl9555 init fail\n");
+        Sys_Status.xl9555.init_flag = false;
+    }
+    else
+    {
+        printf("xl9555 init success\n");
+        Sys_Status.xl9555.init_flag = true;
+    }
+
     XL9555->pin_mode(XL9555_LED_1, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9555->pin_mode(XL9555_LED_2, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9555->pin_mode(XL9555_LED_3, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
@@ -4130,7 +4467,16 @@ extern "C" void app_main(void)
                                        TCA8418_Interrupt_Flag = true;
                                    });
 
-    TCA8418->begin();
+    if (TCA8418->begin() == false)
+    {
+        printf("tca8418 init fail\n");
+        Sys_Status.tca8418.init_flag = false;
+    }
+    else
+    {
+        printf("tca8418 init success\n");
+        Sys_Status.tca8418.init_flag = true;
+    }
     TCA8418->set_keypad_scan_window(0, 0, TCA8418_KEYPAD_SCAN_WIDTH, TCA8418_KEYPAD_SCAN_HEIGHT);
     TCA8418->set_irq_pin_mode(Cpp_Bus_Driver::Tca8418::Irq_Mask::KEY_EVENTS);
     TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
@@ -4141,7 +4487,16 @@ extern "C" void app_main(void)
     XL9555->pin_mode(XL9555_T_MIXRF_EN, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9555->pin_write(XL9555_T_MIXRF_EN, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
 
-    St25r3916_Init();
+    if (St25r3916_Init() == false)
+    {
+        printf("st25r3916 init fail\n");
+        Sys_Status.st25r3916.init_flag = false;
+    }
+    else
+    {
+        printf("st25r3916 init success\n");
+        Sys_Status.st25r3916.init_flag = true;
+    }
 
     Set_T_Mixrf_Lr1121_Sleep();
 
@@ -4160,12 +4515,12 @@ extern "C" void app_main(void)
     int16_t assert_2 = Cc1101.begin();
     if (assert_2 == RADIOLIB_ERR_NONE)
     {
-        System_Ui->_device_cc1101.init_flag = false;
+        Sys_Status.cc1101.init_flag = true;
         printf("cc1101 init success\n");
     }
     else
     {
-        System_Ui->_device_cc1101.init_flag = true;
+        Sys_Status.cc1101.init_flag = false;
         printf("cc1101 init fail (error code: %d)\n", assert_2);
     }
 
@@ -4181,10 +4536,12 @@ extern "C" void app_main(void)
     assert_2 = Nrf24l01.begin();
     if (assert_2 == RADIOLIB_ERR_NONE)
     {
+        Sys_Status.nrf24l01.init_flag = true;
         printf("nrf24l01 init success\n");
     }
     else
     {
+        Sys_Status.nrf24l01.init_flag = false;
         printf("nrf24l01 init fail (error code: %d)\n", assert_2);
     }
 
@@ -4205,7 +4562,17 @@ extern "C" void app_main(void)
 #endif
 
     PCF8563_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
-    PCF8563->begin();
+
+    if (PCF8563->begin() == false)
+    {
+        printf("pcf8563 init fail\n");
+        Sys_Status.pcf8563.init_flag = false;
+    }
+    else
+    {
+        printf("pcf8563 init success\n");
+        Sys_Status.pcf8563.init_flag = true;
+    }
 
     _lock_acquire(&lvgl_api_lock);
     Set_Lvgl_Startup_Progress_Bar(20);
@@ -4220,7 +4587,17 @@ extern "C" void app_main(void)
     _lock_release(&lvgl_api_lock);
 
     BQ27220_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
-    BQ27220->begin();
+
+    if (BQ27220->begin() == false)
+    {
+        printf("bq27220 init fail\n");
+        Sys_Status.bq27220.init_flag = false;
+    }
+    else
+    {
+        printf("bq27220 init success\n");
+        Sys_Status.bq27220.init_flag = true;
+    }
 
     // 设置的电池容量会在没有电池插入的时候自动还原为默认值
     BQ27220->set_design_capacity(2000);
@@ -4232,7 +4609,17 @@ extern "C" void app_main(void)
     _lock_release(&lvgl_api_lock);
 
     AW86224_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
-    AW86224->begin(500000);
+
+    if (AW86224->begin(500000) == false)
+    {
+        printf("aw86224 init fail\n");
+        Sys_Status.aw86224.init_flag = false;
+    }
+    else
+    {
+        printf("aw86224 init success\n");
+        Sys_Status.aw86224.init_flag = true;
+    }
     // printf("AW86224 input voltage: %.06f V\n", AW86224->get_input_voltage());
 
     // RAM播放
@@ -4259,7 +4646,16 @@ extern "C" void app_main(void)
     _lock_release(&lvgl_api_lock);
 
     Wire1._bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
-    ICM20948_Init();
+    if (ICM20948_Init() == false)
+    {
+        printf("icm20948 init fail\n");
+        Sys_Status.icm20948.init_flag = false;
+    }
+    else
+    {
+        printf("icm20948 init success\n");
+        Sys_Status.icm20948.init_flag = true;
+    }
 
     _lock_acquire(&lvgl_api_lock);
     Set_Lvgl_Startup_Progress_Bar(80);
@@ -4267,10 +4663,29 @@ extern "C" void app_main(void)
 
     // XL9535->pin_mode(XL9535_GPS_WAKE_UP, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9535->pin_write(XL9535_GPS_WAKE_UP, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
-    L76K->begin();
+    if (L76K->begin() == false)
+    {
+        L76K_Uart_Bus->set_baud_rate(115200);
+
+        if (L76K->begin() == false)
+        {
+            printf("l76k init fail\n");
+            Sys_Status.l76k.init_flag = false;
+        }
+        else
+        {
+            printf("l76k init success\n");
+            Sys_Status.l76k.init_flag = true;
+        }
+    }
+    else
+    {
+        printf("l76k init success\n");
+        Sys_Status.l76k.init_flag = true;
+
+        L76K->set_baud_rate(Cpp_Bus_Driver::L76k::Baud_Rate::BR_115200_BPS);
+    }
     printf("get_baud_rate:%ld\n", L76K->get_baud_rate());
-    L76K->set_baud_rate(Cpp_Bus_Driver::L76k::Baud_Rate::BR_115200_BPS);
-    printf("set_baud_rate:%ld\n", L76K->get_baud_rate());
     L76K->set_update_frequency(Cpp_Bus_Driver::L76k::Update_Freq::FREQ_5HZ);
     L76K->clear_rx_buffer_data();
     L76K->sleep(true);
@@ -4297,8 +4712,13 @@ extern "C" void app_main(void)
 #endif
     if (SX1262->begin(10000000) == false)
     {
-        System_Ui->_device_sx1262.init_flag = false;
         printf("sx1262 begin fail\n");
+        Sys_Status.sx1262.init_flag = false;
+    }
+    else
+    {
+        printf("sx1262 begin success\n");
+        Sys_Status.sx1262.init_flag = true;
     }
 
     System_Ui->set_config_rf_params(System_Ui->_device_sx1262);
@@ -4337,9 +4757,7 @@ extern "C" void app_main(void)
     printf("system ui init finish\n");
     System_Ui->set_vibration();
 
-    // 等待lvgl刷新完成
-    // vTaskDelay(pdMS_TO_TICKS(3000));
-    // System_Ui->create_system_message_box(System_Ui->_registry.win.home.root, "system massage", "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww");
+    System_Startup_Message_Init();
 
     //     while (1)
     //     {

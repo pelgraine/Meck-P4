@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-08-09 11:13:23
- * @LastEditTime: 2025-09-08 10:34:05
+ * @LastEditTime: 2025-09-26 09:50:03
  * @License: GPL 3.0
  */
 
@@ -316,7 +316,7 @@ static void ndefShowDemoUsage()
 #endif /* NDEF_FEATURE_FULL_API */
 }
 
-void St25r3916_Init(void)
+bool St25r3916_Init(void)
 {
 #ifndef I2C_ENABLED
     SPI.begin(ST25R3916_SPI_SCLK, ST25R3916_SPI_MISO, ST25R3916_SPI_MOSI, CS_PIN);
@@ -426,7 +426,7 @@ void St25r3916_Init(void)
         else
         {
             Serial.printf("rfalNfcDiscover init fail (error code: %d)\n", err);
-            return;
+            return false;
         }
         err = rfal_nfc.rfalNfcDeactivate(RFAL_NFC_DEACTIVATE_IDLE);
         if (err == ERR_NONE)
@@ -436,7 +436,7 @@ void St25r3916_Init(void)
         else
         {
             Serial.printf("rfalNfcDeactivate init fail (error code: %d)\n", err);
-            return;
+            return false;
         }
 
         state = DEMO_ST_START_DISCOVERY;
@@ -445,7 +445,10 @@ void St25r3916_Init(void)
     else
     {
         Serial.printf("st25r3916 init fail (error code: %d)\n", err);
+        return false;
     }
+
+    return true;
 }
 
 void St25r3916_Loop(void)

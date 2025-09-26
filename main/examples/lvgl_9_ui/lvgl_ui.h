@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-19 11:14:37
+ * @LastEditTime: 2025-09-25 17:00:37
  * @License: GPL 3.0
  */
 #pragma once
@@ -134,6 +134,9 @@ namespace Lvgl_Ui
             struct
             {
                 lv_obj_t *message_box;
+
+                //占用标志，用于判断该消息框是否被占用
+                bool occupancy_flag = false;
 
                 size_t system_message_height = 0;
             } system_message_box;
@@ -459,8 +462,6 @@ namespace Lvgl_Ui
 
         struct Device_Sx1262
         {
-            bool init_flag = false;
-
             struct
             {
                 bool flag = false;
@@ -520,8 +521,6 @@ namespace Lvgl_Ui
 
         struct Device_Cc1101
         {
-            bool init_flag = false;
-
             struct
             {
                 bool flag = false;
@@ -544,8 +543,6 @@ namespace Lvgl_Ui
 
         struct Device_Nrf24l01
         {
-            bool init_flag = false;
-
             struct
             {
                 bool flag = false;
