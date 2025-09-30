@@ -4,9 +4,6 @@
 [submodule "main/examples/esp-at"]
 	path = main/examples/esp-at
 	url = https://github.com/espressif/esp-at.git
-[submodule "components/RadioLib"]
-	path = components/RadioLib
-	url = https://github.com/Llgok/RadioLib.git
 [submodule "components/ST25R3916"]
 	path = components/ST25R3916
 	url = https://github.com/Llgok/ST25R3916.git
@@ -19,3 +16,9 @@
 [submodule "components/ICM20948_WE"]
 	path = components/ICM20948_WE
 	url = https://github.com/Llgok/ICM20948_WE.git
+[submodule "components/esp-hosted-mcu"]
+	path = components/esp-hosted-mcu
+	url = https://github.com/espressif/esp-hosted-mcu.git
+[submodule "components/RadioLib"]
+	path = components/RadioLib
+	url = https://github.com/jgromes/RadioLib.git
