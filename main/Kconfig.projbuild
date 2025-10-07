@@ -186,6 +186,9 @@ menu "Example Configuration"
             config EXAMPLE_BUILD_RADIOLIB_SX1262_SEND_RECEIVE
                 bool "radiolib_sx1262_send_receive"
                 depends on BOARD_TYPE_T_DISPLAY_P4
+            config EXAMPLE_BUILD_ESP_HOSTED_MCU_SDIO_WIFI
+                bool "esp_hosted_mcu_sdio_wifi"
+                depends on BOARD_TYPE_T_DISPLAY_P4
             config EXAMPLE_BUILD_XL9555
                 bool "xl9555"
                 depends on BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
