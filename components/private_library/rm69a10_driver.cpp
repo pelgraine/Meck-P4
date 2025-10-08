@@ -365,7 +365,7 @@ static esp_err_t panel_rm69a10_invert_color(esp_lcd_panel_t *panel, bool invert_
     return ESP_OK;
 }
 
-static esp_err_t set_rm69a10_brightness(esp_lcd_panel_t *panel, uint8_t brightness)
+esp_err_t set_rm69a10_brightness(esp_lcd_panel_t *panel, uint8_t brightness)
 {
     rm69a10_panel_t *rm69a10 = (rm69a10_panel_t *)panel->user_data;
     esp_lcd_panel_io_handle_t io = rm69a10->io;
