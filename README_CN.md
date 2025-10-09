@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-08-04 14:02:02
+ * @LastEditTime: 2025-10-09 15:16:14
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -13,6 +13,7 @@
 | Version                               | Update date                       |Update description|
 | :-------------------------------: | :-------------------------------: |:--------------: |
 | T-Display-P4_V1.0                      | 2025-06-13                    |   初始版本      |
+| T-Display-P4-Keyboard_V1.0                      | 2025-09-12                    |   初始版本      |
 
 ## 购买链接
 
@@ -52,11 +53,18 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
     <img src="image/5.jpg" alt="">
 </p>
 
+---
+
+<p align="center" width="100%">
+    <img src="image/6.jpg" alt="">
+</p>
+
 
 ### 实物图
 
 ## 模块
 
+### T-Display-P4模块
 ### 1. 核心处理器
 
 * 芯片：ESP32-P4
@@ -152,9 +160,10 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 
 ### 6. LoRa
 
-* 模块：HPD16A
-* 芯片：SX1262
+* 模组：HPD16A
+* 芯片：SX1262、SKY13453-385LF
 * 通信协议：标准SPI
+* 其他说明：使用专用射频模拟开关开切换天线
 * 相关资料：
     >[HPD16A](./information/HPDTEK_HPD16A_TCXO_V1.1.pdf)  
     >[SX1261-2](./information/DS_SX1261-2_V2_1.pdf)
@@ -163,7 +172,7 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 
 ### 7. GPS
 
-* 模块：L76k
+* 模组：L76k
 * 通信协议：Uart
 * 相关资料：
     >[L76K](./information/L76KB-A58.pdf)
@@ -209,44 +218,136 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 * 相关资料：
     >[ICM20948](./information/ICM20948.pdf)
 * 依赖库：
+    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)  
     >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
     >[ICM20948_WE](https://github.com/Llgok/ICM20948_WE)
+
+
+### 13. IO扩展
+
+* 芯片：XL9535
+* 通信协议：IIC
+* 相关资料：
+    >[XL9535](./information/XL95x5.pdf)
+* 依赖库：
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
+
+### T-Display-P4-Keyboard模块
+### 1. 键盘驱动
+
+* 芯片：TCA8418
+* 通信协议：IIC
+* 相关资料：
+    >[TCA8418](./information/tca8418.pdf)
+* 依赖库：
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
+
+### 2. 键盘背光驱动
+
+* 芯片：SY7200A
+* 通信协议：PWM
+* 相关资料：
+    >[SY7200A](./information/SY7200AABC.pdf)
+
+### 3. IO扩展
+
+* 芯片：XL9555
+* 通信协议：IIC
+* 相关资料：
+    >[XL9555](./information/XL95x5.pdf)
+* 依赖库：
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
+
+### 4. CC1101
+
+* 模组：T-MixRF
+* 芯片：CC1101
+* 通信协议：标准SPI
+* 其他说明：T-Display-P4-Keyboard板子上的T-MixRF模组将不使用LR1121芯片
+* 相关资料：
+    >[CC1101](./information/cc1101.pdf)
+* 依赖库：
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver) 
+    >[RadioLib](https://github.com/jgromes/RadioLib)  
+
+### 5. NRF24L01
+
+* 模组：T-MixRF
+* 芯片：NRF24L01
+* 通信协议：标准SPI
+* 其他说明：T-Display-P4-Keyboard板子上的T-MixRF模组将不使用LR1121芯片
+* 相关资料：
+    >[NRF24L01](./information/NRF24L01P-R.pdf)
+* 依赖库：
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver) 
+    >[RadioLib](https://github.com/jgromes/RadioLib)  
+
+### 6. NFC
+
+* 模组：T-MixRF
+* 芯片：ST25R3916
+* 通信协议：标准SPI
+* 其他说明：T-Display-P4-Keyboard板子上的T-MixRF模组将不使用LR1121芯片
+* 相关资料：
+    >[ST25R3916](./information/st25r3916.pdf)
+* 依赖库：
+    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)  
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver) 
+    >[ST25R3916](https://github.com/stm32duino/ST25R3916)
+    >[NFC-RFAL](https://github.com/stm32duino/NFC-RFAL)
 
 ## 软件部署
 
 ### 示例支持
 
+#### T-Display-P4
 | example | `[vscode][esp-idf-v5.4.0]` | description | picture |
 | ------  | ------ | ------ | ------ | 
+| [afe](./main/examples/afe) |  <p align="center">![alt text][supported] | | |
 | [aw86224](./main/examples/aw86224) |  <p align="center">![alt text][supported] | | |
 | [bq27220](./main/examples/bq27220) |  <p align="center">![alt text][supported] | | |
 | [deep_sleep](./main/examples/deep_sleep) |  <p align="center">![alt text][supported] | | |
 | [es8311](./main/examples/es8311) |  <p align="center">![alt text][supported] | | |
 | [es8311_sd_wav](./main/examples/es8311_sd_wav) |  <p align="center">![alt text][supported] | | |
+| [esp_hosted_mcu_sdio_wifi](./main/examples/esp_hosted_mcu_sdio_wifi) |  <p align="center">![alt text][supported] | | |
 | [esp32c6_at_host_sdio_uart](./main/examples/esp32c6_at_host_sdio_uart) |  <p align="center">![alt text][supported] | | |
 | [esp32c6_at_host_sdio_wifi](./main/examples/esp32c6_at_host_sdio_wifi) |  <p align="center">![alt text][supported] | | |
-| [screen_camera](./main/examples/screen_camera) |  <p align="center">![alt text][supported] | | |
-| [screen_lvgl](./main/examples/screen_lvgl) |  <p align="center">![alt text][supported] | | |
-| [screen_lvgl_touch_draw](./main/examples/screen_lvgl_touch_draw) |  <p align="center">![alt text][supported] | | |
 | [icm20948](./main/examples/icm20948) |  <p align="center">![alt text][supported] | | |
 | [iic_scan](./main/examples/iic_scan) |  <p align="center">![alt text][supported] | | |
 | [l76k](./main/examples/l76k) |  <p align="center">![alt text][supported] | | |
 | [lvgl_9_ui](./main/examples/lvgl_9_ui) |  <p align="center">![alt text][supported] |出厂示例 | |
 | [pcf8563](./main/examples/pcf8563) |  <p align="center">![alt text][supported] | | |
+| [radiolib_sx1262_send_receive](./main/examples/radiolib_sx1262_send_receive) |  <p align="center">![alt text][supported] | | |
+| [screen_camera](./main/examples/screen_camera) |  <p align="center">![alt text][supported] | | |
+| [screen_lvgl](./main/examples/screen_lvgl) |  <p align="center">![alt text][supported] | | |
+| [screen_lvgl_touch_draw](./main/examples/screen_lvgl_touch_draw) |  <p align="center">![alt text][supported] | | |
 | [sgm38121](./main/examples/sgm38121) |  <p align="center">![alt text][supported] | | |
 | [sx1262_gfsk_send_receive](./main/examples/sx1262_gfsk_send_receive) |  <p align="center">![alt text][supported] | | |
 | [sx1262_lora_send_receive](./main/examples/sx1262_lora_send_receive) |  <p align="center">![alt text][supported] | | |
 | [sx1262_tx_continuous_wave](./main/examples/sx1262_tx_continuous_wave) |  <p align="center">![alt text][supported] | | |
 | [tusb_serial_device](./main/examples/tusb_serial_device) |  <p align="center">![alt text][supported] | | |
 | [xl9535](./main/examples/Vibration_Motor) |  <p align="center">![alt text][supported] | | |
-| [afe](./main/examples/afe) |  <p align="center">![alt text][supported] | | |
+| [xiaozhi](https://github.com/78/xiaozhi-esp32) |  <p align="center">![alt text][supported] | | |
+
+#### T-Display-P4-Keyboard
+| example | `[vscode][esp-idf-v5.4.0]` | description | picture |
+| ------  | ------ | ------ | ------ | 
+| [radiolib_cc1101_send_receive](./main/keyboard_examples/radiolib_cc1101_send_receive) |  <p align="center">![alt text][supported] | | |
+| [radiolib_nrf24l01_send_receive](./main/keyboard_examples/radiolib_nrf24l01_send_receive) |  <p align="center">![alt text][supported] | | |
+| [screen_tca8418_lvgl_touch_draw](./main/keyboard_examples/screen_tca8418_lvgl_touch_draw) |  <p align="center">![alt text][supported] | | |
+| [st25r3916](./main/keyboard_examples/st25r3916) |  <p align="center">![alt text][supported] | | |
+| [tca8418](./main/keyboard_examples/tca8418) |  <p align="center">![alt text][supported] | | |
+| [xl9555](./main/keyboard_examples/xl9555) |  <p align="center">![alt text][supported] | | |
 
 [supported]: https://img.shields.io/badge/-supported-green "example"
 
 | firmware | description | picture |
 | ------  | ------  | ------ |
-| [lvgl_9_ui](./firmware/[T-Display-P4][lvgl_9_ui]/) | 出厂程序 |  |
+| [t_display_p4_lvgl_9_ui](./firmware/[T-Display-P4][lvgl_9_ui]) | 出厂程序 |  |
+| [t_display_p4_keyboard_lvgl_9_ui](./firmware/[T-Display-P4-Keyboard][lvgl_9_ui]) | 键盘扩展板出厂程序 |  |
 | [esp32c6_at](./firmware/[T-Display-P4][esp32c6_at_slave]) | esp32c6-at 出厂程序 |  |
+| [esp32c6_slave_esp_hosted_mcu_network_adapter](./firmware/[T-Display-P4][esp32c6_slave_esp_hosted_mcu_network_adapter]) |  |  |
+| [t_display_p4_xiaozhi](./firmware/[T-Display-P4][xiaozhi]) |  |  |
 
 ### ESP-IDF Visual Studio Code
 1. 安装 [Visual Studio Code](https://code.visualstudio.com/Download) ，根据你的系统类型选择安装。
@@ -289,7 +390,11 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 
 ## 引脚总览
 
-引脚定义请参考配置文件：[t_display_p4_config.h](./components/private_library/t_display_p4_config.h)
+引脚定义请参考配置文件：
+<br />
+
+[t_display_p4_config.h](./components/private_library/t_display_p4_config.h)<br />
+[t_display_p4_keyboard_config.h](./components/private_library/t_display_p4_keyboard_config.h)
 
 ## 相关测试
 
@@ -312,7 +417,22 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 <br />
 
 * Q. 为什么我的板子一直烧录失败呢？
-* A. 请按住“BOOT-0”按键重新下载程序。
+* A. 请按住“BOOT”按键重新下载程序。
+
+<br />
+
+* Q. 为什么我使用espidf框架在选择目标编译芯片或者在配置SDK的menuconfig的时候配置失败，报以下错误：
+
+        asyncio.exceptions.LimitOverrunError: Separator is found, but chunk is longer than limit
+
+        ValueError: Separator is found, but chunk is longer than limit
+
+* A. 这个是espidf框架v5.4~v5.5的一个bug，需要将路径为 `esp-idf-v5.x\tools\idf_py_actions\tools.py` 文件的第351行做如下修改：
+
+        原始代码：
+        p = await asyncio.create_subprocess_exec(*cmd, env=env_copy, limit=1024 * 256, cwd=self.cwd, stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
+        修改后的代码：
+        p = await asyncio.create_subprocess_exec(*cmd, env=env_copy, limit=1024 * 512, cwd=self.cwd, stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
 
 ## 项目
 * []()

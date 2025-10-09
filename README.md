@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-08-04 14:03:13
+ * @LastEditTime: 2025-10-09 15:17:00
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -13,6 +13,7 @@
 | Version                               | Update date                       |Update description|
 | :-------------------------------: | :-------------------------------: |:--------------: |
 | T-Display-P4_V1.0                      | 2025-06-13                    |   Original version      |
+| T-Display-P4-Keyboard_V1.0                      | 2025-09-12                    |   Original version      |
 
 ## PurchaseLink
 
@@ -52,11 +53,18 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
     <img src="image/5.jpg" alt="">
 </p>
 
+---
+
+<p align="center" width="100%">
+    <img src="image/6.jpg" alt="">
+</p>
+
 
 ### Actual Product Image
 
 ## Module
 
+### T-Display-P4 Module
 ### 1. Core Processor  
 
 * Chip: ESP32-P4  
@@ -152,8 +160,9 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 ### 6. LoRa  
 
 * Module: HPD16A  
-* Chip: SX1262  
+* Chip: SX1262, SKY13453-385LF
 * Communication Protocol: Standard SPI  
+* Other notes: Use a dedicated RF analog switch to switch the antenna
 * Related Documents:  
     >[HPD16A](./information/HPDTEK_HPD16A_TCXO_V1.1.pdf)  
     >[SX1261-2](./information/DS_SX1261-2_V2_1.pdf)  
@@ -208,44 +217,135 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Related Documents:  
     >[ICM20948](./information/ICM20948.pdf)
 * Dependent Libraries:  
+    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)  
     >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
     >[ICM20948_WE](https://github.com/Llgok/ICM20948_WE)
+
+### 13. IO Expansion
+
+* Chip: XL9535
+* Communication Protocol: IIC
+* Related Materials:
+    > [XL9535](./information/XL95x5.pdf)
+* Dependent Libraries:
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
+
+### T-Display-P4-Keyboard Module
+### 1. Keyboard Driver
+
+* Chip: TCA8418
+* Communication Protocol: IIC
+* Related Materials:
+    > [TCA8418](./information/tca8418.pdf)
+* Dependent Libraries:
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
+
+### 2. Keyboard Backlight Driver
+
+* Chip: SY7200A
+* Communication Protocol: PWM
+* Related Materials:
+    > [SY7200A](./information/SY7200AABC.pdf)
+
+### 3. IO Expansion
+
+* Chip: XL9555
+* Communication Protocol: IIC
+* Related Materials:
+    > [XL9555](./information/XL95x5.pdf)
+* Dependent Libraries:
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
+
+### 4. CC1101
+
+* Module: T-MixRF
+* Chip: CC1101
+* Communication Protocol: Standard SPI
+* Other Notes: The T-MixRF module on the T-Display-P4-Keyboard board will not use the LR1121 chip
+* Related Materials:
+    > [CC1101](./information/cc1101.pdf)
+* Dependent Libraries:
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
+    > [RadioLib](https://github.com/jgromes/RadioLib)
+
+### 5. NRF24L01
+
+* Module: T-MixRF
+* Chip: NRF24L01
+* Communication Protocol: Standard SPI
+* Other Notes: The T-MixRF module on the T-Display-P4-Keyboard board will not use the LR1121 chip
+* Related Materials:
+    > [NRF24L01](./information/NRF24L01P-R.pdf)
+* Dependent Libraries:
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
+    > [RadioLib](https://github.com/jgromes/RadioLib)
+
+### 6. NFC
+
+* Module: T-MixRF
+* Chip: ST25R3916
+* Communication Protocol: Standard SPI
+* Other Notes: The T-MixRF module on the T-Display-P4-Keyboard board will not use the LR1121 chip
+* Related Materials:
+    > [ST25R3916](./information/st25r3916.pdf)
+* Dependent Libraries:
+    > [arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
+    > [ST25R3916](https://github.com/stm32duino/ST25R3916)
+    > [NFC-RFAL](https://github.com/stm32duino/NFC-RFAL)
 
 ## SoftwareDeployment
 
 ### Examples Support
 
+#### T-Display-P4
 | example | `[vscode][esp-idf-v5.4.0]` | description | picture |
 | ------  | ------ | ------ | ------ | 
+| [afe](./main/examples/afe) |  <p align="center">![alt text][supported] | | |
 | [aw86224](./main/examples/aw86224) |  <p align="center">![alt text][supported] | | |
 | [bq27220](./main/examples/bq27220) |  <p align="center">![alt text][supported] | | |
 | [deep_sleep](./main/examples/deep_sleep) |  <p align="center">![alt text][supported] | | |
 | [es8311](./main/examples/es8311) |  <p align="center">![alt text][supported] | | |
 | [es8311_sd_wav](./main/examples/es8311_sd_wav) |  <p align="center">![alt text][supported] | | |
+| [esp_hosted_mcu_sdio_wifi](./main/examples/esp_hosted_mcu_sdio_wifi) |  <p align="center">![alt text][supported] | | |
 | [esp32c6_at_host_sdio_uart](./main/examples/esp32c6_at_host_sdio_uart) |  <p align="center">![alt text][supported] | | |
 | [esp32c6_at_host_sdio_wifi](./main/examples/esp32c6_at_host_sdio_wifi) |  <p align="center">![alt text][supported] | | |
-| [screen_camera](./main/examples/screen_camera) |  <p align="center">![alt text][supported] | | |
-| [screen_lvgl](./main/examples/screen_lvgl) |  <p align="center">![alt text][supported] | | |
-| [screen_lvgl_touch_draw](./main/examples/screen_lvgl_touch_draw) |  <p align="center">![alt text][supported] | | |
 | [icm20948](./main/examples/icm20948) |  <p align="center">![alt text][supported] | | |
 | [iic_scan](./main/examples/iic_scan) |  <p align="center">![alt text][supported] | | |
 | [l76k](./main/examples/l76k) |  <p align="center">![alt text][supported] | | |
 | [lvgl_9_ui](./main/examples/lvgl_9_ui) |  <p align="center">![alt text][supported] |factory example | |
 | [pcf8563](./main/examples/pcf8563) |  <p align="center">![alt text][supported] | | |
+| [radiolib_sx1262_send_receive](./main/examples/radiolib_sx1262_send_receive) |  <p align="center">![alt text][supported] | | |
+| [screen_camera](./main/examples/screen_camera) |  <p align="center">![alt text][supported] | | |
+| [screen_lvgl](./main/examples/screen_lvgl) |  <p align="center">![alt text][supported] | | |
+| [screen_lvgl_touch_draw](./main/examples/screen_lvgl_touch_draw) |  <p align="center">![alt text][supported] | | |
 | [sgm38121](./main/examples/sgm38121) |  <p align="center">![alt text][supported] | | |
 | [sx1262_gfsk_send_receive](./main/examples/sx1262_gfsk_send_receive) |  <p align="center">![alt text][supported] | | |
 | [sx1262_lora_send_receive](./main/examples/sx1262_lora_send_receive) |  <p align="center">![alt text][supported] | | |
 | [sx1262_tx_continuous_wave](./main/examples/sx1262_tx_continuous_wave) |  <p align="center">![alt text][supported] | | |
 | [tusb_serial_device](./main/examples/tusb_serial_device) |  <p align="center">![alt text][supported] | | |
 | [xl9535](./main/examples/Vibration_Motor) |  <p align="center">![alt text][supported] | | |
-| [afe](./main/examples/afe) |  <p align="center">![alt text][supported] | | |
+| [xiaozhi](https://github.com/78/xiaozhi-esp32) |  <p align="center">![alt text][supported] | | |
+
+#### T-Display-P4-Keyboard
+| example | `[vscode][esp-idf-v5.4.0]` | description | picture |
+| ------  | ------ | ------ | ------ | 
+| [radiolib_cc1101_send_receive](./main/keyboard_examples/radiolib_cc1101_send_receive) |  <p align="center">![alt text][supported] | | |
+| [radiolib_nrf24l01_send_receive](./main/keyboard_examples/radiolib_nrf24l01_send_receive) |  <p align="center">![alt text][supported] | | |
+| [screen_tca8418_lvgl_touch_draw](./main/keyboard_examples/screen_tca8418_lvgl_touch_draw) |  <p align="center">![alt text][supported] | | |
+| [st25r3916](./main/keyboard_examples/st25r3916) |  <p align="center">![alt text][supported] | | |
+| [tca8418](./main/keyboard_examples/tca8418) |  <p align="center">![alt text][supported] | | |
+| [xl9555](./main/keyboard_examples/xl9555) |  <p align="center">![alt text][supported] | | |
 
 [supported]: https://img.shields.io/badge/-supported-green "example"
 
 | firmware | description | picture |
 | ------  | ------  | ------ |
-| [lvgl_9_ui](./firmware/[T-Display-P4][lvgl_9_ui]/) | factory program |  |
+| [t_display_p4_lvgl_9_ui](./firmware/[T-Display-P4][lvgl_9_ui]) | factory program |  |
+| [t_display_p4_keyboard_lvgl_9_ui](./firmware/[T-Display-P4-Keyboard][lvgl_9_ui]) | keyboard expansion board factory program |  |
 | [esp32c6_at](./firmware/[T-Display-P4][esp32c6_at_slave]) | esp32c6-at factory program |  |
+| [esp32c6_slave_esp_hosted_mcu_network_adapter](./firmware/[T-Display-P4][esp32c6_slave_esp_hosted_mcu_network_adapter]) |  |  |
+| [t_display_p4_xiaozhi](./firmware/[T-Display-P4][xiaozhi]) |  |  |
 
 ### ESP-IDF Visual Studio Code  
 1. Install [Visual Studio Code](https://code.visualstudio.com/Download) by selecting the appropriate version for your operating system.  
@@ -288,7 +388,11 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 
 ## PinOverview
 
-For pin definitions, please refer to the configuration file: [t_display_p4_config.h](./components/private_library/t_display_p4_config.h)
+For pin definitions, please refer to the configuration file: 
+<br />
+
+[t_display_p4_config.h](./components/private_library/t_display_p4_config.h)<br />
+[t_display_p4_keyboard_config.h](./components/private_library/t_display_p4_keyboard_config.h)
 
 ## RelatedTests
 
@@ -312,6 +416,21 @@ For pin definitions, please refer to the configuration file: [t_display_p4_confi
 
 * Q. Why is my board continuously failing to download the program?
 * A. Please hold down the "BOOT-0" button and try downloading the program again.
+
+<br />
+
+* Q. Why do I encounter configuration failures with the following errors when selecting the target compilation chip or configuring menuconfig in the ESP-IDF framework?
+
+        asyncio.exceptions.LimitOverrunError: Separator is found, but chunk is longer than limit
+
+        ValueError: Separator is found, but chunk is longer than limit
+
+* A. This is a bug in ESP-IDF framework versions v5.4 to v5.5. Modify line 351 in the file located at `esp-idf-v5.x\tools\idf_py_actions\tools.py` as follows:
+
+        Original code:
+        p = await asyncio.create_subprocess_exec(*cmd, env=env_copy, limit=1024 * 256, cwd=self.cwd, stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
+        Modified code:
+        p = await asyncio.create_subprocess_exec(*cmd, env=env_copy, limit=1024 * 512, cwd=self.cwd, stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
 
 ## Project
 * []()
