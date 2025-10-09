@@ -97,7 +97,7 @@ menu "Example Configuration"
     endchoice
 
     choice
-        prompt "Select the color format of the Screen"
+        prompt "Select the color format of the screen"
         default SCREEN_PIXEL_FORMAT_RGB565
             config SCREEN_PIXEL_FORMAT_RGB565
                 bool "RGB565"
