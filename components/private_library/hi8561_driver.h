@@ -2,7 +2,7 @@
  * @Description: hi8561_driver
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:02:44
- * @LastEditTime: 2025-07-31 16:28:21
+ * @LastEditTime: 2025-10-09 10:37:00
  * @License: GPL 3.0
  */
 #pragma once
@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "soc/soc_caps.h"
 
+#if SOC_MIPI_DSI_SUPPORTED
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_mipi_dsi.h"
 
@@ -61,3 +62,5 @@ typedef struct
  */
 esp_err_t esp_lcd_new_panel_hi8561(const esp_lcd_panel_io_handle_t io, const esp_lcd_panel_dev_config_t *panel_dev_config,
                                    esp_lcd_panel_handle_t *ret_panel);
+
+#endif

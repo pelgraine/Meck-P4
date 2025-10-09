@@ -6,6 +6,7 @@
 
 #include "soc/soc_caps.h"
 
+#if SOC_MIPI_DSI_SUPPORTED
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -400,3 +401,5 @@ static esp_err_t panel_hi8561_invert_color(esp_lcd_panel_t *panel, bool invert_c
 
     return ESP_OK;
 }
+
+#endif

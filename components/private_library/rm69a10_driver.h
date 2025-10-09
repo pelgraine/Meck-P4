@@ -2,7 +2,7 @@
  * @Description: rm69a10_driver
  * @Author: LILYGO_L
  * @Date: 2025-07-07 14:23:16
- * @LastEditTime: 2025-07-31 16:27:15
+ * @LastEditTime: 2025-10-09 10:30:10
  * @License: GPL 3.0
  */
 #pragma once
@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "soc/soc_caps.h"
 
+#if SOC_MIPI_DSI_SUPPORTED
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_mipi_dsi.h"
 
@@ -63,3 +64,5 @@ esp_err_t esp_lcd_new_panel_rm69a10(const esp_lcd_panel_io_handle_t io, const es
                                     esp_lcd_panel_handle_t *ret_panel);
 
 esp_err_t set_rm69a10_brightness(esp_lcd_panel_t *panel, uint8_t brightness);
+
+#endif
