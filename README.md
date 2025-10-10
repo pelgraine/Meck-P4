@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-10-09 15:17:00
+ * @LastEditTime: 2025-10-10 17:21:42
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -415,7 +415,7 @@ For pin definitions, please refer to the configuration file:
 <br />
 
 * Q. Why is my board continuously failing to download the program?
-* A. Please hold down the "BOOT-0" button and try downloading the program again.
+* A. Please hold down the "BOOT" button and try downloading the program again.
 
 <br />
 
