@@ -96,6 +96,10 @@ menu "Example Configuration"
                 bool "RM69A10"
     endchoice
 
+    config ENABLE_USB_DISPLAY
+        bool "Enable USB Display"
+        default n
+
     choice
         prompt "Select the color format of the screen"
         default SCREEN_PIXEL_FORMAT_RGB565

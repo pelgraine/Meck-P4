@@ -2,7 +2,7 @@
  * @Description: screen_camera
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:45:00
- * @LastEditTime: 2025-09-10 13:36:42
+ * @LastEditTime: 2025-10-10 17:03:01
  * @License: GPL 3.0
  */
 #include "esp_video_init.h"
@@ -18,6 +18,9 @@
 #include "cpp_bus_driver_library.h"
 #include "t_display_p4_driver.h"
 #include "app_video.h"
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#include "esp_lcd_usb_display.h"
+#endif
 
 #define ALIGN_UP(num, align) (((num) + ((align) - 1)) & ~((align) - 1))
 
@@ -236,10 +239,26 @@ bool App_Video_Init()
         return false;
     }
 
-    app_video_stream_task_stop(video_cam_fd0);
+    // app_video_stream_task_stop(video_cam_fd0);
 
     return true;
 }
+
+#if CONFIG_ENABLE_USB_DISPLAY == true
+bool Usb_Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
+{
+    usb_display_vendor_config_t vendor_config_usb = DEFAULT_USB_DISPLAY_VENDOR_CONFIG(SCREEN_WIDTH, SCREEN_HEIGHT,
+                                                                                      SCREEN_BITS_PER_PIXEL, *mipi_dpi_panel);
+
+    if (esp_lcd_new_panel_usb_display(&vendor_config_usb, mipi_dpi_panel) != ESP_OK)
+    {
+        printf("esp_lcd_new_panel_usb_display fail\n");
+        return false;
+    }
+
+    return true;
+}
+#endif
 
 extern "C" void app_main(void)
 {
@@ -314,12 +333,18 @@ extern "C" void app_main(void)
 
     Init_Ldo_Channel_Power(3, 1800);
 
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     if (App_Video_Init() == false)
     {
         printf("App_Video_Init fail\n");
     }
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+    Usb_Screen_Init(&Screen_Mipi_Dpi_Panel);
+#else
     Screen_Init(&Screen_Mipi_Dpi_Panel);
+#endif
 
     esp_err_t assert = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
     if (assert != ESP_OK)
@@ -346,9 +371,10 @@ extern "C" void app_main(void)
     //     heap_caps_free(white_buf);
     // }
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#else
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    ESP32P4->start_pwm_gradient_time(100, 500);
-
+    HI8561_T->start_pwm_gradient_time(100, 500);
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
     for (uint8_t i = 0; i < 255; i += 5)
     {
@@ -358,17 +384,18 @@ extern "C" void app_main(void)
 #else
 #error "unknown macro definition, please select the correct macro definition."
 #endif
+#endif
 
-    assert = app_video_stream_task_restart(video_cam_fd0);
-    if (assert != ESP_OK)
-    {
-        printf("app_video_stream_task_restart fail (error code: %#X)\n", assert);
-    }
-    else
-    {
-        // Get the initial time for frame rate statistics
-        start_time = esp_timer_get_time();
-    }
+    // assert = app_video_stream_task_restart(video_cam_fd0);
+    // if (assert != ESP_OK)
+    // {
+    //     printf("app_video_stream_task_restart fail (error code: %#X)\n", assert);
+    // }
+    // else
+    // {
+    //     // Get the initial time for frame rate statistics
+    //     start_time = esp_timer_get_time();
+    // }
 
     while (1)
     {

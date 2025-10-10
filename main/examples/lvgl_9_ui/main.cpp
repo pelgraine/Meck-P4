@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-09-26 11:50:41
+ * @LastEditTime: 2025-10-10 15:04:43
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -39,8 +39,12 @@
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "ethernet_init.h"
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#include "esp_lcd_usb_display.h"
+#else
 #include "tinyusb.h"
 #include "tusb_cdc_acm.h"
+#endif
 #include "app_video.h"
 #include "driver/ppa.h"
 #include "esp_private/esp_cache_private.h"
@@ -85,13 +89,6 @@ enum class Ethernet_Mode
 {
     TEST = 0,
 };
-
-typedef struct
-{
-    uint8_t buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + PREPEND_LENGTH + 1]; // Data buffer
-    size_t buf_len;                                                  // Number of bytes received
-    uint8_t itf;                                                     // Index of CDC device interface
-} app_message_t;
 
 struct Ethernet_Info
 {
@@ -257,8 +254,6 @@ TaskHandle_t Sleep_Task_Handle = NULL;
 TaskHandle_t Rf_Task_Handle = NULL;
 TaskHandle_t Iis_Transmission_Data_Stream_Task = NULL;
 
-uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1];
-
 uint8_t AW86224_Vibration_Play_Count = 0;
 
 Es8311_Mode ES8311_Speaker_Mode = Es8311_Mode::TEST;
@@ -422,6 +417,18 @@ nRF24 Nrf24l01 = new Module(Nrf24l01_Radiolib_Hal, static_cast<uint32_t>(RADIOLI
 
 auto ESP32P4 = std::make_unique<Cpp_Bus_Driver::Tool>();
 
+#endif
+
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#else
+typedef struct
+{
+    uint8_t buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + PREPEND_LENGTH + 1]; // Data buffer
+    size_t buf_len;                                                  // Number of bytes received
+    uint8_t itf;                                                     // Index of CDC device interface
+} app_message_t;
+
+uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1];
 #endif
 
 // esp_err_t register_gpio_wakeup(void)
@@ -2594,20 +2601,6 @@ bool Set_T_Mixrf_Lr1121_Sleep()
 
 #endif
 
-// bool Usb_Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
-// {
-//     usb_display_vendor_config_t vendor_config_usb = DEFAULT_USB_DISPLAY_VENDOR_CONFIG(SCREEN_WIDTH, SCREEN_HEIGHT,
-//                                                                                       SCREEN_BITS_PER_PIXEL_RGB565, mipi_dpi_panel);
-
-//     if (esp_lcd_new_panel_usb_display(&vendor_config_usb, &mipi_dpi_panel) != ESP_OK)
-//     {
-//         printf("esp_lcd_new_panel_usb_display fail\n");
-//         return false;
-//     }
-
-//     return true;
-// }
-
 bool Sdmmc_Init(const char *base_path)
 {
     esp_vfs_fat_sdmmc_mount_config_t mount_config =
@@ -3152,7 +3145,7 @@ void Lvgl_Init(void)
                             {
                                 lv_display_rotation_t rotation = lv_display_get_rotation(disp);
                                 lv_area_t rotated_area;
-                                if(rotation != LV_DISPLAY_ROTATION_0) 
+                                if (rotation != LV_DISPLAY_ROTATION_0)
                                 {
                                     lv_color_format_t cf = lv_display_get_color_format(disp);
                                     /*Calculate the position of the rotated area*/
@@ -3163,23 +3156,28 @@ void Lvgl_Init(void)
                                     /*Calculate the stride of the destination (rotated) area too*/
                                     uint32_t dest_stride = lv_draw_buf_width_to_stride(lv_area_get_width(&rotated_area), cf);
                                     /*Have a buffer to store the rotated area and perform the rotation*/
-                                    
+
                                     int32_t src_w = lv_area_get_width(area);
                                     int32_t src_h = lv_area_get_height(area);
-                                    auto rotated_buf = std::make_unique<uint8_t[]>(SCREEN_WIDTH * SCREEN_HEIGHT* (SCREEN_BITS_PER_PIXEL/8));
+                                    auto rotated_buf = std::make_unique<uint8_t[]>(SCREEN_WIDTH * SCREEN_HEIGHT * (SCREEN_BITS_PER_PIXEL / 8));
                                     lv_draw_sw_rotate(px_map, rotated_buf.get(), src_w, src_h, src_stride, dest_stride, rotation, cf);
                                     /*Use the rotated area and rotated buffer from now on*/
                                     area = &rotated_area;
                                     px_map = rotated_buf.get();
                                 }
-                                
+
                                 esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
                                 int offsetx1 = area->x1;
                                 int offsetx2 = area->x2;
                                 int offsety1 = area->y1;
                                 int offsety2 = area->y2;
                                 // pass the draw buffer to the driver
-                                esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map); });
+                                esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+
+#if CONFIG_ENABLE_USB_DISPLAY == true
+                                lv_display_flush_ready(disp);
+#endif
+                            });
 
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER); /*Touchpad should have POINTER type*/
@@ -3191,6 +3189,8 @@ void Lvgl_Init(void)
     lv_indev_set_read_cb(indev_2, my_keyboard_read);
 #endif
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#else
     printf("register dpi panel event callback for lvgl flush ready notification\n");
     esp_lcd_dpi_panel_event_callbacks_t cbs = {
         .on_color_trans_done = [](esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) -> bool
@@ -3207,6 +3207,7 @@ void Lvgl_Init(void)
             return false; },
     };
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(Screen_Mipi_Dpi_Panel, &cbs, display));
+#endif
 
     printf("use esp_timer as lvgl tick timer\n");
     const esp_timer_create_args_t lvgl_tick_timer_args = {
@@ -3602,7 +3603,21 @@ void Esp32c6_At_Init(void)
         }
     }
 }
+#if CONFIG_ENABLE_USB_DISPLAY == true
+bool Usb_Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
+{
+    usb_display_vendor_config_t vendor_config_usb = DEFAULT_USB_DISPLAY_VENDOR_CONFIG(SCREEN_WIDTH, SCREEN_HEIGHT,
+                                                                                      SCREEN_BITS_PER_PIXEL, *mipi_dpi_panel);
 
+    if (esp_lcd_new_panel_usb_display(&vendor_config_usb, mipi_dpi_panel) != ESP_OK)
+    {
+        printf("esp_lcd_new_panel_usb_display fail\n");
+        return false;
+    }
+
+    return true;
+}
+#else
 void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
 {
     /* initialization */
@@ -3718,6 +3733,8 @@ void hardware_usb_cdc_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+#endif
 
 void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index, uint32_t camera_buf_hes, uint32_t camera_buf_ves,
                                   size_t camera_buf_len, void *user_data)
@@ -4269,7 +4286,10 @@ extern "C" void app_main(void)
 {
     printf("Ciallo\n");
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#else
     Hardware_Usb_Cdc_Init();
+#endif
 
     XL9535->begin(500000);
 
@@ -4371,8 +4391,11 @@ extern "C" void app_main(void)
         Sys_Status.camera.init_flag = true;
     }
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+    Usb_Screen_Init(&Screen_Mipi_Dpi_Panel);
+#else
     Screen_Init(&Screen_Mipi_Dpi_Panel);
-    // Usb_Screen_Init(&Screen_Mipi_Dpi_Panel);
+#endif
 
     esp_err_t assert = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
     if (assert != ESP_OK)
@@ -4549,6 +4572,8 @@ extern "C" void app_main(void)
 
 #endif
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#else
 #if defined CONFIG_SCREEN_TYPE_HI8561
     HI8561_T->start_pwm_gradient_time(100, 500);
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
@@ -4559,6 +4584,7 @@ extern "C" void app_main(void)
     }
 #else
 #error "unknown macro definition, please select the correct macro definition."
+#endif
 #endif
 
     PCF8563_IIC_Bus->set_bus_handle(XL9535_IIC_Bus->get_bus_handle());
@@ -4731,7 +4757,10 @@ extern "C" void app_main(void)
     System_Ui->begin();
     _lock_release(&lvgl_api_lock);
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#else
     xTaskCreate(hardware_usb_cdc_task, "hardware_usb_cdc_task", 4 * 1024, NULL, 3, NULL);
+#endif
     xTaskCreate(device_vibration_task, "device_vibration_task", 4 * 1024, NULL, 2, &Vibration_Task_Handle);
     xTaskCreate(device_speaker_task, "device_speaker_task", 4 * 1024, NULL, 3, &Speaker_Task_Handle);
     xTaskCreate(device_microphone_task, "device_microphone_task", 4 * 1024, NULL, 3, &Microphone_Task_Handle);

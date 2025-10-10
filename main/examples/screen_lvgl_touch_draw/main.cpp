@@ -2,7 +2,7 @@
  * @Description: screen_lvgl_touch_draw
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:35:38
- * @LastEditTime: 2025-09-10 13:37:16
+ * @LastEditTime: 2025-10-10 15:38:37
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -23,6 +23,9 @@
 #include "t_display_p4_driver.h"
 #include "t_display_p4_config.h"
 #include "cpp_bus_driver_library.h"
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#include "esp_lcd_usb_display.h"
+#endif
 
 #define LVGL_TICK_PERIOD_MS 1
 
@@ -274,12 +277,19 @@ void Lvgl_Init(void)
                                 int offsety1 = area->y1;
                                 int offsety2 = area->y2;
                                 // pass the draw buffer to the driver
-                                esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map); });
+                                esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+
+#if CONFIG_ENABLE_USB_DISPLAY == true
+                                lv_display_flush_ready(disp);
+#endif
+                            });
 
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER); /*Touchpad should have POINTER type*/
     lv_indev_set_read_cb(indev, my_touchpad_read);
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#else
     printf("register dpi panel event callback for lvgl flush ready notification\n");
     esp_lcd_dpi_panel_event_callbacks_t cbs = {
         .on_color_trans_done = [](esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) -> bool
@@ -296,6 +306,7 @@ void Lvgl_Init(void)
             return false; },
     };
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(Screen_Mipi_Dpi_Panel, &cbs, display));
+#endif
 
     printf("use esp_timer as lvgl tick timer\n");
     const esp_timer_create_args_t lvgl_tick_timer_args = {
@@ -308,6 +319,22 @@ void Lvgl_Init(void)
     ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, LVGL_TICK_PERIOD_MS * 1000));
 }
+
+#if CONFIG_ENABLE_USB_DISPLAY == true
+bool Usb_Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
+{
+    usb_display_vendor_config_t vendor_config_usb = DEFAULT_USB_DISPLAY_VENDOR_CONFIG(SCREEN_WIDTH, SCREEN_HEIGHT,
+                                                                                      SCREEN_BITS_PER_PIXEL, *mipi_dpi_panel);
+
+    if (esp_lcd_new_panel_usb_display(&vendor_config_usb, mipi_dpi_panel) != ESP_OK)
+    {
+        printf("esp_lcd_new_panel_usb_display fail\n");
+        return false;
+    }
+
+    return true;
+}
+#endif
 
 extern "C" void app_main(void)
 {
@@ -349,7 +376,11 @@ extern "C" void app_main(void)
 
     Init_Ldo_Channel_Power(3, 1800);
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+    Usb_Screen_Init(&Screen_Mipi_Dpi_Panel);
+#else
     Screen_Init(&Screen_Mipi_Dpi_Panel);
+#endif
 
     esp_err_t assert = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
     if (assert != ESP_OK)
@@ -374,7 +405,7 @@ extern "C" void app_main(void)
 
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
 
-    GT9895_Bus->set_bus_handle(XL9535_Bus->get_bus_handle()) ;
+    GT9895_Bus->set_bus_handle(XL9535_Bus->get_bus_handle());
 
     GT9895->begin();
 
@@ -387,18 +418,19 @@ extern "C" void app_main(void)
 
     lv_example_canvas_7();
 
+#if CONFIG_ENABLE_USB_DISPLAY == true
+#else
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    ESP32P4->start_pwm_gradient_time(100, 500);
-
+    HI8561_T->start_pwm_gradient_time(100, 500);
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
     for (uint8_t i = 0; i < 255; i += 5)
     {
         set_rm69a10_brightness(Screen_Mipi_Dpi_Panel, i);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-
 #else
 #error "unknown macro definition, please select the correct macro definition."
+#endif
 #endif
 
     //     while (1)
