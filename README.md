@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-10-10 17:21:42
+ * @LastEditTime: 2025-10-11 14:08:18
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -143,8 +143,8 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Microphone: Electret Condenser Mic  
 * Communication Protocol: IIS
 * Related Documents:  
-    >[ES8311](./information/ES8311.pdf)  
-    >[NS4150B](./information/NS4150B.pdf)  
+    >[ES8311](./information/ES8311.pdf)<br />
+    >[NS4150B](./information/NS4150B.pdf)
 * Dependent Libraries:  
     >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
 
@@ -164,7 +164,7 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Communication Protocol: Standard SPI  
 * Other notes: Use a dedicated RF analog switch to switch the antenna
 * Related Documents:  
-    >[HPD16A](./information/HPDTEK_HPD16A_TCXO_V1.1.pdf)  
+    >[HPD16A](./information/HPDTEK_HPD16A_TCXO_V1.1.pdf)<br />
     >[SX1261-2](./information/DS_SX1261-2_V2_1.pdf)  
 * Dependent Libraries:  
     >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
@@ -217,8 +217,8 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Related Documents:  
     >[ICM20948](./information/ICM20948.pdf)
 * Dependent Libraries:  
-    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)  
-    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
+    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)<br />
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)<br />
     >[ICM20948_WE](https://github.com/Llgok/ICM20948_WE)
 
 ### 13. IO Expansion
@@ -265,7 +265,7 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Related Materials:
     > [CC1101](./information/cc1101.pdf)
 * Dependent Libraries:
-    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)<br />
     > [RadioLib](https://github.com/jgromes/RadioLib)
 
 ### 5. NRF24L01
@@ -277,7 +277,7 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Related Materials:
     > [NRF24L01](./information/NRF24L01P-R.pdf)
 * Dependent Libraries:
-    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)<br />
     > [RadioLib](https://github.com/jgromes/RadioLib)
 
 ### 6. NFC
@@ -289,9 +289,9 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Related Materials:
     > [ST25R3916](./information/st25r3916.pdf)
 * Dependent Libraries:
-    > [arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)
-    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
-    > [ST25R3916](https://github.com/stm32duino/ST25R3916)
+    > [arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)<br />
+    > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)<br />
+    > [ST25R3916](https://github.com/stm32duino/ST25R3916)<br />
     > [NFC-RFAL](https://github.com/stm32duino/NFC-RFAL)
 
 ## SoftwareDeployment
