@@ -2,7 +2,7 @@
  * @Description: screen_camera
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:45:00
- * @LastEditTime: 2025-10-10 17:03:01
+ * @LastEditTime: 2025-10-14 15:50:55
  * @License: GPL 3.0
  */
 #include "esp_video_init.h"
@@ -53,12 +53,12 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
         fps_count = 0;
 
         printf("camera_buf_hes: %lu, camera_buf_ves: %lu, camera_buf_len: %d KB\n", camera_buf_hes, camera_buf_ves, camera_buf_len / 1024);
-
-        for (size_t i = 0; i < 10; i++)
-        {
-            printf("camera_buf: 0x%02x\n", camera_buf[i]);
-        }
     }
+
+    uint32_t buffer_target_img_x_start = (camera_buf_hes - SCREEN_WIDTH) / 2;
+    uint32_t buffer_target_img_y_start = 0 + 10;
+    uint32_t buffer_target_img_width = SCREEN_WIDTH;
+    uint32_t buffer_target_img_height = camera_buf_ves - 20;
 
     ppa_srm_oper_config_t srm_config =
         {
@@ -67,69 +67,70 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
                     .buffer = camera_buf,
                     .pic_w = camera_buf_hes,
                     .pic_h = camera_buf_ves,
-                    .block_w = camera_buf_hes,
-                    .block_h = camera_buf_ves,
-                    .block_offset_x = (camera_buf_hes > SCREEN_WIDTH) ? (camera_buf_hes - SCREEN_WIDTH) / 2 : 0,
-                    .block_offset_y = (camera_buf_ves > SCREEN_HEIGHT) ? (camera_buf_ves - SCREEN_HEIGHT) / 2 : 0,
-                    .srm_cm = APP_VIDEO_FMT == APP_VIDEO_FMT_RGB565 ? PPA_SRM_COLOR_MODE_RGB565 : PPA_SRM_COLOR_MODE_RGB888,
+                    .block_w = buffer_target_img_width,
+                    .block_h = buffer_target_img_height,
+                    .block_offset_x = buffer_target_img_x_start,
+                    .block_offset_y = buffer_target_img_y_start,
+#if (defined CONFIG_CAMERA_TYPE_SC2336) || (defined CONFIG_CAMERA_TYPE_OV2710)
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
+                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB565,
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
+                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB888,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+#elif defined CONFIG_CAMERA_TYPE_OV5645
+                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB565,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
                 },
 
             .out =
                 {
                     .buffer = lcd_buffer[camera_buf_index],
                     .buffer_size = ALIGN_UP(SCREEN_WIDTH * SCREEN_HEIGHT * (APP_VIDEO_FMT == APP_VIDEO_FMT_RGB565 ? 2 : 3), data_cache_line_size),
-                    .pic_w = SCREEN_WIDTH,
-                    .pic_h = SCREEN_HEIGHT,
+                    .pic_w = buffer_target_img_width,
+                    .pic_h = buffer_target_img_height,
                     .block_offset_x = 0,
                     .block_offset_y = 0,
                     .srm_cm = APP_VIDEO_FMT == APP_VIDEO_FMT_RGB565 ? PPA_SRM_COLOR_MODE_RGB565 : PPA_SRM_COLOR_MODE_RGB888,
                 },
 
-            .rotation_angle = PPA_SRM_ROTATION_ANGLE_180,
+            .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
             .scale_x = 1,
             .scale_y = 1,
             .mirror_x = false,
+#if defined SCREEN_ROTATION_DIRECTION_0
+#if defined CONFIG_SCREEN_TYPE_HI8561
+            .mirror_y = true,
+#elif defined CONFIG_SCREEN_TYPE_RM69A10
             .mirror_y = false,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+#elif defined SCREEN_ROTATION_DIRECTION_90
+            .mirror_y = false,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
             .rgb_swap = false,
             .byte_swap = false,
             .mode = PPA_TRANS_MODE_BLOCKING,
         };
 
-    if (camera_buf_hes > SCREEN_WIDTH || camera_buf_ves > SCREEN_HEIGHT)
+    esp_err_t assert = ppa_do_scale_rotate_mirror(ppa_srm_handle, &srm_config);
+    if (assert != ESP_OK)
     {
-        // The resolution of the camera does not match the LCD resolution. Image processing can be done using PPA, but there will be some frame rate loss
-
-        srm_config.in.block_w = (camera_buf_hes > SCREEN_WIDTH) ? SCREEN_WIDTH : camera_buf_hes;
-        srm_config.in.block_h = (camera_buf_ves > SCREEN_HEIGHT) ? SCREEN_HEIGHT : camera_buf_ves;
-
-        esp_err_t assert = ppa_do_scale_rotate_mirror(ppa_srm_handle, &srm_config);
-        if (assert != ESP_OK)
-        {
-            printf("ppa_do_scale_rotate_mirror fail (error code: %#X)\n", assert);
-        }
-
-#if defined CONFIG_CAMERA_TYPE_SC2336 || defined CONFIG_CAMERA_TYPE_OV2710
-        assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - srm_config.in.block_h) / 2 + 130,
-                                           srm_config.in.block_w, srm_config.in.block_h + (SCREEN_HEIGHT - srm_config.in.block_h) / 2 - 130, lcd_buffer[camera_buf_index]);
-#elif defined CONFIG_CAMERA_TYPE_OV5645
-        assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - srm_config.in.block_h) / 2 + 150,
-                                           srm_config.in.block_w, srm_config.in.block_h + (SCREEN_HEIGHT - srm_config.in.block_h) / 2 - 150, lcd_buffer[camera_buf_index]);
-#else
-#error "unknown macro definition, please select the correct macro definition."
-#endif
-
-        if (assert != ESP_OK)
-        {
-            printf("esp_lcd_panel_draw_bitmap fail (error code: %#X)\n", assert);
-        }
+        printf("ppa_do_scale_rotate_mirror fail (error code: %#X)\n", assert);
     }
-    else
+
+    assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - buffer_target_img_height) / 2,
+                                       buffer_target_img_width, buffer_target_img_height + ((SCREEN_HEIGHT - buffer_target_img_height) / 2),
+                                       lcd_buffer[camera_buf_index]);
+    if (assert != ESP_OK)
     {
-        esp_err_t assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, 0, camera_buf_hes, camera_buf_ves, camera_buf);
-        if (assert != ESP_OK)
-        {
-            printf("esp_lcd_panel_draw_bitmap fail (error code: %#X)\n", assert);
-        }
+        printf("esp_lcd_panel_draw_bitmap fail (error code: %#X)\n", assert);
     }
 }
 
@@ -167,12 +168,34 @@ bool App_Video_Init()
         return false;
     }
 
-    video_cam_fd0 = app_video_open(EXAMPLE_CAM_DEV_PATH, APP_VIDEO_FMT);
+#if (defined CONFIG_CAMERA_TYPE_SC2336) || (defined CONFIG_CAMERA_TYPE_OV2710)
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
+    video_cam_fd0 = app_video_open(EXAMPLE_CAM_DEV_PATH, video_fmt_t::APP_VIDEO_FMT_RGB565);
     if (video_cam_fd0 < 0)
     {
         printf("video cam open fail (video_cam_fd0: %ld)\n", video_cam_fd0);
         return false;
     }
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
+    video_cam_fd0 = app_video_open(EXAMPLE_CAM_DEV_PATH, video_fmt_t::APP_VIDEO_FMT_RGB888);
+    if (video_cam_fd0 < 0)
+    {
+        printf("video cam open fail (video_cam_fd0: %ld)\n", video_cam_fd0);
+        return false;
+    }
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+#elif defined CONFIG_CAMERA_TYPE_OV5645
+    video_cam_fd0 = app_video_open(EXAMPLE_CAM_DEV_PATH, video_fmt_t::APP_VIDEO_FMT_RGB565);
+    if (video_cam_fd0 < 0)
+    {
+        printf("video cam open fail (video_cam_fd0: %ld)\n", video_cam_fd0);
+        return false;
+    }
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
 
 #if CONFIG_EXAMPLE_CAM_BUF_COUNT == 2
     assert = esp_lcd_dpi_panel_get_frame_buffer(mipi_dpi_panel, 2, &lcd_buffer[0], &lcd_buffer[1]);
