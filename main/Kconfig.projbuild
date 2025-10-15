@@ -100,6 +100,10 @@ menu "Example Configuration"
         bool "Enable USB Display"
         default n
 
+    config ENABLE_PPA_SCREEN_ROTATION
+        bool "Enable ppa screen rotation"
+        default y
+
     choice
         prompt "Select the color format of the screen"
         default SCREEN_PIXEL_FORMAT_RGB565

@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-10-14 15:47:21
+ * @LastEditTime: 2025-10-15 10:49:56
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -282,6 +282,8 @@ At_Mode Esp32c6_At_Mode = At_Mode::TEST;
 
 ppa_client_handle_t ppa_srm_handle = NULL;
 size_t data_cache_line_size = 0;
+ppa_client_handle_t ppa_srm_handle_2 = NULL;
+size_t data_cache_line_size_2 = 0;
 void *lcd_buffer[CONFIG_EXAMPLE_CAM_BUF_COUNT];
 int32_t fps_count;
 int64_t start_time;
@@ -3144,9 +3146,169 @@ void Lvgl_Init(void)
     lv_display_set_flush_cb(display, [](lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
                             {
                                 lv_display_rotation_t rotation = lv_display_get_rotation(disp);
-                                lv_area_t rotated_area;
+                                esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
+
+                                int32_t offsetx1 = area->x1;
+                                int32_t offsetx2 = area->x2;
+                                int32_t offsety1 = area->y1;
+                                int32_t offsety2 = area->y2;
+
                                 if (rotation != LV_DISPLAY_ROTATION_0)
                                 {
+#if CONFIG_ENABLE_PPA_SCREEN_ROTATION == true
+                                    uint32_t original_img_width = area->x2 - area->x1 + 1;
+                                    uint32_t original_img_height = area->y2 - area->y1 + 1;
+
+                                    // 根据旋转角度确定输出尺寸
+                                    uint32_t output_img_width = original_img_width;
+                                    uint32_t output_img_height = original_img_height;
+
+                                    // 如果是90或270度旋转，宽度和高度需要交换
+                                    if (rotation == LV_DISPLAY_ROTATION_90 || rotation == LV_DISPLAY_ROTATION_270)
+                                    {
+                                        output_img_width = original_img_height;
+                                        output_img_height = original_img_width;
+                                    }
+
+                                    // 计算实际需要的缓冲区大小
+                                    size_t out_buf_size = output_img_width * output_img_height * (SCREEN_BITS_PER_PIXEL / 8);
+                                    uint8_t *rotated_buf = (uint8_t *)heap_caps_calloc(1, out_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+                                    if (rotated_buf == NULL)
+                                    {
+                                        printf("failed to allocate rotated buffer\n");
+                                        return;
+                                    }
+
+                                    ppa_srm_oper_config_t srm_config =
+                                        {
+                                            .in =
+                                                {
+                                                    .buffer = px_map,
+                                                    .pic_w = original_img_width,
+                                                    .pic_h = original_img_height,
+                                                    .block_w = original_img_width,
+                                                    .block_h = original_img_height,
+                                                    .block_offset_x = 0,
+                                                    .block_offset_y = 0,
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
+                                                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB565,
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
+                                                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB888,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+                                                },
+
+                                            .out =
+                                                {
+                                                    .buffer = rotated_buf,
+                                                    .buffer_size = ALIGN_UP(out_buf_size, data_cache_line_size_2),
+                                                    .pic_w = output_img_width,
+                                                    .pic_h = output_img_height,
+                                                    .block_offset_x = 0,
+                                                    .block_offset_y = 0,
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
+                                                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB565,
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
+                                                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB888,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+                                                },
+
+                                            .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+                                            .scale_x = 1,
+                                            .scale_y = 1,
+                                            .mirror_x = false,
+                                            .mirror_y = false,
+                                            .rgb_swap = false,
+                                            .byte_swap = false,
+                                            .mode = PPA_TRANS_MODE_BLOCKING,
+                                        };
+
+                                    switch (rotation)
+                                    {
+                                    case LV_DISPLAY_ROTATION_90:
+                                        srm_config.rotation_angle = PPA_SRM_ROTATION_ANGLE_90;
+                                        break;
+                                    case LV_DISPLAY_ROTATION_180:
+                                        srm_config.rotation_angle = PPA_SRM_ROTATION_ANGLE_180;
+                                        break;
+                                    case LV_DISPLAY_ROTATION_270:
+                                        srm_config.rotation_angle = PPA_SRM_ROTATION_ANGLE_270;
+                                        break;
+                                    default:
+                                        break;
+                                    }
+
+                                    esp_err_t ret = ppa_do_scale_rotate_mirror(ppa_srm_handle_2, &srm_config);
+                                    if (ret != ESP_OK)
+                                    {
+                                        printf("ppa_do_scale_rotate_mirror fail (error code: 0x%X)\n", ret);
+                                        heap_caps_free(rotated_buf);
+                                        return;
+                                    }
+
+                                    // 根据旋转角度重新计算坐标
+                                    int32_t rotated_offsetx1 = offsetx1;
+                                    int32_t rotated_offsety1 = offsety1;
+                                    int32_t rotated_offsetx2 = offsetx2;
+                                    int32_t rotated_offsety2 = offsety2;
+
+                                    switch (rotation)
+                                    {
+                                    case LV_DISPLAY_ROTATION_90:
+                                        // 90度旋转：x = original_y, y = SCREEN_HEIGHT - original_x - 1
+                                        rotated_offsetx1 = offsety1;
+                                        rotated_offsety1 = SCREEN_HEIGHT - offsetx2 - 1;
+                                        rotated_offsetx2 = offsety2;
+                                        rotated_offsety2 = SCREEN_HEIGHT - offsetx1 - 1;
+                                        break;
+                                    case LV_DISPLAY_ROTATION_180:
+                                        // 180度旋转：x = SCREEN_WIDTH - original_x - 1, y = SCREEN_HEIGHT - original_y - 1
+                                        rotated_offsetx1 = SCREEN_WIDTH - offsetx2 - 1;
+                                        rotated_offsety1 = SCREEN_HEIGHT - offsety2 - 1;
+                                        rotated_offsetx2 = SCREEN_WIDTH - offsetx1 - 1;
+                                        rotated_offsety2 = SCREEN_HEIGHT - offsety1 - 1;
+                                        break;
+                                    case LV_DISPLAY_ROTATION_270:
+                                        // 270度旋转：x = SCREEN_WIDTH - original_y - 1, y = original_x
+                                        rotated_offsetx1 = SCREEN_WIDTH - offsety2 - 1;
+                                        rotated_offsety1 = offsetx1;
+                                        rotated_offsetx2 = SCREEN_WIDTH - offsety1 - 1;
+                                        rotated_offsety2 = offsetx2;
+                                        break;
+                                    default:
+                                        break;
+                                    }
+
+                                    // 确保旋转后的坐标在屏幕范围内
+                                    rotated_offsetx1 = (rotated_offsetx1 < 0) ? 0 : rotated_offsetx1;
+                                    rotated_offsety1 = (rotated_offsety1 < 0) ? 0 : rotated_offsety1;
+                                    rotated_offsetx2 = (rotated_offsetx2 >= SCREEN_WIDTH) ? SCREEN_WIDTH - 1 : rotated_offsetx2;
+                                    rotated_offsety2 = (rotated_offsety2 >= SCREEN_HEIGHT) ? SCREEN_HEIGHT - 1 : rotated_offsety2;
+
+                                    // 确保 x1 <= x2 且 y1 <= y2
+                                    if (rotated_offsetx1 > rotated_offsetx2)
+                                    {
+                                        int32_t temp = rotated_offsetx1;
+                                        rotated_offsetx1 = rotated_offsetx2;
+                                        rotated_offsetx2 = temp;
+                                    }
+                                    if (rotated_offsety1 > rotated_offsety2)
+                                    {
+                                        int32_t temp = rotated_offsety1;
+                                        rotated_offsety1 = rotated_offsety2;
+                                        rotated_offsety2 = temp;
+                                    }
+
+                                    esp_lcd_panel_draw_bitmap(panel_handle, rotated_offsetx1, rotated_offsety1,
+                                                              rotated_offsetx2 + 1, rotated_offsety2 + 1, rotated_buf);
+
+                                    heap_caps_free(rotated_buf);
+
+#else
+                                    lv_area_t rotated_area;
                                     lv_color_format_t cf = lv_display_get_color_format(disp);
                                     /*Calculate the position of the rotated area*/
                                     rotated_area = *area;
@@ -3164,15 +3326,19 @@ void Lvgl_Init(void)
                                     /*Use the rotated area and rotated buffer from now on*/
                                     area = &rotated_area;
                                     px_map = rotated_buf.get();
-                                }
 
-                                esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
-                                int offsetx1 = area->x1;
-                                int offsetx2 = area->x2;
-                                int offsety1 = area->y1;
-                                int offsety2 = area->y2;
-                                // pass the draw buffer to the driver
-                                esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+                                    offsetx1 = area->x1;
+                                    offsetx2 = area->x2;
+                                    offsety1 = area->y1;
+                                    offsety2 = area->y2;
+
+                                    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+#endif
+                                }
+                                else
+                                {
+                                    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map);
+                                }
 
 #if CONFIG_ENABLE_USB_DISPLAY == true
                                 lv_display_flush_ready(disp);
@@ -3784,12 +3950,18 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
             .out =
                 {
                     .buffer = lcd_buffer[camera_buf_index],
-                    .buffer_size = ALIGN_UP(SCREEN_WIDTH * SCREEN_HEIGHT * (APP_VIDEO_FMT == APP_VIDEO_FMT_RGB565 ? 2 : 3), data_cache_line_size),
+                    .buffer_size = ALIGN_UP(SCREEN_WIDTH * SCREEN_HEIGHT * (SCREEN_BITS_PER_PIXEL / 8), data_cache_line_size),
                     .pic_w = buffer_target_img_width,
                     .pic_h = buffer_target_img_height,
                     .block_offset_x = 0,
                     .block_offset_y = 0,
-                    .srm_cm = APP_VIDEO_FMT == APP_VIDEO_FMT_RGB565 ? PPA_SRM_COLOR_MODE_RGB565 : PPA_SRM_COLOR_MODE_RGB888,
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
+                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB565,
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
+                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB888,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
                 },
 
             .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
@@ -3972,6 +4144,30 @@ bool App_Video_Init(void)
 
     return true;
 }
+
+#if (CONFIG_ENABLE_PPA_SCREEN_ROTATION == true) && (!defined SCREEN_ROTATION_DIRECTION_0)
+bool Ppa_Screen_Rotation_Init(void)
+{
+    ppa_client_config_t ppa_srm_config =
+        {
+            .oper_type = PPA_OPERATION_SRM,
+        };
+    esp_err_t assert = ppa_register_client(&ppa_srm_config, &ppa_srm_handle_2);
+    if (assert != ESP_OK)
+    {
+        printf("ppa_register_client fail (error code: %#X)\n", assert);
+        return false;
+    }
+    assert = esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &data_cache_line_size_2);
+    if (assert != ESP_OK)
+    {
+        printf("esp_cache_get_alignment fail (error code: %#X)\n", assert);
+        return false;
+    }
+
+    return true;
+}
+#endif
 
 bool Play_Wav_File_2(const char *file_path)
 {
@@ -4407,6 +4603,17 @@ extern "C" void app_main(void)
         printf("App_Video_Init success\n");
         Sys_Status.camera.init_flag = true;
     }
+
+#if (CONFIG_ENABLE_PPA_SCREEN_ROTATION == true) && (!defined SCREEN_ROTATION_DIRECTION_0)
+    if (Ppa_Screen_Rotation_Init() == false)
+    {
+        printf("Ppa_Screen_Rotation_init fail\n");
+    }
+    else
+    {
+        printf("Ppa_Screen_Rotation_init success\n");
+    }
+#endif
 
 #if CONFIG_ENABLE_USB_DISPLAY == true
     Usb_Screen_Init(&Screen_Mipi_Dpi_Panel);
