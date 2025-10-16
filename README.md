@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-10-11 14:08:18
+ * @LastEditTime: 2025-10-16 14:27:33
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -64,7 +64,7 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 
 ## Module
 
-### T-Display-P4 Module
+### T-Display-P4 Section
 ### 1. Core Processor  
 
 * Chip: ESP32-P4  
@@ -230,7 +230,7 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Dependent Libraries:
     > [cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
 
-### T-Display-P4-Keyboard Module
+### T-Display-P4-Keyboard Section
 ### 1. Keyboard Driver
 
 * Chip: TCA8418
