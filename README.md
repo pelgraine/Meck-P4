@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-10-16 14:33:04
+ * @LastEditTime: 2025-10-16 14:44:40
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -391,7 +391,7 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 For pin definitions, please refer to the configuration file: 
 <br />
 
-[t_display_p4_config.h](./components/private_library/t_display_p4_config.h)<br />
+[t_display_p4_config.h](./components/private_library/t_display_p4_config.h)  
 [t_display_p4_keyboard_config.h](./components/private_library/t_display_p4_keyboard_config.h)
 
 ## RelatedTests
