@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-10-16 14:27:33
+ * @LastEditTime: 2025-10-16 14:29:02
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -298,7 +298,7 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 
 ### Examples Support
 
-#### T-Display-P4
+#### T-Display-P4 Examples
 | example | `[vscode][esp-idf-v5.4.0]` | description | picture |
 | ------  | ------ | ------ | ------ | 
 | [afe](./main/examples/afe) |  <p align="center">![alt text][supported] | | |
@@ -327,7 +327,7 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 | [xl9535](./main/examples/Vibration_Motor) |  <p align="center">![alt text][supported] | | |
 | [xiaozhi](https://github.com/78/xiaozhi-esp32) |  <p align="center">![alt text][supported] | | |
 
-#### T-Display-P4-Keyboard
+#### T-Display-P4-Keyboard Examples
 | example | `[vscode][esp-idf-v5.4.0]` | description | picture |
 | ------  | ------ | ------ | ------ | 
 | [radiolib_cc1101_send_receive](./main/keyboard_examples/radiolib_cc1101_send_receive) |  <p align="center">![alt text][supported] | | |
