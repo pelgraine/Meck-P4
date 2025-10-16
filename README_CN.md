@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-10-16 14:29:31
+ * @LastEditTime: 2025-10-16 14:32:11
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -144,7 +144,7 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 * 麦克风芯片：mic咪头
 * 通信协议：IIS
 * 相关资料：
-    >[ES8311](./information/ES8311.pdf)<br />
+    >[ES8311](./information/ES8311.pdf)  
     >[NS4150B](./information/NS4150B.pdf)
 * 依赖库：
     >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
@@ -165,7 +165,7 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 * 通信协议：标准SPI
 * 其他说明：使用专用射频模拟开关开切换天线
 * 相关资料：
-    >[HPD16A](./information/HPDTEK_HPD16A_TCXO_V1.1.pdf)<br />
+    >[HPD16A](./information/HPDTEK_HPD16A_TCXO_V1.1.pdf)  
     >[SX1261-2](./information/DS_SX1261-2_V2_1.pdf)
 * 依赖库：
     >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)
@@ -218,10 +218,9 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 * 相关资料：
     >[ICM20948](./information/ICM20948.pdf)
 * 依赖库：
-    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)<br />
-    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)<br />
+    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)  
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
     >[ICM20948_WE](https://github.com/Llgok/ICM20948_WE)
-
 
 ### 13. IO扩展
 
@@ -267,7 +266,7 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 * 相关资料：
     >[CC1101](./information/cc1101.pdf)
 * 依赖库：
-    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)<br />
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
     >[RadioLib](https://github.com/jgromes/RadioLib)  
 
 ### 5. NRF24L01
@@ -279,7 +278,7 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 * 相关资料：
     >[NRF24L01](./information/NRF24L01P-R.pdf)
 * 依赖库：
-    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)<br />
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
     >[RadioLib](https://github.com/jgromes/RadioLib)  
 
 ### 6. NFC
@@ -291,9 +290,9 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 * 相关资料：
     >[ST25R3916](./information/st25r3916.pdf)
 * 依赖库：
-    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)<br />
-    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)<br />
-    >[ST25R3916](https://github.com/stm32duino/ST25R3916)<br />
+    >[arduino_cpp_bus_driver](https://github.com/Llgok/arduino_cpp_bus_driver)  
+    >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
+    >[ST25R3916](https://github.com/stm32duino/ST25R3916)  
     >[NFC-RFAL](https://github.com/stm32duino/NFC-RFAL)
 
 ## 软件部署
