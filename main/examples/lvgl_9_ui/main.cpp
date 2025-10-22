@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-10-15 10:49:56
+ * @LastEditTime: 2025-10-22 11:16:35
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -3172,7 +3172,7 @@ void Lvgl_Init(void)
 
                                     // 计算实际需要的缓冲区大小
                                     size_t out_buf_size = output_img_width * output_img_height * (SCREEN_BITS_PER_PIXEL / 8);
-                                    uint8_t *rotated_buf = (uint8_t *)heap_caps_calloc(1, out_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+                                    uint8_t *rotated_buf = (uint8_t *)heap_caps_malloc(out_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
                                     if (rotated_buf == NULL)
                                     {
                                         printf("failed to allocate rotated buffer\n");
