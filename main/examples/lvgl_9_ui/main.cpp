@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-10-22 11:16:35
+ * @LastEditTime: 2025-10-23 10:00:34
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -3156,24 +3156,24 @@ void Lvgl_Init(void)
                                 if (rotation != LV_DISPLAY_ROTATION_0)
                                 {
 #if CONFIG_ENABLE_PPA_SCREEN_ROTATION == true
-                                    uint32_t original_img_width = area->x2 - area->x1 + 1;
-                                    uint32_t original_img_height = area->y2 - area->y1 + 1;
+                                    uint32_t input_img_width = area->x2 - area->x1 + 1;
+                                    uint32_t input_img_height = area->y2 - area->y1 + 1;
 
                                     // 根据旋转角度确定输出尺寸
-                                    uint32_t output_img_width = original_img_width;
-                                    uint32_t output_img_height = original_img_height;
+                                    uint32_t output_img_width = input_img_width;
+                                    uint32_t output_img_height = input_img_height;
 
                                     // 如果是90或270度旋转，宽度和高度需要交换
                                     if (rotation == LV_DISPLAY_ROTATION_90 || rotation == LV_DISPLAY_ROTATION_270)
                                     {
-                                        output_img_width = original_img_height;
-                                        output_img_height = original_img_width;
+                                        output_img_width = input_img_height;
+                                        output_img_height = input_img_width;
                                     }
 
                                     // 计算实际需要的缓冲区大小
-                                    size_t out_buf_size = output_img_width * output_img_height * (SCREEN_BITS_PER_PIXEL / 8);
-                                    uint8_t *rotated_buf = (uint8_t *)heap_caps_malloc(out_buf_size, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
-                                    if (rotated_buf == NULL)
+                                    size_t output_buffer_size = output_img_width * output_img_height * (SCREEN_BITS_PER_PIXEL / 8);
+                                    uint8_t *output_buffer = (uint8_t *)heap_caps_malloc(output_buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+                                    if (output_buffer == NULL)
                                     {
                                         printf("failed to allocate rotated buffer\n");
                                         return;
@@ -3184,10 +3184,10 @@ void Lvgl_Init(void)
                                             .in =
                                                 {
                                                     .buffer = px_map,
-                                                    .pic_w = original_img_width,
-                                                    .pic_h = original_img_height,
-                                                    .block_w = original_img_width,
-                                                    .block_h = original_img_height,
+                                                    .pic_w = input_img_width,
+                                                    .pic_h = input_img_height,
+                                                    .block_w = input_img_width,
+                                                    .block_h = input_img_height,
                                                     .block_offset_x = 0,
                                                     .block_offset_y = 0,
 #if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
@@ -3201,8 +3201,8 @@ void Lvgl_Init(void)
 
                                             .out =
                                                 {
-                                                    .buffer = rotated_buf,
-                                                    .buffer_size = ALIGN_UP(out_buf_size, data_cache_line_size_2),
+                                                    .buffer = output_buffer,
+                                                    .buffer_size = ALIGN_UP(output_buffer_size, data_cache_line_size_2),
                                                     .pic_w = output_img_width,
                                                     .pic_h = output_img_height,
                                                     .block_offset_x = 0,
@@ -3245,7 +3245,7 @@ void Lvgl_Init(void)
                                     if (ret != ESP_OK)
                                     {
                                         printf("ppa_do_scale_rotate_mirror fail (error code: 0x%X)\n", ret);
-                                        heap_caps_free(rotated_buf);
+                                        heap_caps_free(output_buffer);
                                         return;
                                     }
 
@@ -3303,9 +3303,9 @@ void Lvgl_Init(void)
                                     }
 
                                     esp_lcd_panel_draw_bitmap(panel_handle, rotated_offsetx1, rotated_offsety1,
-                                                              rotated_offsetx2 + 1, rotated_offsety2 + 1, rotated_buf);
+                                                              rotated_offsetx2 + 1, rotated_offsety2 + 1, output_buffer);
 
-                                    heap_caps_free(rotated_buf);
+                                    heap_caps_free(output_buffer);
 
 #else
                                     lv_area_t rotated_area;
@@ -3916,10 +3916,21 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
         printf("camera_buf_hes: %lu, camera_buf_ves: %lu, camera_buf_len: %d KB\n", camera_buf_hes, camera_buf_ves, camera_buf_len / 1024);
     }
 
-    uint32_t buffer_target_img_x_start = (camera_buf_hes - SCREEN_WIDTH) / 2;
-    uint32_t buffer_target_img_y_start = 0 + 10;
-    uint32_t buffer_target_img_width = SCREEN_WIDTH;
-    uint32_t buffer_target_img_height = camera_buf_ves - 20;
+    uint32_t input_img_block_width = (camera_buf_hes - SCREEN_WIDTH) / 2;
+    uint32_t input_img_block_height = 0;
+    uint32_t input_img_width = SCREEN_WIDTH;
+    uint32_t input_img_height = camera_buf_ves;
+
+    uint32_t output_img_width = input_img_width;
+    uint32_t output_img_height = input_img_height;
+
+    size_t output_buffer_size = output_img_width * output_img_height * (SCREEN_BITS_PER_PIXEL / 8);
+    uint8_t *output_buffer = (uint8_t *)heap_caps_malloc(output_buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+    if (output_buffer == NULL)
+    {
+        printf("heap_caps_malloc fail\n");
+        return;
+    }
 
     ppa_srm_oper_config_t srm_config =
         {
@@ -3928,10 +3939,10 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
                     .buffer = camera_buf,
                     .pic_w = camera_buf_hes,
                     .pic_h = camera_buf_ves,
-                    .block_w = buffer_target_img_width,
-                    .block_h = buffer_target_img_height,
-                    .block_offset_x = buffer_target_img_x_start,
-                    .block_offset_y = buffer_target_img_y_start,
+                    .block_w = input_img_width,
+                    .block_h = input_img_height,
+                    .block_offset_x = input_img_block_width,
+                    .block_offset_y = input_img_block_height,
 #if (defined CONFIG_CAMERA_TYPE_SC2336) || (defined CONFIG_CAMERA_TYPE_OV2710)
 #if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
                     .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB565,
@@ -3949,10 +3960,10 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
 
             .out =
                 {
-                    .buffer = lcd_buffer[camera_buf_index],
-                    .buffer_size = ALIGN_UP(SCREEN_WIDTH * SCREEN_HEIGHT * (SCREEN_BITS_PER_PIXEL / 8), data_cache_line_size),
-                    .pic_w = buffer_target_img_width,
-                    .pic_h = buffer_target_img_height,
+                    .buffer = output_buffer,
+                    .buffer_size = ALIGN_UP(output_buffer_size, data_cache_line_size),
+                    .pic_w = output_img_width,
+                    .pic_h = output_img_height,
                     .block_offset_x = 0,
                     .block_offset_y = 0,
 #if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
@@ -3990,24 +4001,29 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
     if (assert != ESP_OK)
     {
         printf("ppa_do_scale_rotate_mirror fail (error code: %#X)\n", assert);
+        heap_caps_free(output_buffer);
+        return;
     }
 
     if (System_Ui->get_current_win() == Lvgl_Ui::System::Current_Win::CAMERA)
     {
-        assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - buffer_target_img_height) / 2,
-                                           buffer_target_img_width, buffer_target_img_height + ((SCREEN_HEIGHT - buffer_target_img_height) / 2),
-                                           lcd_buffer[camera_buf_index]);
+        assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - output_img_height) / 2,
+                                           output_img_width, output_img_height + ((SCREEN_HEIGHT - output_img_height) / 2),
+                                           output_buffer);
         if (assert != ESP_OK)
         {
             printf("esp_lcd_panel_draw_bitmap fail (error code: %#X)\n", assert);
+            heap_caps_free(output_buffer);
+            return;
         }
-
         // _lock_acquire(&lvgl_api_lock);
         // lv_canvas_set_buffer(System_Ui->_registry.win.camera.canvas, lcd_buffer[camera_buf_index],
         //                      srm_config.in.block_w, srm_config.in.block_h + (SCREEN_HEIGHT - srm_config.in.block_h) / 2,
         //                      LCD_COLOR_PIXEL_FORMAT_RGB565);
         // _lock_release(&lvgl_api_lock);
     }
+
+    heap_caps_free(output_buffer);
 }
 
 bool App_Video_Init(void)

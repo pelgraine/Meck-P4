@@ -93,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202510151042"},
+            {"firmware build date:\n     ", "202510230957"},
     };
 
     void System::begin()

@@ -2,7 +2,7 @@
  * @Description: screen_camera
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:45:00
- * @LastEditTime: 2025-10-14 15:50:55
+ * @LastEditTime: 2025-10-23 09:59:42
  * @License: GPL 3.0
  */
 #include "esp_video_init.h"
@@ -55,10 +55,21 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
         printf("camera_buf_hes: %lu, camera_buf_ves: %lu, camera_buf_len: %d KB\n", camera_buf_hes, camera_buf_ves, camera_buf_len / 1024);
     }
 
-    uint32_t buffer_target_img_x_start = (camera_buf_hes - SCREEN_WIDTH) / 2;
-    uint32_t buffer_target_img_y_start = 0 + 10;
-    uint32_t buffer_target_img_width = SCREEN_WIDTH;
-    uint32_t buffer_target_img_height = camera_buf_ves - 20;
+    uint32_t input_img_block_width = (camera_buf_hes - SCREEN_WIDTH) / 2;
+    uint32_t input_img_block_height = 0;
+    uint32_t input_img_width = SCREEN_WIDTH;
+    uint32_t input_img_height = camera_buf_ves;
+
+    uint32_t output_img_width = input_img_width;
+    uint32_t output_img_height = input_img_height;
+
+    size_t output_buffer_size = output_img_width * output_img_height * (SCREEN_BITS_PER_PIXEL / 8);
+    uint8_t *output_buffer = (uint8_t *)heap_caps_malloc(output_buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+    if (output_buffer == NULL)
+    {
+        printf("heap_caps_malloc fail\n");
+        return;
+    }
 
     ppa_srm_oper_config_t srm_config =
         {
@@ -67,10 +78,10 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
                     .buffer = camera_buf,
                     .pic_w = camera_buf_hes,
                     .pic_h = camera_buf_ves,
-                    .block_w = buffer_target_img_width,
-                    .block_h = buffer_target_img_height,
-                    .block_offset_x = buffer_target_img_x_start,
-                    .block_offset_y = buffer_target_img_y_start,
+                    .block_w = input_img_width,
+                    .block_h = input_img_height,
+                    .block_offset_x = input_img_block_width,
+                    .block_offset_y = input_img_block_height,
 #if (defined CONFIG_CAMERA_TYPE_SC2336) || (defined CONFIG_CAMERA_TYPE_OV2710)
 #if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
                     .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB565,
@@ -88,13 +99,19 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
 
             .out =
                 {
-                    .buffer = lcd_buffer[camera_buf_index],
-                    .buffer_size = ALIGN_UP(SCREEN_WIDTH * SCREEN_HEIGHT * (APP_VIDEO_FMT == APP_VIDEO_FMT_RGB565 ? 2 : 3), data_cache_line_size),
-                    .pic_w = buffer_target_img_width,
-                    .pic_h = buffer_target_img_height,
+                    .buffer = output_buffer,
+                    .buffer_size = ALIGN_UP(output_buffer_size, data_cache_line_size),
+                    .pic_w = output_img_width,
+                    .pic_h = output_img_height,
                     .block_offset_x = 0,
                     .block_offset_y = 0,
-                    .srm_cm = APP_VIDEO_FMT == APP_VIDEO_FMT_RGB565 ? PPA_SRM_COLOR_MODE_RGB565 : PPA_SRM_COLOR_MODE_RGB888,
+#if defined CONFIG_SCREEN_PIXEL_FORMAT_RGB565
+                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB565,
+#elif defined CONFIG_SCREEN_PIXEL_FORMAT_RGB888
+                    .srm_cm = ppa_srm_color_mode_t::PPA_SRM_COLOR_MODE_RGB888,
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
                 },
 
             .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
@@ -123,15 +140,21 @@ void camera_video_frame_operation(uint8_t *camera_buf, uint8_t camera_buf_index,
     if (assert != ESP_OK)
     {
         printf("ppa_do_scale_rotate_mirror fail (error code: %#X)\n", assert);
+        heap_caps_free(output_buffer);
+        return;
     }
 
-    assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - buffer_target_img_height) / 2,
-                                       buffer_target_img_width, buffer_target_img_height + ((SCREEN_HEIGHT - buffer_target_img_height) / 2),
-                                       lcd_buffer[camera_buf_index]);
+    assert = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, (SCREEN_HEIGHT - output_img_height) / 2,
+                                       output_img_width, output_img_height + ((SCREEN_HEIGHT - output_img_height) / 2),
+                                       output_buffer);
     if (assert != ESP_OK)
     {
         printf("esp_lcd_panel_draw_bitmap fail (error code: %#X)\n", assert);
+        heap_caps_free(output_buffer);
+        return;
     }
+
+    heap_caps_free(output_buffer);
 }
 
 bool App_Video_Init()
@@ -397,7 +420,7 @@ extern "C" void app_main(void)
 #if CONFIG_ENABLE_USB_DISPLAY == true
 #else
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    HI8561_T->start_pwm_gradient_time(100, 500);
+    ESP32P4->start_pwm_gradient_time(100, 500);
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
     for (uint8_t i = 0; i < 255; i += 5)
     {
