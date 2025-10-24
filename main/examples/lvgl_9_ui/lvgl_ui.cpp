@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-10-15 10:42:46
+ * @LastEditTime: 2025-10-24 15:52:28
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -93,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202510230957"},
+            {"firmware build date:\n     ", "202510241555"},
     };
 
     void System::begin()
@@ -1217,47 +1217,6 @@ namespace Lvgl_Ui
 
         add_win_cit_test_item_pass_fail_button(_registry.win.cit.version_information_test);
 
-        // // 创建Button Matrix按键
-        // static const char *btnm_map[] = {"PASS", "FAIL"};
-        // _registry.win.cit.judgment_button = lv_buttonmatrix_create(_registry.win.cit.version_information_test);
-        // lv_buttonmatrix_set_map(_registry.win.cit.judgment_button, btnm_map);
-        // lv_obj_set_size(_registry.win.cit.judgment_button, _width, 140);
-        // lv_obj_align(_registry.win.cit.judgment_button, LV_ALIGN_BOTTOM_MID, 0, 0);
-        // lv_obj_set_style_text_font(_registry.win.cit.judgment_button, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        // lv_obj_set_style_border_width(_registry.win.cit.judgment_button, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        // lv_obj_set_style_shadow_width(_registry.win.cit.judgment_button, 0, (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_DEFAULT);
-
-        // lv_obj_add_event_cb(_registry.win.cit.judgment_button, [](lv_event_t *e)
-        //                     {
-        //                         System *self = static_cast<System *>(lv_event_get_user_data(e));
-        //                         lv_event_code_t code = lv_event_get_code(e);
-        //                         uint16_t id = lv_buttonmatrix_get_selected_button(self->_registry.win.cit.judgment_button);
-        //                         const char *txt = lv_buttonmatrix_get_button_text(self->_registry.win.cit.judgment_button, id);
-
-        //                         switch (code)
-        //                         {
-        //                         case LV_EVENT_CLICKED:
-
-        //                             if (strcmp(txt, "PASS") == 0)
-        //                             {
-        //                                 _win_cit_test_item_list[0].symbol = LV_SYMBOL_OK;
-        //                                 _win_cit_test_item_list[0].color = 0x008B45;
-        //                             }
-        //                             else if (strcmp(txt, "FAIL") == 0)
-        //                             {
-        //                                 _win_cit_test_item_list[0].symbol = LV_SYMBOL_CLOSE;
-        //                                 _win_cit_test_item_list[0].color = 0xEE2C2C;
-        //                             }
-
-        //                             self->init_win_cit();
-
-        //                             lv_screen_load_anim(self->_registry.win.cit.root,  LV_SCR_LOAD_ANIM_MOVE_RIGHT, 100, 0, true);
-
-        //                         break;
-        //                         default:
-        //                         break;
-        //                         } }, LV_EVENT_ALL, this);
-
         add_event_cb_win_return_to_cit(_registry.win.cit.version_information_test);
 
         init_status_bar(_registry.win.cit.version_information_test);
@@ -1891,8 +1850,6 @@ namespace Lvgl_Ui
                                         }
                                     } }, LV_EVENT_ALL, this);
 
-        add_win_cit_test_item_pass_fail_button(_registry.win.cit.microphone_test.root);
-
         init_status_bar(_registry.win.cit.microphone_test.root);
 
         lv_obj_update_layout(_registry.win.cit.microphone_test.root);
@@ -2029,8 +1986,6 @@ namespace Lvgl_Ui
                                         }
                                     } }, LV_EVENT_ALL, this);
 
-        add_win_cit_test_item_pass_fail_button(_registry.win.cit.imu_test.root);
-
         init_status_bar(_registry.win.cit.imu_test.root);
 
         lv_obj_update_layout(_registry.win.cit.imu_test.root);
@@ -2070,76 +2025,6 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.cit.battery_health_test.data_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_label_set_text(_registry.win.cit.battery_health_test.data_label, "battery health data:");
         lv_obj_align(_registry.win.cit.battery_health_test.data_label, LV_ALIGN_CENTER, 0, 0);
-
-        // 创建一个容器来存放两个按键
-        lv_obj_t *button_container = lv_obj_create(_registry.win.cit.battery_health_test.root);
-        lv_obj_set_size(button_container, _width, 140);
-        lv_obj_align(button_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-        lv_obj_set_style_bg_color(button_container, lv_color_white(), (lv_style_selector_t)LV_PART_MAIN); // 设置背景颜色为白色
-        lv_obj_set_style_radius(button_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_border_width(button_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
-
-        // 创建PASS按键
-        lv_obj_t *pass_button = lv_button_create(button_container);
-        lv_obj_set_size(pass_button, 200, 60);
-        lv_obj_align(pass_button, LV_ALIGN_LEFT_MID, 10, 0);
-        lv_obj_set_style_radius(pass_button, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_shadow_width(pass_button, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 移除阴影
-
-        lv_obj_t *pass_label = lv_label_create(pass_button);
-        lv_obj_set_style_text_font(pass_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_label_set_text(pass_label, "PASS");
-        lv_obj_center(pass_label);
-
-        lv_obj_add_event_cb(pass_button, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                    _win_cit_test_item_list[self->_registry.win.cit.current_test_item_index].symbol = LV_SYMBOL_OK;
-                                    _win_cit_test_item_list[self->_registry.win.cit.current_test_item_index].color = 0x008B45;
-
-                                    self->init_win_cit();
-
-                                    lv_screen_load_anim(self->_registry.win.cit.root, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 100, 0, true);
-                                    break;
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
-
-        // 创建FAIL按键
-        lv_obj_t *fail_button = lv_button_create(button_container);
-        lv_obj_set_size(fail_button, 200, 60);
-        lv_obj_align(fail_button, LV_ALIGN_RIGHT_MID, -10, 0);
-        lv_obj_set_style_radius(fail_button, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_shadow_width(fail_button, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 移除阴影
-
-        lv_obj_t *fail_label = lv_label_create(fail_button);
-        lv_obj_set_style_text_font(fail_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_label_set_text(fail_label, "FAIL");
-        lv_obj_center(fail_label);
-
-        lv_obj_add_event_cb(fail_button, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-                                    _win_cit_test_item_list[self->_registry.win.cit.current_test_item_index].symbol = LV_SYMBOL_CLOSE;
-                                    _win_cit_test_item_list[self->_registry.win.cit.current_test_item_index].color = 0xEE2C2C;
-
-                                    self->init_win_cit();
-
-                                    lv_screen_load_anim(self->_registry.win.cit.root, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 100, 0, true);
-                                    break;
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
 
         lv_obj_add_event_cb(_registry.win.cit.battery_health_test.root, [](lv_event_t *e)
                             {
@@ -2301,8 +2186,6 @@ namespace Lvgl_Ui
                                         }
                                     } }, LV_EVENT_ALL, this);
 
-        add_win_cit_test_item_pass_fail_button(_registry.win.cit.gps_test.root);
-
         init_status_bar(_registry.win.cit.gps_test.root);
 
         lv_obj_update_layout(_registry.win.cit.gps_test.root);
@@ -2440,8 +2323,6 @@ namespace Lvgl_Ui
                                         }
                                     } }, LV_EVENT_ALL, this);
 
-        add_win_cit_test_item_pass_fail_button(_registry.win.cit.ethernet_test.root);
-
         init_status_bar(_registry.win.cit.ethernet_test.root);
 
         lv_obj_update_layout(_registry.win.cit.ethernet_test.root);
@@ -2481,78 +2362,6 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.cit.rtc_test.data_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_label_set_text(_registry.win.cit.rtc_test.data_label, "rtc data:");
         lv_obj_align(_registry.win.cit.rtc_test.data_label, LV_ALIGN_CENTER, 0, 0);
-
-        // 创建一个容器来存放两个按键
-        lv_obj_t *button_container = lv_obj_create(_registry.win.cit.rtc_test.root);
-        lv_obj_set_size(button_container, _width, 140);
-        lv_obj_align(button_container, LV_ALIGN_BOTTOM_MID, 0, 0);
-        lv_obj_set_style_bg_color(button_container, lv_color_white(), (lv_style_selector_t)LV_PART_MAIN); // 设置背景颜色为白色
-        lv_obj_set_style_radius(button_container, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_border_width(button_container, 0, (lv_style_selector_t)LV_PART_MAIN); // 移除边框
-
-        // 创建PASS按键
-        lv_obj_t *pass_button = lv_button_create(button_container);
-        lv_obj_set_size(pass_button, 200, 60);
-        lv_obj_align(pass_button, LV_ALIGN_LEFT_MID, 10, 0);
-        lv_obj_set_style_radius(pass_button, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_shadow_width(pass_button, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 移除阴影
-
-        lv_obj_t *pass_label = lv_label_create(pass_button);
-        lv_obj_set_style_text_font(pass_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_label_set_text(pass_label, "PASS");
-        lv_obj_center(pass_label);
-
-        lv_obj_add_event_cb(pass_button, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-
-                                    _win_cit_test_item_list[self->_registry.win.cit.current_test_item_index].symbol = LV_SYMBOL_OK;
-                                    _win_cit_test_item_list[self->_registry.win.cit.current_test_item_index].color = 0x008B45;
-
-                                    self->init_win_cit();
-
-                                    lv_screen_load_anim(self->_registry.win.cit.root, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 100, 0, true);
-                                    break;
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
-
-        // 创建FAIL按键
-        lv_obj_t *fail_button = lv_button_create(button_container);
-        lv_obj_set_size(fail_button, 200, 60);
-        lv_obj_align(fail_button, LV_ALIGN_RIGHT_MID, -10, 0);
-        lv_obj_set_style_radius(fail_button, 10, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_obj_set_style_shadow_width(fail_button, 0, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT); // 移除阴影
-
-        lv_obj_t *fail_label = lv_label_create(fail_button);
-        lv_obj_set_style_text_font(fail_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
-        lv_label_set_text(fail_label, "FAIL");
-        lv_obj_center(fail_label);
-
-        lv_obj_add_event_cb(fail_button, [](lv_event_t *e)
-                            {
-                                System *self = static_cast<System *>(lv_event_get_user_data(e));
-                                lv_event_code_t code = lv_event_get_code(e);
-
-                                switch (code)
-                                {
-                                case LV_EVENT_CLICKED:
-
-                                    _win_cit_test_item_list[self->_registry.win.cit.current_test_item_index].symbol = LV_SYMBOL_CLOSE;
-                                    _win_cit_test_item_list[self->_registry.win.cit.current_test_item_index].color = 0xEE2C2C;
-
-                                    self->init_win_cit();
-
-                                    lv_screen_load_anim(self->_registry.win.cit.root, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 100, 0, true);
-                                    break;
-                                default:
-                                    break;
-                                } }, LV_EVENT_ALL, this);
 
         lv_obj_add_event_cb(_registry.win.cit.rtc_test.root, [](lv_event_t *e)
                             {
@@ -2714,8 +2523,6 @@ namespace Lvgl_Ui
                                             self->_edge_touch_flag = false;
                                         }
                                     } }, LV_EVENT_ALL, this);
-
-        add_win_cit_test_item_pass_fail_button(_registry.win.cit.esp32c6_at_test.root);
 
         init_status_bar(_registry.win.cit.esp32c6_at_test.root);
 
@@ -4967,22 +4774,40 @@ namespace Lvgl_Ui
         static const lv_buttonmatrix_ctrl_t kb_ctrl[] =
             {
                 // 字母键盘第一行
-                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
                 LV_BUTTONMATRIX_CTRL_WIDTH_1,
 
                 // 字母键盘第二行
-                LV_BUTTONMATRIX_CTRL_HIDDEN | LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2,
-                LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2,
-                LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_WIDTH_2,
-                LV_BUTTONMATRIX_CTRL_WIDTH_2, LV_BUTTONMATRIX_CTRL_HIDDEN | LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_HIDDEN | LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_HIDDEN | LV_BUTTONMATRIX_CTRL_WIDTH_1,
 
                 // 字母键盘第三行
                 LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2,
-                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_WIDTH_1,
-                LV_BUTTONMATRIX_CTRL_WIDTH_1, LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_WIDTH_1,
+                LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2,
 
                 // 字母键盘第四行
                 LV_BUTTONMATRIX_CTRL_CHECKED | LV_BUTTONMATRIX_CTRL_WIDTH_2, // 键盘切换按钮
