@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-10-16 14:44:17
+ * @LastEditTime: 2025-10-25 17:02:22
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -64,7 +64,7 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 
 ## 模块
 
-### T-Display-P4部分
+### T-Display-P4 部分
 ### 1. 核心处理器
 
 * 芯片：ESP32-P4
@@ -231,7 +231,7 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 * 依赖库：
     >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
 
-### T-Display-P4-Keyboard部分
+### T-Display-P4-Keyboard 部分
 ### 1. 键盘驱动
 
 * 芯片：TCA8418
