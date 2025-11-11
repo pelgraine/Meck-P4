@@ -2,7 +2,7 @@
  * @Description: radiolib_sx1262_send_receive
  * @Author: LILYGO_L
  * @Date: 2025-06-13 14:20:16
- * @LastEditTime: 2025-08-12 16:16:34
+ * @LastEditTime: 2025-11-11 09:12:08
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -46,6 +46,10 @@ extern "C" void app_main(void)
     ESP32P4->pin_mode(SX1262_BUSY, Cpp_Bus_Driver::Tool::Pin_Mode::INPUT, Cpp_Bus_Driver::Tool::Pin_Status ::PULLDOWN);
     XL9535->pin_mode(XL9535_SX1262_DIO1, Cpp_Bus_Driver::Xl95x5::Mode::INPUT);
 
+    // 默认使用RF1天线
+    XL9535->pin_mode(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
+    XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+
     // LORA复位
     XL9535->pin_mode(XL9535_SX1262_RST, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9535->pin_write(XL9535_SX1262_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
@@ -55,7 +59,7 @@ extern "C" void app_main(void)
     XL9535->pin_write(XL9535_SX1262_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    int16_t status = Sx1262.begin(920.0, 125.0, 9, 7, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 22, 8);
+    int16_t status = Sx1262.begin(920.0, 125.0, 12, 7, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 22, 8);
     // int16_t status = Sx1262.beginFSK(850.0, 200.0, 10, 467.0, 22, 16);
     if (status == RADIOLIB_ERR_NONE)
     {
@@ -82,8 +86,6 @@ extern "C" void app_main(void)
 
             printf("SX1262 send package\n");
 
-            Sx1262.finishTransmit();
-
             status = Sx1262.transmit(Send_Package, 9);
             if (status != RADIOLIB_ERR_NONE)
             {
@@ -102,6 +104,8 @@ extern "C" void app_main(void)
             uint8_t receive_package[255] = {0};
             if (Sx1262.readData(receive_package, 9) == RADIOLIB_ERR_NONE)
             {
+                printf("SX1262 rssi: %.2f dBm, snr: %.2f dB\n", Sx1262.getRSSI(), Sx1262.getSNR());
+
                 for (uint8_t i = 0; i < 9; i++)
                 {
                     printf("get SX1262 data[%d]: %d\n", i, receive_package[i]);
