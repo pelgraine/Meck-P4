@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-10-23 10:00:34
+ * @LastEditTime: 2025-11-12 09:46:40
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -1650,30 +1650,20 @@ void device_rf_task(void *arg)
                     {
                         if (XL9535->pin_read(XL9535_SX1262_DIO1) == 1) // 发送完成中断
                         {
-                            // 方法1（速度比方法2快）
-                            //  获取芯片模式状态
-                            //  先前设置发送成功后进入FS模式，所以这里进入FS模式即判断成功发送
-                            if (SX1262->parse_chip_mode_status(SX1262->get_status()) == Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::FS)
+                            // 检查中断
+                            Cpp_Bus_Driver::Sx126x::Irq_Status is;
+                            if (SX1262->parse_irq_status(SX1262->get_irq_flag(), is) == false)
                             {
-                                printf("sx1262 send success\n");
-                                break;
+                                printf("parse_Iqr_status fail\n");
                             }
-
-                            // //方法2（速度比方法1慢）
-                            // // 检查中断
-                            // Cpp_Bus_Driver::Sx126x::Iqr_Status is;
-                            // if (SX1262->parse_irq_status(SX1262->get_irq_status(), is) == false)
-                            // {
-                            //     printf("parse_Iqr_status fail\n");
-                            // }
-                            // else
-                            // {
-                            //     if (is.all_flag.tx_done == true) // 发送完成
-                            //     {
-                            //         printf("sx1262 send success\n");
-                            //         break;
-                            //     }
-                            // }
+                            else
+                            {
+                                if (is.all_flag.tx_done == true) // 发送完成
+                                {
+                                    printf("sx1262 send success\n");
+                                    break;
+                                }
+                            }
                         }
 
                         timeout_count++;
@@ -1761,7 +1751,7 @@ void device_rf_task(void *arg)
                             message_str += '\0';
 
                             char buffer_data_info[30];
-                            snprintf(buffer_data_info, sizeof(buffer_data_info), "rssi[%.01f] snr[%.01f]", pm.lora.rssi_average, pm.lora.snr);
+                            snprintf(buffer_data_info, sizeof(buffer_data_info), "rssi[%.01f] snr[%.01f]", pm.lora.rssi_instantaneous, pm.lora.snr);
 
                             Lvgl_Ui::System::Win_Rf_Chat_Message wlcm =
                                 {
@@ -4520,7 +4510,7 @@ extern "C" void app_main(void)
     Hardware_Usb_Cdc_Init();
 #endif
 
-    XL9535->begin(500000);
+    XL9535->begin();
 
     XL9535->pin_mode(XL9535_SCREEN_RST, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9535->pin_write(XL9535_SCREEN_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);

@@ -2,7 +2,7 @@
  * @Description: sx1262_gfsk_send_receive
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:54:47
- * @LastEditTime: 2025-08-04 14:44:25
+ * @LastEditTime: 2025-11-12 11:28:38
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -144,31 +144,20 @@ extern "C" void app_main(void)
                 {
                     if (XL9535->pin_read(XL9535_SX1262_DIO1) == 1) // 发送完成中断
                     {
-                        // 方法1（速度比方法2快）
-                        //  获取芯片模式状态
-                        //  先前设置发送成功后进入FS模式，所以这里进入FS模式即判断成功发送
-                        if (SX1262->parse_chip_mode_status(SX1262->get_status()) == Cpp_Bus_Driver::Sx126x::Chip_Mode_Status::FS)
+                        // 检查中断
+                        Cpp_Bus_Driver::Sx126x::Irq_Status is;
+                        if (SX1262->parse_irq_status(SX1262->get_irq_flag(), is) == false)
                         {
-                            printf("SX1262 send success\n");
-                            SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TX_DONE);
-                            break;
+                            printf("parse_irq_status fail\n");
                         }
-
-                        // //方法2（速度比方法1慢）
-                        // // 检查中断
-                        // Cpp_Bus_Driver::Sx126x::Iqr_Status is;
-                        // if (SX1262->parse_irq_flag(SX1262->get_irq_flag(), is) == false)
-                        // {
-                        //     printf("parse_irq_flag fail\n");
-                        // }
-                        // else
-                        // {
-                        //     if (is.all_flag.tx_done == true) // 发送完成
-                        //     {
-                        //         printf("SX1262 send success\n");
-                        //         break;
-                        //     }
-                        // }
+                        else
+                        {
+                            if (is.all_flag.tx_done == true) // 发送完成
+                            {
+                                printf("SX1262 send success\n");
+                                break;
+                            }
+                        }
                     }
 
                     timeout_count++;

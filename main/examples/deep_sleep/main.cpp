@@ -824,7 +824,7 @@ extern "C" void app_main(void)
 
     // Hardware_Usb_Cdc_Init();
 
-    XL9535->begin(500000);
+    XL9535->begin();
 
 #if defined USE_SCREEN
     XL9535->pin_mode(XL9535_SCREEN_RST, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
