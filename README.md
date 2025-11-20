@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-10-16 14:44:40
+ * @LastEditTime: 2025-11-20 16:21:25
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -104,7 +104,6 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 > * Operating Temperature: -20～70  ºC
 > * Storage Temperature: -30～80 ºC
 > * Related Documents:  
->    >[H0405S002T002-V0](./information/H0405S002T002-V0_4.05inch_540x1168px_MIPI.pdf)  
 >    >[HI8561](./information/HI8561_Preliminary%20_DS_V0.00_20230511.pdf)  
 
 > #### Model: H0410S001AMT001-V0
@@ -129,7 +128,6 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 > * Operating Temperature: -20～70  ºC
 > * Storage Temperature: -30～80 ºC
 > * Related Documents:  
->    >[H0410S001AMT001-V0](./information/H0410S001AMT001-V0_4.1inch_568X1232px_MIPI_AMOLED.pdf)  
 >    >[RM69A10](./information/RM69A10_DataSheet_V0.2_20230330 (Public version).pdf)  
 >    >[GT9895](./information/GT9895_Datasheet_V1.1.pdf)
 
@@ -164,7 +162,6 @@ The T-Display-P4 is a versatile development board based on the ESP32-P4 core. It
 * Communication Protocol: Standard SPI  
 * Other notes: Use a dedicated RF analog switch to switch the antenna
 * Related Documents:  
-    >[HPD16A](./information/HPDTEK_HPD16A_TCXO_V1.1.pdf)  
     >[SX1261-2](./information/DS_SX1261-2_V2_1.pdf)  
 * Dependent Libraries:  
     >[cpp_bus_driver](https://github.com/Llgok/cpp_bus_driver)  
