@@ -2,7 +2,7 @@
  * @Description: es8311_sd_wav
  * @Author: LILYGO_L
  * @Date: 2025-03-31 15:23:33
- * @LastEditTime: 2025-11-21 14:49:13
+ * @LastEditTime: 2025-11-21 14:50:24
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -18,7 +18,6 @@
 #include "esp_vfs_fat.h"
 #include <fstream>
 
-#define MOUNT_POINT "/sdcard"
 #define SD_FILE_PATH_MUSIC "/sdcard/music.wav"
 
 #define MCLK_MULTIPLE i2s_mclk_multiple_t::I2S_MCLK_MULTIPLE_256
