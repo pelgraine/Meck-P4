@@ -2,7 +2,7 @@
  * @Description: es8311
  * @Author: LILYGO_L
  * @Date: 2024-12-23 15:18:58
- * @LastEditTime: 2025-08-27 17:21:15
+ * @LastEditTime: 2025-11-21 14:36:22
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -108,7 +108,7 @@ extern "C" void app_main(void)
     ES8311->set_adc_pga_gain(Cpp_Bus_Driver::Es8311::Adc_Pga_Gain::GAIN_30DB);
 
     ES8311->set_adc_volume(191);
-    ES8311->set_dac_volume(220);
+    ES8311->set_dac_volume(200);
 
     // 将ADC的数据自动输出到DAC上
     // ES8311->set_adc_data_to_dac(true);
@@ -386,7 +386,7 @@ extern "C" void app_main(void)
     size_t play_count = 1;
 
     // 播放音乐测试
-    ES8311->write_data(c2_b16_s44100, sizeof(c2_b16_s44100));
+    // ES8311->write_data(c2_b16_s44100, sizeof(c2_b16_s44100));
 
     while (1)
     {
