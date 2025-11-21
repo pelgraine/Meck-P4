@@ -2,7 +2,7 @@
  * @Description: es8311_sd_wav
  * @Author: LILYGO_L
  * @Date: 2025-03-31 15:23:33
- * @LastEditTime: 2025-06-13 09:23:23
+ * @LastEditTime: 2025-11-21 14:49:13
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -372,7 +372,7 @@ extern "C" void app_main(void)
         printf("Sdmmc_Init fail\n");
     }
 
-    // if (Sdspi_Init(MOUNT_POINT) == false)
+    // if (Sdspi_Init(SD_BASE_PATH) == false)
     // {
     //     printf("Sdspi_Init fail\n");
     // }
