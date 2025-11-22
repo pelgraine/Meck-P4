@@ -217,9 +217,9 @@ menu "Example Configuration"
                 depends on BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     endchoice
 
-    config ESP_HOSTED_SDIO_GPIO_RESET_SLAVE
-        int "CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE"
-        default -1
-        range -1 -1
+    # config ESP_HOSTED_SDIO_GPIO_RESET_SLAVE
+    #     int "CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE"
+    #     default -1
+    #     range -1 -1
 
 endmenu
