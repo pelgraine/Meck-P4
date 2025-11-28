@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-11-12 09:46:40
+ * @LastEditTime: 2025-11-28 11:16:42
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -878,6 +878,28 @@ void device_vibration_task(void *arg)
                     f0_detection_result = true;
                     break;
                 }
+                else
+                {
+                    // 阈值限定
+                    if (f0_value > AW86224->_f0_value)
+                    {
+                        if ((f0_value - AW86224->_f0_value) <= 1500)
+                        {
+                            f0_detection_result = true;
+                            AW86224->_f0_value = f0_value;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        if ((AW86224->_f0_value - f0_value) <= 1500)
+                        {
+                            f0_detection_result = true;
+                            AW86224->_f0_value = f0_value;
+                            break;
+                        }
+                    }
+                }
 
                 timeout_count++;
                 if (timeout_count > 5)
@@ -976,12 +998,22 @@ void device_microphone_task(void *arg)
             if (esp_log_timestamp() > cycle_time)
             {
                 // 读取麦克风数据
-                int16_t microphone_data[10] = {0};
-                ES8311->read_data(microphone_data, 10 * sizeof(int16_t));
+                int16_t microphone_data[1] = {0};
+                ES8311->read_data(microphone_data, 1 * sizeof(int16_t));
 
-                // 提取10个数据中最大的数据
-                int16_t max_microphone_data = *std::max_element(microphone_data, microphone_data + 10);
-                uint8_t max_microphone_data_percentage = (static_cast<float>(max_microphone_data) / static_cast<float>(32767)) * 100;
+                if (microphone_data[0] < 0)
+                {
+                    continue;
+                }
+
+                int16_t max_microphone_data = microphone_data[0];
+                int16_t max_microphone_data_2 = microphone_data[0];
+
+                if (max_microphone_data >= 1000)
+                {
+                    max_microphone_data_2 = 1000;
+                }
+                uint8_t max_microphone_data_percentage = (static_cast<float>(max_microphone_data_2) / static_cast<float>(1000)) * 100;
 
                 // 将麦克风数据格式化为字符串
                 std::string microphone_data_str = "microphone data: " + std::to_string(max_microphone_data);
@@ -993,7 +1025,7 @@ void device_microphone_task(void *arg)
                 lv_anim_init(&anim);
                 lv_anim_set_var(&anim, System_Ui->_registry.win.cit.microphone_test.needle_line);
                 lv_anim_set_values(&anim, System_Ui->_registry.win.cit.microphone_test.data.value_percentage, max_microphone_data_percentage);
-                lv_anim_set_time(&anim, 100); // Animation duration in milliseconds
+                lv_anim_set_time(&anim, 300); // Animation duration in milliseconds
                 lv_anim_set_exec_cb(&anim, [](void *needle, int32_t value)
                                     { lv_scale_set_line_needle_value(System_Ui->_registry.win.cit.microphone_test.scale_line,
                                                                      (lv_obj_t *)needle, 150, value); });
