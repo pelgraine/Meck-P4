@@ -2,7 +2,7 @@
  * @Description: screen_lvgl
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:31:49
- * @LastEditTime: 2025-10-10 15:34:17
+ * @LastEditTime: 2025-12-02 11:05:11
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -237,7 +237,7 @@ extern "C" void app_main(void)
 #if CONFIG_ENABLE_USB_DISPLAY == true
 #else
 #if defined CONFIG_SCREEN_TYPE_HI8561
-    HI8561_T->start_pwm_gradient_time(100, 500);
+    ESP32P4->start_pwm_gradient_time(100, 500);
 #elif defined CONFIG_SCREEN_TYPE_RM69A10
     for (uint8_t i = 0; i < 255; i += 5)
     {
