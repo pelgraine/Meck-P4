@@ -2,7 +2,7 @@
  * @Description: screen_camera
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:45:00
- * @LastEditTime: 2025-10-23 09:59:42
+ * @LastEditTime: 2025-12-04 13:34:19
  * @License: GPL 3.0
  */
 #include "esp_video_init.h"
@@ -377,7 +377,7 @@ extern "C" void app_main(void)
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-    Init_Ldo_Channel_Power(3, 1800);
+    Init_Ldo_Channel_Power(3, 1830);
 
     vTaskDelay(pdMS_TO_TICKS(100));
 

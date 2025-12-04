@@ -334,7 +334,7 @@ static esp_err_t csi_video_init(struct esp_video *video)
     };
     struct csi_video *csi_video = VIDEO_PRIV_DATA(struct csi_video *, video);
 
-    ESP_RETURN_ON_ERROR(esp_ldo_acquire_channel(&ldo_cfg, &csi_video->ldo_handle), TAG, "failed to init LDO");
+    // ESP_RETURN_ON_ERROR(esp_ldo_acquire_channel(&ldo_cfg, &csi_video->ldo_handle), TAG, "failed to init LDO");
 
     ESP_GOTO_ON_ERROR(esp_cam_sensor_set_format(csi_video->cam_dev, NULL), fail_0, TAG, "failed to set basic format");
     ESP_GOTO_ON_ERROR(init_config(video), fail_0, TAG, "failed to initialize config");

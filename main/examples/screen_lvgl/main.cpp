@@ -211,7 +211,7 @@ extern "C" void app_main(void)
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-    Init_Ldo_Channel_Power(3, 1800);
+    Init_Ldo_Channel_Power(3, 1830);
 
 #if CONFIG_ENABLE_USB_DISPLAY == true
     Usb_Screen_Init(&Screen_Mipi_Dpi_Panel);

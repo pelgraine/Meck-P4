@@ -156,7 +156,7 @@ extern "C" void app_main(void)
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-    Init_Ldo_Channel_Power(3, 1800);
+    Init_Ldo_Channel_Power(3, 1830);
 
     vTaskDelay(pdMS_TO_TICKS(100));
 

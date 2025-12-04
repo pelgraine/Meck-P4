@@ -374,7 +374,7 @@ extern "C" void app_main(void)
     XL9535->pin_write(XL9535_3_3_V_POWER_EN, Cpp_Bus_Driver::Xl95x5::Value::LOW);
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    Init_Ldo_Channel_Power(3, 1800);
+    Init_Ldo_Channel_Power(3, 1830);
 
 #if CONFIG_ENABLE_USB_DISPLAY == true
     Usb_Screen_Init(&Screen_Mipi_Dpi_Panel);
