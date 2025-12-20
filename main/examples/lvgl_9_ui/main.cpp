@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-12-08 14:26:32
+ * @LastEditTime: 2025-12-20 17:54:18
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -33,7 +33,7 @@
 #include "lvgl_ui.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "esp_vfs_fat.h"
-#include "c2_b16_s44100.h"
+#include "New Notification 010_c2_b16_s44100.h"
 #include "ICM20948_WE.h"
 #include "esp_netif.h"
 #include "esp_eth.h"
@@ -50,7 +50,7 @@
 #include "esp_private/esp_cache_private.h"
 #include <fstream>
 
-#define SD_FILE_PATH_MUSIC "/sdcard/t_display_p4_lvgl_9_ui_resource/music/Eagles - Hotel California (Live on MTV, 1994).wav"
+#define SD_FILE_PATH_MUSIC "/sdcard/t_display_p4_lvgl_9_ui_resource/music/Erik Satie-Gymnopedie 1-Chase Coleman (piano).wav"
 
 #define LVGL_TICK_PERIOD_MS 1
 

@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-12-08 14:26:43
+ * @LastEditTime: 2025-12-20 17:41:03
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -93,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202512081426"},
+            {"firmware build date:\n     ", "202512201556"},
     };
 
     void System::begin()
@@ -1406,83 +1406,29 @@ namespace Lvgl_Ui
         const uint32_t color_list[4] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF};
         lv_obj_add_event_cb(_registry.win.cit.screen_color_test.start_color_test, [](lv_event_t *e)
                             {
-            System *self = static_cast<System *>(lv_event_get_user_data(e));
-            lv_event_code_t code = lv_event_get_code(e);
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                lv_event_code_t code = lv_event_get_code(e);
 
-            switch (code)
-            {
-            case LV_EVENT_CLICKED:
-                self->_registry.win.cit.screen_color_test.color_change_count++;
+                                switch (code)
+                                {
+                                case LV_EVENT_CLICKED:
+                                    self->_registry.win.cit.screen_color_test.color_change_count++;
 
-                switch (self->_registry.win.cit.screen_color_test.color_change_count)
-                {
-                case 1:
-                    lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x00FF00), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-                case 2:
-                    lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x00FF00), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-                case 3:
-                    lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x0000FF), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-                case 4:
-                    lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0xFFFFFF), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-#if defined SCREEN_ROTATION_DIRECTION_0
-#if defined CONFIG_SCREEN_TYPE_HI8561
-                case 5:
-                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-                case 6:
-                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-                case 7:
-                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_540x1168px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-#elif defined CONFIG_SCREEN_TYPE_RM69A10
-                case 5:
-                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-                case 6:
-                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-                case 7:
-                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_568x1232px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                    break;
-#else
-#error "unknown macro definition, please select the correct macro definition."
-#endif
-
-#elif defined SCREEN_ROTATION_DIRECTION_90
-#if defined CONFIG_SCREEN_TYPE_HI8561
+                                    switch (self->_registry.win.cit.screen_color_test.color_change_count)
+                                    {
+                                    case 1:
+                                        lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x00FF00), (lv_style_selector_t)LV_PART_MAIN);
+                                        break;
+                                    case 2:
+                                        lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x00FF00), (lv_style_selector_t)LV_PART_MAIN);
+                                        break;
+                                    case 3:
+                                        lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0x0000FF), (lv_style_selector_t)LV_PART_MAIN);
+                                        break;
+                                    case 4:
+                                        lv_obj_set_style_bg_color(self->_registry.win.cit.screen_color_test.start_color_test, lv_color_hex(0xFFFFFF), (lv_style_selector_t)LV_PART_MAIN);
+                                        break;
                                     case 5:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_1168x540px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-                                    case 6:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_1168x540px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-                                    case 7:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_1168x540px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-#elif defined CONFIG_SCREEN_TYPE_RM69A10
-                                    case 5:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_2_1232x568px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-                                    case 6:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_3_1232x568px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-                                    case 7:
-                                    lv_obj_set_style_bg_image_src(self->_registry.win.cit.screen_color_test.start_color_test, GET_WALLPAPER_PATH("wallpaper_4_1232x568px.png"), (lv_style_selector_t)LV_PART_MAIN);
-                                    break;
-#else
-#error "unknown macro definition, please select the correct macro definition."
-#endif
-
-#else
-#error "unknown macro definition, please select the correct macro definition."
-#endif
-
-                                    case 8:
                                         self->init_win_cit_screen_color_test();
 
                                         lv_screen_load_anim(self->_registry.win.cit.screen_color_test.root, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 100, 0, true);
@@ -4404,7 +4350,7 @@ namespace Lvgl_Ui
         lv_obj_set_scrollbar_mode(_registry.win.music.root, LV_SCROLLBAR_MODE_OFF);
 
         lv_obj_t *song_name_btn = lv_button_create(_registry.win.music.root);
-        lv_obj_set_size(song_name_btn, 270, 60);
+        lv_obj_set_size(song_name_btn, 260, 60);
         lv_obj_set_style_radius(song_name_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_color(song_name_btn, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_opa(song_name_btn, 60, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -4418,14 +4364,14 @@ namespace Lvgl_Ui
 #endif
 
         lv_obj_t *song_name_label = lv_label_create(song_name_btn);
-        lv_label_set_text(song_name_label, "Hotel California");
+        lv_label_set_text(song_name_label, "Gymnopedie 1");
         lv_obj_set_style_text_color(song_name_label, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_text_font(song_name_label, &lvgl_font_misans_bold_27, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_text_align(song_name_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_center(song_name_label);
 
         lv_obj_t *artist_btn = lv_button_create(_registry.win.music.root);
-        lv_obj_set_size(artist_btn, 130, 50);
+        lv_obj_set_size(artist_btn, 170, 50);
         lv_obj_set_style_radius(artist_btn, LV_RADIUS_CIRCLE, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_color(artist_btn, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_bg_opa(artist_btn, 60, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -4433,7 +4379,7 @@ namespace Lvgl_Ui
         lv_obj_align_to(artist_btn, song_name_btn, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
 
         lv_obj_t *artist_label = lv_label_create(artist_btn);
-        lv_label_set_text(artist_label, "Eagles");
+        lv_label_set_text(artist_label, "Erik Satie");
         lv_obj_set_style_text_color(artist_label, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_text_font(artist_label, &lv_font_montserrat_26, LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_obj_set_style_text_align(song_name_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);

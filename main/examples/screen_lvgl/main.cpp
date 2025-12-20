@@ -2,7 +2,7 @@
  * @Description: screen_lvgl
  * @Author: LILYGO_L
  * @Date: 2025-06-13 11:31:49
- * @LastEditTime: 2025-12-06 11:57:27
+ * @LastEditTime: 2025-12-20 16:17:26
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -26,6 +26,7 @@
 #if CONFIG_ENABLE_USB_DISPLAY == true
 #include "esp_lcd_usb_display.h"
 #endif
+#include <cmath>
 
 #define LVGL_TICK_PERIOD_MS 1
 
@@ -164,6 +165,224 @@ bool Usb_Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
 }
 #endif
 
+void color_grid_buffer(void *buffer, int buffer_width, int buffer_height, int pixel_format, int color_segments)
+{
+    if (!buffer || buffer_width <= 0 || buffer_height <= 0)
+    {
+        printf("color_grid_buffer fail\n");
+        return;
+    }
+
+    // 设置默认值
+    if (color_segments <= 0)
+    {
+        color_segments = 8;
+    }
+
+    // 确保颜色分段数不超过屏幕高度
+    if (color_segments > buffer_height)
+    {
+        color_segments = buffer_height;
+    }
+
+    // 计算垂直方向每个颜色块的高度
+    int block_height = buffer_height / color_segments;
+    if (block_height < 1)
+        block_height = 1;
+
+    // 计算垂直方向需要多少个块
+    int blocks_y = (buffer_height + block_height - 1) / block_height;
+    int blocks_x = 1; // 垂直排列，水平方向只有1个块
+
+    // 计算缓冲区跨距（stride）
+    int buffer_stride = 0;
+    if (pixel_format == 2) // RGB565
+    {
+        buffer_stride = buffer_width * 2;
+    }
+    else if (pixel_format == 3) // RGB888
+    {
+        buffer_stride = buffer_width * 3;
+    }
+    else
+    {
+        printf("unsupported pixel format: %d\n", pixel_format);
+        return;
+    }
+
+    // HSV到RGB的转换函数
+    auto hsv_to_rgb = [](float h, float s, float v) -> std::tuple<uint8_t, uint8_t, uint8_t>
+    {
+        h = fmod(h, 360.0f);
+        if (h < 0)
+            h += 360.0f;
+
+        float c = v * s;
+        float x = c * (1.0f - fabs(fmod(h / 60.0f, 2.0f) - 1.0f));
+        float m = v - c;
+
+        float r = 0, g = 0, b = 0;
+
+        if (h < 60)
+        {
+            r = c;
+            g = x;
+            b = 0;
+        }
+        else if (h < 120)
+        {
+            r = x;
+            g = c;
+            b = 0;
+        }
+        else if (h < 180)
+        {
+            r = 0;
+            g = c;
+            b = x;
+        }
+        else if (h < 240)
+        {
+            r = 0;
+            g = x;
+            b = c;
+        }
+        else if (h < 300)
+        {
+            r = x;
+            g = 0;
+            b = c;
+        }
+        else
+        {
+            r = c;
+            g = 0;
+            b = x;
+        }
+
+        return std::make_tuple(
+            static_cast<uint8_t>((r + m) * 255),
+            static_cast<uint8_t>((g + m) * 255),
+            static_cast<uint8_t>((b + m) * 255));
+    };
+
+    if (pixel_format == 2)
+    {
+        // RGB565模式
+        uint16_t *p = (uint16_t *)buffer;
+
+        // 使用智能指针分配颜色查找表
+        auto color_lut = std::make_unique<uint16_t[]>(blocks_y);
+
+        // 生成颜色查找表 - 垂直方向颜色渐变
+        // 色相从0到360度均匀分布
+        // 饱和度S=100%，亮度V=100%
+        for (int by = 0; by < blocks_y; by++)
+        {
+            // 计算色相值：从0到360度均匀分布
+            // 最顶部的块色相值为0，最底部的块色相值为360
+            float hue = 0.0f;
+            if (blocks_y > 1)
+            {
+                hue = (static_cast<float>(by) / (blocks_y - 1)) * 360.0f;
+            }
+
+            // 固定饱和度和亮度为100%
+            float saturation = 1.0f;
+            float value = 1.0f;
+
+            // 转换为RGB
+            auto [r, g, b] = hsv_to_rgb(hue, saturation, value);
+
+            // 转换为RGB565格式
+            uint16_t rgb565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+            color_lut[by] = rgb565;
+        }
+
+        // 填充整个缓冲区
+        for (int y = 0; y < buffer_height; y++)
+        {
+            int block_y = y / block_height;
+            if (block_y >= blocks_y)
+                block_y = blocks_y - 1;
+
+            uint16_t *row_ptr = (uint16_t *)((uint8_t *)buffer + y * buffer_stride);
+
+            // 获取当前行的颜色值
+            uint16_t color = color_lut[block_y];
+
+            // 填充一整行相同的颜色
+            for (int x = 0; x < buffer_width; x++)
+            {
+                row_ptr[x] = color;
+            }
+        }
+    }
+    else if (pixel_format == 3)
+    {
+        // RGB888模式
+        uint8_t *p = (uint8_t *)buffer;
+
+        // 使用智能指针分配颜色查找表
+        auto color_lut_r = std::make_unique<uint8_t[]>(blocks_y);
+        auto color_lut_g = std::make_unique<uint8_t[]>(blocks_y);
+        auto color_lut_b = std::make_unique<uint8_t[]>(blocks_y);
+
+        // 生成颜色查找表 - 垂直方向颜色渐变
+        // 色相从0到360度均匀分布
+        // 饱和度S=100%，亮度V=100%
+        for (int by = 0; by < blocks_y; by++)
+        {
+            // 计算色相值：从0到360度均匀分布
+            // 最顶部的块色相值为0，最底部的块色相值为360
+            float hue = 0.0f;
+            if (blocks_y > 1)
+            {
+                hue = (static_cast<float>(by) / (blocks_y - 1)) * 360.0f;
+            }
+
+            // 固定饱和度和亮度为100%
+            float saturation = 1.0f;
+            float value = 1.0f;
+
+            // 转换为RGB
+            auto [r, g, b] = hsv_to_rgb(hue, saturation, value);
+
+            color_lut_r[by] = r;
+            color_lut_g[by] = g;
+            color_lut_b[by] = b;
+        }
+
+        // 填充整个缓冲区
+        for (int block_y_idx = 0; block_y_idx < blocks_y; block_y_idx++)
+        {
+            int start_y = block_y_idx * block_height;
+            int end_y = (block_y_idx + 1) * block_height;
+            if (end_y > buffer_height)
+                end_y = buffer_height;
+
+            // 获取当前块的颜色
+            uint8_t r = color_lut_r[block_y_idx];
+            uint8_t g = color_lut_g[block_y_idx];
+            uint8_t b = color_lut_b[block_y_idx];
+
+            // 填充整个块（多个水平行）
+            for (int y = start_y; y < end_y; y++)
+            {
+                uint8_t *row_ptr = p + y * buffer_stride;
+
+                // 填充一整行相同的颜色
+                for (int x = 0; x < buffer_width; x++)
+                {
+                    *row_ptr++ = r;
+                    *row_ptr++ = g;
+                    *row_ptr++ = b;
+                }
+            }
+        }
+    }
+}
+
 extern "C" void app_main(void)
 {
     printf("Ciallo\n");
@@ -226,14 +445,26 @@ extern "C" void app_main(void)
         printf("esp_lcd_panel_init fail (error code: %#X)\n", assert);
     }
 
-    Lvgl_Init();
-    xTaskCreate(lvgl_ui_task, "lvgl_ui_task", 100 * 1024, NULL, 1, NULL);
+    size_t screen_size = SCREEN_WIDTH * SCREEN_HEIGHT * SCREEN_BITS_PER_PIXEL / 8;
+    size_t data_cache_line_size = 16;
+    void *color_buf = heap_caps_aligned_calloc(data_cache_line_size, 1, screen_size, MALLOC_CAP_SPIRAM);
+    if (color_buf != nullptr)
+    {
+        color_grid_buffer(color_buf, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_BITS_PER_PIXEL / 8, SCREEN_HEIGHT);
 
-    // for (uint8_t i = 0; i < 100; i++)
-    // {
-    //     ESP32P4->set_pwm_duty(i);
-    //     vTaskDelay(pdMS_TO_TICKS(10));
-    // }
+        esp_err_t err = esp_lcd_panel_draw_bitmap(Screen_Mipi_Dpi_Panel, 0, 0,
+                                                  SCREEN_WIDTH, SCREEN_HEIGHT, color_buf);
+        if (err != ESP_OK)
+        {
+            printf("esp_lcd_panel_draw_bitmap fail (error code: %#X)\n", err);
+        }
+
+        heap_caps_free(color_buf);
+    }
+    else
+    {
+        printf("heap_caps_aligned_calloc fail\n");
+    }
 
 #if CONFIG_ENABLE_USB_DISPLAY == true
 #else
@@ -249,4 +480,15 @@ extern "C" void app_main(void)
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 #endif
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    Lvgl_Init();
+    xTaskCreate(lvgl_ui_task, "lvgl_ui_task", 100 * 1024, NULL, 1, NULL);
+
+    // for (uint8_t i = 0; i < 100; i++)
+    // {
+    //     ESP32P4->set_pwm_duty(i);
+    //     vTaskDelay(pdMS_TO_TICKS(10));
+    // }
 }

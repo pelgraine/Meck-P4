@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-09-25 17:00:37
+ * @LastEditTime: 2025-12-20 16:17:51
  * @License: GPL 3.0
  */
 #pragma once
@@ -40,8 +40,6 @@ namespace Lvgl_Ui
 #define RESOURCE_ROOT_DIRECTORY "A:" SD_BASE_PATH "/t_display_p4_lvgl_9_ui_resource/"
 #define GET_PATH(path) RESOURCE_ROOT_DIRECTORY path
 #define GET_WALLPAPER_PATH(path) GET_PATH("wallpaper/") path
-#define GET_MUSIC_PATH(path) GET_PATH("music/") path
-#define GET_MUSIC_COVER_PATH(path) GET_PATH("music cover/") path
 
 #define APP_STYLE_ICON_WIDTH_HEIGHT 110 // 应用图标尺寸 对应图标图片像素的大小
 

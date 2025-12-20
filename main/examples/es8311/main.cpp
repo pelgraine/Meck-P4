@@ -2,7 +2,7 @@
  * @Description: es8311
  * @Author: LILYGO_L
  * @Date: 2024-12-23 15:18:58
- * @LastEditTime: 2025-11-21 14:36:22
+ * @LastEditTime: 2025-12-20 15:45:13
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -13,7 +13,7 @@
 #include "sdkconfig.h"
 #include "t_display_p4_config.h"
 #include "cpp_bus_driver_library.h"
-#include "c2_b16_s44100.h"
+#include "New Notification 010_c2_b16_s44100.h"
 
 #define MCLK_MULTIPLE i2s_mclk_multiple_t::I2S_MCLK_MULTIPLE_256
 #define SAMPLE_RATE 44100
