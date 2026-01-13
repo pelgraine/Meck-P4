@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2025-06-13 15:12:02
- * @LastEditTime: 2025-11-20 16:21:07
+ * @LastEditTime: 2026-01-13 17:59:30
  * @License: GPL 3.0
 -->
 <h1 align = "center">T-Display-P4</h1>
@@ -292,6 +292,13 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
     >[ST25R3916](https://github.com/stm32duino/ST25R3916)  
     >[NFC-RFAL](https://github.com/stm32duino/NFC-RFAL)
 
+### 7. 充电芯片
+
+* 芯片：BQ25896
+* 通信协议：IIC
+* 相关资料：
+    >[BQ25896](./information/bq25896.pdf)
+
 ## 软件部署
 
 ### 示例支持
@@ -334,6 +341,7 @@ T-Display-P4是基于ESP32-P4核心开发的多功能板，该产品的特点包
 | [st25r3916](./main/keyboard_examples/st25r3916) |  <p align="center">![alt text][supported] | | |
 | [tca8418](./main/keyboard_examples/tca8418) |  <p align="center">![alt text][supported] | | |
 | [xl9555](./main/keyboard_examples/xl9555) |  <p align="center">![alt text][supported] | | |
+| [bq25896](./main/keyboard_examples/bq25896) |  <p align="center">![alt text][supported] | | |
 
 [supported]: https://img.shields.io/badge/-supported-green "example"
 

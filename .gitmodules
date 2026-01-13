@@ -19,3 +19,6 @@
 [submodule "components/RadioLib"]
 	path = components/RadioLib
 	url = https://github.com/jgromes/RadioLib.git
+[submodule "components/kode_bq25896"]
+	path = components/kode_bq25896
+	url = https://github.com/Llgok/kode_bq25896.git

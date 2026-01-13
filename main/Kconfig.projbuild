@@ -215,6 +215,9 @@ menu "Example Configuration"
             config EXAMPLE_BUILD_SCREEN_TCA8418_LVGL_TOUCH_DRAW
                 bool "screen_tca8418_lvgl_touch_draw"
                 depends on BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+            config EXAMPLE_BUILD_BQ25896
+                bool "bq25896"
+                depends on BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     endchoice
 
     # config ESP_HOSTED_SDIO_GPIO_RESET_SLAVE

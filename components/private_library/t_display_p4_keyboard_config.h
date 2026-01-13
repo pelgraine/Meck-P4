@@ -2,7 +2,7 @@
  * @Description: t_display_p4_keyboard_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2025-09-11 15:16:30
+ * @LastEditTime: 2026-01-13 11:45:18
  */
 #pragma once
 #include "t_display_p4_config.h"
@@ -67,6 +67,10 @@
 #define T_MIXRF_LR1121_SCLK EXT_2X8P_SPI_SCLK
 #define T_MIXRF_LR1121_MOSI EXT_2X8P_SPI_MOSI
 #define T_MIXRF_LR1121_MISO EXT_2X8P_SPI_MISO
+
+// BQ25896
+#define BQ25896_SDA IIC_3_SDA
+#define BQ25896_SCL IIC_3_SCL
 
 ////////////////////////////////////////////////// gpio config //////////////////////////////////////////////////
 
