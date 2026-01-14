@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-12-20 17:41:03
+ * @LastEditTime: 2026-01-14 13:33:24
  * @License: GPL 3.0
  */
 #include "lvgl_ui.h"
@@ -93,7 +93,7 @@ namespace Lvgl_Ui
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
-            {"firmware build date:\n     ", "202512201556"},
+            {"firmware build date:\n     ", "202601141333"},
     };
 
     void System::begin()
@@ -1971,6 +1971,50 @@ namespace Lvgl_Ui
         lv_obj_set_style_text_font(_registry.win.cit.battery_health_test.data_label, &lv_font_montserrat_24, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
         lv_label_set_text(_registry.win.cit.battery_health_test.data_label, "battery health data:");
         lv_obj_align(_registry.win.cit.battery_health_test.data_label, LV_ALIGN_CENTER, 0, 0);
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+
+        _registry.win.cit.battery_health_test.otg_label = lv_label_create(container);
+        lv_label_set_text(_registry.win.cit.battery_health_test.otg_label, "OTG");
+        lv_obj_set_style_text_font(_registry.win.cit.battery_health_test.otg_label, &lv_font_montserrat_26, (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(_registry.win.cit.battery_health_test.otg_label, lv_color_black(), (lv_style_selector_t)LV_PART_MAIN | (lv_style_selector_t)LV_STATE_DEFAULT);
+        lv_obj_align_to(_registry.win.cit.battery_health_test.otg_label, _registry.win.cit.battery_health_test.data_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+
+        _registry.win.cit.battery_health_test.otg_switch = lv_switch_create(container);
+        lv_obj_set_size(_registry.win.cit.battery_health_test.otg_switch, 90, 50);
+        lv_obj_align_to(_registry.win.cit.battery_health_test.otg_switch, _registry.win.cit.battery_health_test.otg_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+
+        if (_registry.win.cit.battery_health_test.otg_switch_status == true)
+        {
+            lv_obj_add_state(_registry.win.cit.battery_health_test.otg_switch, LV_STATE_CHECKED);
+
+            set_otg_switch_status(true);
+        }
+        else
+        {
+            lv_obj_remove_state(_registry.win.cit.battery_health_test.otg_switch, LV_STATE_CHECKED);
+
+            set_otg_switch_status(false);
+        }
+
+        lv_obj_add_flag(_registry.win.cit.battery_health_test.otg_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(_registry.win.cit.battery_health_test.otg_switch, LV_OBJ_FLAG_HIDDEN);
+
+        lv_obj_add_event_cb(_registry.win.cit.battery_health_test.otg_switch, [](lv_event_t *e)
+                            {
+                                System *self = static_cast<System *>(lv_event_get_user_data(e));
+                                self->_registry.win.cit.battery_health_test.otg_switch_status = lv_obj_has_state(self->_registry.win.cit.battery_health_test.otg_switch, LV_STATE_CHECKED);
+
+                                if (self->_registry.win.cit.battery_health_test.otg_switch_status == true)
+                                {
+                                    self->set_otg_switch_status(true);
+                                }
+                                else
+                                {
+                                    self->set_otg_switch_status(false);
+                                } }, LV_EVENT_VALUE_CHANGED, this);
+
+#endif
 
         lv_obj_add_event_cb(_registry.win.cit.battery_health_test.root, [](lv_event_t *e)
                             {
@@ -6058,6 +6102,14 @@ namespace Lvgl_Ui
         }
 
         return false;
+    }
+
+    void System::set_otg_switch_status(bool status)
+    {
+        if (_win_cit_otg_switch_callback != nullptr)
+        {
+            _win_cit_otg_switch_callback(status);
+        }
     }
 
 #endif

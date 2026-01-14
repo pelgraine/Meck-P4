@@ -2,7 +2,7 @@
  * @Description: t_display_p4_keyboard_config
  * @Author: LILYGO_L
  * @Date: 2024-12-06 10:32:28
- * @LastEditTime: 2026-01-13 11:45:18
+ * @LastEditTime: 2026-01-14 13:36:31
  */
 #pragma once
 #include "t_display_p4_config.h"
@@ -162,5 +162,8 @@ constexpr const uint32_t Tca8418_Map_Lvgl_Shift[] =
         0xA3,
         ')',
         0xA4};
+
+// BQ25896
+#define BQ25896_IIC_ADDRESS 0x6B
 
 ////////////////////////////////////////////////// other define config //////////////////////////////////////////////////

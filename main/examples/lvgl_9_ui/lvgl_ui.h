@@ -2,7 +2,7 @@
  * @Description: None
  * @Author: LILYGO_L
  * @Date: 2024-11-28 17:07:50
- * @LastEditTime: 2025-12-20 16:17:51
+ * @LastEditTime: 2026-01-14 11:11:47
  * @License: GPL 3.0
  */
 #pragma once
@@ -133,7 +133,7 @@ namespace Lvgl_Ui
             {
                 lv_obj_t *message_box;
 
-                //占用标志，用于判断该消息框是否被占用
+                // 占用标志，用于判断该消息框是否被占用
                 bool occupancy_flag = false;
 
                 size_t system_message_height = 0;
@@ -228,6 +228,12 @@ namespace Lvgl_Ui
                     {
                         lv_obj_t *root;
                         lv_obj_t *data_label;
+
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                        lv_obj_t *otg_label;
+                        bool otg_switch_status = false;
+                        lv_obj_t *otg_switch;
+#endif
                     } battery_health_test;
 
                     struct
@@ -606,6 +612,10 @@ namespace Lvgl_Ui
 
         void (*_set_music_current_time_s_callback)(double current_time_s) = nullptr;
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+        void (*_win_cit_otg_switch_callback)(bool status) = nullptr;
+#endif
+
         System(uint32_t width, uint32_t height)
             : _width(width), _height(height)
         {
@@ -716,6 +726,8 @@ namespace Lvgl_Ui
 
         bool set_config_rf_params(Device_Cc1101 device_cc1101);
         bool set_config_rf_params(Device_Nrf24l01 device_nrf24l01);
+
+        void set_otg_switch_status(bool status);
 #endif
     };
 

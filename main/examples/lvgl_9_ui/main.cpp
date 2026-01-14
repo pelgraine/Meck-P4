@@ -2,7 +2,7 @@
  * @Description: lvgl_9_ui
  * @Author: LILYGO_L
  * @Date: 2025-06-13 13:34:16
- * @LastEditTime: 2025-12-20 17:54:18
+ * @LastEditTime: 2026-01-14 11:27:43
  * @License: GPL 3.0
  */
 #include <stdio.h>
@@ -29,6 +29,7 @@
 #include "st25r3916_driver.h"
 #include "RadioLib.h"
 #include "radiolib_bridge_driver.h"
+#include "kode_bq25896.h"
 #endif
 #include "lvgl_ui.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
@@ -192,6 +193,11 @@ struct System_Status
     {
         bool init_flag = false;
     } nrf24l01;
+
+    struct
+    {
+        bool init_flag = false;
+    } bq25896;
 #endif
 
     struct
@@ -397,9 +403,13 @@ TaskHandle_t Nfc_Task_Handle = NULL;
 
 Nfc_Mode St25r3916_Nfc_Mode = Nfc_Mode::TEST;
 
+auto Bq25896_Dev = std::make_shared<Kode_Bq25896::bq25896_dev_t>();
+Kode_Bq25896::bq25896_handle_t Bq25896_Handle = Bq25896_Dev.get();
+
 //  Software IIC
 auto XL9555_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA, XL9555_SCL);
 auto TCA8418_IIC_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SDA, TCA8418_SCL);
+auto Bq25896_Iic_Bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(BQ25896_SDA, BQ25896_SCL);
 
 // SPI
 auto Cc1101_SPI_Bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(T_MIXRF_CC1101_MOSI, T_MIXRF_CC1101_SCLK, T_MIXRF_CC1101_MISO, SPI2_HOST, 0);
@@ -1133,7 +1143,9 @@ void device_battery_health_task(void *arg)
             case Lvgl_Ui::System::Current_Win::CIT_BATTERY_HEALTH_TEST:
             {
                 // 将电池数据格式化为字符串
-                std::string battery_health_data_str = "battery health data:\n";
+                std::string battery_health_data_str = "battery health data:\n\n";
+                
+                battery_health_data_str += "bq27220 data:\n";
                 battery_health_data_str += "device id: " + std::to_string(BQ27220->get_device_id()) + "\n\n";
 
                 battery_health_data_str += "design capacity: " + std::to_string(BQ27220->get_design_capacity()) + " mah\n";
@@ -1148,11 +1160,11 @@ void device_battery_health_task(void *arg)
 
                 battery_health_data_str += "voltage: " + std::to_string(BQ27220->get_voltage()) + " mv\n";
                 battery_health_data_str += "current: " + std::to_string(BQ27220->get_current()) + " ma\n";
-                battery_health_data_str += "charging voltage: " + std::to_string(BQ27220->get_charging_voltage()) + " mv\n";
-                battery_health_data_str += "charging current: " + std::to_string(BQ27220->get_charging_current()) + " ma\n";
-                battery_health_data_str += "standby current: " + std::to_string(BQ27220->get_standby_current()) + " ma\n";
-                battery_health_data_str += "max load current: " + std::to_string(BQ27220->get_max_load_current()) + " ma\n";
-                battery_health_data_str += "average power: " + std::to_string(BQ27220->get_average_power()) + " mw\n\n";
+                // battery_health_data_str += "charging voltage: " + std::to_string(BQ27220->get_charging_voltage()) + " mv\n";
+                // battery_health_data_str += "charging current: " + std::to_string(BQ27220->get_charging_current()) + " ma\n";
+                // battery_health_data_str += "standby current: " + std::to_string(BQ27220->get_standby_current()) + " ma\n";
+                // battery_health_data_str += "max load current: " + std::to_string(BQ27220->get_max_load_current()) + " ma\n";
+                // battery_health_data_str += "average power: " + std::to_string(BQ27220->get_average_power()) + " mw\n\n";
 
                 battery_health_data_str += "chip temperature: " + std::to_string(BQ27220->get_chip_temperature_celsius()) + " °c\n\n";
                 // battery_health_data_str += "ntc temperature: " + std::to_string(BQ27220->get_temperature_celsius()) + " °c\n\n";
@@ -1180,10 +1192,102 @@ void device_battery_health_task(void *arg)
                     battery_health_data_str += "discharge flag: " + std::to_string(bs.flag.dsg) + "\n";
                 }
 
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+
+                battery_health_data_str += "\nbq25896 data:\n";
+                uint8_t part_number = 0;
+                Kode_Bq25896::bq25896_get_part_number(Bq25896_Handle, &part_number);
+                battery_health_data_str += "device id: " + std::to_string(part_number) + "\n\n";
+
+                Kode_Bq25896::bq25896_vbus_stat_t vbus_stat;
+                Kode_Bq25896::bq25896_get_vbus_status(Bq25896_Handle, &vbus_stat);
+                switch (vbus_stat)
+                {
+                case Kode_Bq25896::BQ25896_VBUS_STAT_NO_INPUT:
+                    battery_health_data_str += "vbus status: no input\n";
+                    break;
+                case Kode_Bq25896::BQ25896_VBUS_STAT_USB_HOST:
+                    battery_health_data_str += "vbus status: usb host sdp\n";
+                    break;
+                case Kode_Bq25896::BQ25896_VBUS_STAT_ADAPTER:
+                    battery_health_data_str += "vbus status: adapter (3.25a)\n";
+                    break;
+                case Kode_Bq25896::BQ25896_VBUS_STAT_OTG:
+                    battery_health_data_str += "vbus status: otg\n";
+                    break;
+                default:
+                    battery_health_data_str += "vbus status: unknown\n";
+                    break;
+                }
+
+                Kode_Bq25896::bq25896_chrg_stat_t chrg_stat;
+                Kode_Bq25896::bq25896_get_charging_status(Bq25896_Handle, &chrg_stat);
+                switch (chrg_stat)
+                {
+                case Kode_Bq25896::BQ25896_CHRG_STAT_NOT_CHARGING:
+                    battery_health_data_str += "charging status: not charging\n";
+                    break;
+                case Kode_Bq25896::BQ25896_CHRG_STAT_PRE_CHARGE:
+                    battery_health_data_str += "charging status: pre charge\n";
+                    break;
+                case Kode_Bq25896::BQ25896_CHRG_STAT_FAST_CHARGING:
+                    battery_health_data_str += "charging status: fast charging\n";
+                    break;
+                case Kode_Bq25896::BQ25896_CHRG_STAT_TERM_DONE:
+                    battery_health_data_str += "charging status: done charging\n";
+                    break;
+                default:
+                    battery_health_data_str += "charging status: unknown\n";
+                    break;
+                }
+
+                battery_health_data_str += "\n";
+
+                uint16_t bat_voltage = 0;
+                uint16_t sys_voltage = 0;
+                uint16_t vbus_voltage = 0;
+
+                Kode_Bq25896::bq25896_get_battery_voltage(Bq25896_Handle, &bat_voltage);
+                Kode_Bq25896::bq25896_get_system_voltage(Bq25896_Handle, &sys_voltage);
+                Kode_Bq25896::bq25896_get_vbus_voltage(Bq25896_Handle, &vbus_voltage);
+
+                battery_health_data_str += "battery voltage: " + std::to_string(bat_voltage) + "mv\n";
+                battery_health_data_str += "system voltage: " + std::to_string(sys_voltage) + "mv\n";
+                battery_health_data_str += "vbus voltage: " + std::to_string(vbus_voltage) + "mv\n\n";
+
+                uint16_t charge_current = 0;
+                uint16_t ico_current_limit = 0;
+
+                Kode_Bq25896::bq25896_get_charge_current(Bq25896_Handle, &charge_current);
+                Kode_Bq25896::bq25896_get_ico_current_limit(Bq25896_Handle, &ico_current_limit);
+
+                battery_health_data_str += "charge current: " + std::to_string(charge_current) + "ma\n";
+                battery_health_data_str += "ico current limit: " + std::to_string(ico_current_limit) + "ma\n";
+
+#endif
+
                 _lock_acquire(&lvgl_api_lock);
                 // 更新数据的标签
                 lv_label_set_text(System_Ui->_registry.win.cit.battery_health_test.data_label, battery_health_data_str.c_str());
                 lv_obj_align(System_Ui->_registry.win.cit.battery_health_test.data_label, LV_ALIGN_TOP_MID, 0, 10);
+#if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+                if ((vbus_stat == Kode_Bq25896::BQ25896_VBUS_STAT_ADAPTER) || (vbus_stat == Kode_Bq25896::BQ25896_VBUS_STAT_USB_HOST))
+                {
+                    lv_obj_add_flag(System_Ui->_registry.win.cit.battery_health_test.otg_label, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_add_flag(System_Ui->_registry.win.cit.battery_health_test.otg_switch, LV_OBJ_FLAG_HIDDEN);
+                }
+                else
+                {
+                    lv_obj_remove_flag(System_Ui->_registry.win.cit.battery_health_test.otg_label, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_remove_flag(System_Ui->_registry.win.cit.battery_health_test.otg_switch, LV_OBJ_FLAG_HIDDEN);
+
+                    lv_obj_align_to(System_Ui->_registry.win.cit.battery_health_test.otg_label,
+                                    System_Ui->_registry.win.cit.battery_health_test.data_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+                    lv_obj_align_to(System_Ui->_registry.win.cit.battery_health_test.otg_switch,
+                                    System_Ui->_registry.win.cit.battery_health_test.otg_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+                }
+#endif
+
                 _lock_release(&lvgl_api_lock);
             }
 
@@ -3140,6 +3244,18 @@ void System_Ui_Callback_Init(void)
         return true;
     };
 
+    System_Ui->_win_cit_otg_switch_callback = [](bool status)
+    {
+        if (status == true)
+        {
+            Kode_Bq25896::bq25896_set_otg(Bq25896_Handle, Kode_Bq25896::bq25896_otg_state_t::BQ25896_OTG_ENABLE);
+        }
+        else
+        {
+            Kode_Bq25896::bq25896_set_otg(Bq25896_Handle, Kode_Bq25896::bq25896_otg_state_t::BQ25896_OTG_DISABLE);
+        }
+    };
+
 #endif
 }
 
@@ -4432,6 +4548,20 @@ void System_Startup_Message_Init(void)
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
+
+    if (Sys_Status.bq25896.init_flag == false)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        _lock_acquire(&lvgl_api_lock);
+        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "bq25896 init fail");
+        _lock_release(&lvgl_api_lock);
+
+        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
 #endif
 
     if (Sys_Status.pcf8563.init_flag == false)
@@ -4827,6 +4957,26 @@ extern "C" void app_main(void)
     }
 
     System_Ui->set_config_rf_params(System_Ui->_device_nrf24l01);
+
+    assert = Kode_Bq25896::bq25896_init(Bq25896_Iic_Bus, Bq25896_Handle);
+    if (assert != ESP_OK)
+    {
+        Sys_Status.bq25896.init_flag = false;
+        printf("bq25896 init fail (error code: %#X)\n", assert);
+    }
+    else
+    {
+        Sys_Status.bq25896.init_flag = true;
+        printf("bq25896 init success\n");
+
+        // 禁用看门狗后不能读取看门狗寄存器状态，否者看门狗禁用会失效
+        Kode_Bq25896::bq25896_set_watchdog_timer(Bq25896_Handle, Kode_Bq25896::bq25896_watchdog_t::BQ25896_WATCHDOG_DISABLE);
+
+        Kode_Bq25896::bq25896_set_adc_conversion(Bq25896_Handle, Kode_Bq25896::bq25896_adc_conv_state_t::BQ25896_ADC_CONV_START);
+        Kode_Bq25896::bq25896_set_adc_conversion_rate(Bq25896_Handle, Kode_Bq25896::bq25896_adc_conv_rate_t ::BQ25896_ADC_CONV_RATE_CONTINUOUS);
+
+        // Kode_Bq25896::bq25896_set_otg(Bq25896_Handle, Kode_Bq25896::bq25896_otg_state_t::BQ25896_OTG_ENABLE);
+    }
 
 #endif
 
