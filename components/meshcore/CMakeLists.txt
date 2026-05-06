@@ -1,16 +1,15 @@
-# MeshCore protocol stack — passive component (compile-only, not linked yet)
+# MeshCore protocol stack + radio adapter for T-Display P4 (Meck)
 #
-# Excluded from this phase:
-#   helpers/IdentityStore.cpp  — uses Arduino LittleFS/SD API (FILESYSTEM, File)
-#   meshcore_src/TransportKeyStore.cpp — depends on IdentityStore.h
-# Both will be replaced with NVS-backed equivalents in step C.6 (P4DataStore).
+# Phase C.4: adds target.cpp / P4SX1262Radio adapter alongside the protocol
+# stack. Still passive (nothing in app_main calls meck_radio_attach yet),
+# but should compile and link.
 
 file(GLOB MESHCORE_SRCS
     "meshcore_src/*.cpp"
     "meshcore_src/helpers/*.cpp"
 )
 
-# Prune Arduino-FS-dependent files
+# Prune Arduino-FS-dependent files (deferred to step C.6)
 list(FILTER MESHCORE_SRCS EXCLUDE REGEX ".*IdentityStore\\.cpp$")
 list(FILTER MESHCORE_SRCS EXCLUDE REGEX ".*TransportKeyStore\\.cpp$")
 
@@ -23,6 +22,7 @@ idf_component_register(
         ${MESHCORE_SRCS}
         ${ED25519_SRCS}
         "arduino_compat.cpp"
+        "target.cpp"
     INCLUDE_DIRS
         "."
         "meshcore_src"
@@ -30,6 +30,8 @@ idf_component_register(
         "meshcore_src/ed25519"
     REQUIRES
         arduino_cpp_bus_driver
+        cpp_bus_driver
+        private_library
         mbedtls
         nvs_flash
         esp_timer
