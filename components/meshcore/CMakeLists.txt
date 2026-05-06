@@ -1,8 +1,8 @@
-# MeshCore protocol stack + radio adapter for T-Display P4 (Meck)
+# MeshCore protocol stack + radio adapter + globals for T-Display P4 (Meck)
 #
-# Phase C.4: adds target.cpp / P4SX1262Radio adapter alongside the protocol
-# stack. Still passive (nothing in app_main calls meck_radio_attach yet),
-# but should compile and link.
+# Phase C.5: adds meck_globals.cpp providing FreeRTOSClock, HwRng,
+# SoftRtcClock instances. Still passive — nothing in app_main calls into
+# this layer yet — but should compile and link cleanly.
 
 file(GLOB MESHCORE_SRCS
     "meshcore_src/*.cpp"
@@ -23,6 +23,7 @@ idf_component_register(
         ${ED25519_SRCS}
         "arduino_compat.cpp"
         "target.cpp"
+        "meck_globals.cpp"
     INCLUDE_DIRS
         "."
         "meshcore_src"
