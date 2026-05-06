@@ -46,6 +46,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 
 extern _lock_t lvgl_api_lock;
 
@@ -334,6 +335,50 @@ static void settings_update_labels() {
         char buf[16];
         snprintf(buf, sizeof(buf), "%+d hours", (int)prefs->utc_offset_hours);
         lv_label_set_text(lbl_set_utc, buf);
+    }
+}
+
+// ============================================================================
+// format_local_time
+// ----------------------------------------------------------------------------
+// Format a UTC epoch into a local display string, applying prefs->utc_offset_hours.
+// Same calendar day (in local time) -> "8:11PM"; otherwise "15/May/26 8:53PM".
+// If our clock isn't synced (epoch < 1750000000), always show date+time so a
+// stale fallback timestamp doesn't get misread as "today".
+// ============================================================================
+
+static void format_local_time(uint32_t utc_epoch, char* buf, size_t buf_len) {
+    if (buf_len == 0) return;
+    if (utc_epoch == 0) { buf[0] = '\0'; return; }
+
+    Meck* mesh = meck_get_instance();
+    int8_t offset = 0;
+    uint32_t now_utc = 0;
+    if (mesh) {
+        P4NodePrefs* prefs = mesh->getNodePrefs();
+        if (prefs) offset = prefs->utc_offset_hours;
+        mesh::RTCClock* rtc = mesh->getRTCClock();
+        if (rtc) now_utc = rtc->getCurrentTime();
+    }
+    bool clock_synced = (now_utc >= 1750000000U);
+
+    time_t local_msg = (time_t)utc_epoch + (int32_t)offset * 3600;
+    struct tm tm_msg;
+    gmtime_r(&local_msg, &tm_msg);
+
+    bool same_day = false;
+    if (clock_synced) {
+        time_t local_now = (time_t)now_utc + (int32_t)offset * 3600;
+        struct tm tm_now;
+        gmtime_r(&local_now, &tm_now);
+        same_day = (tm_msg.tm_year == tm_now.tm_year &&
+                    tm_msg.tm_yday == tm_now.tm_yday);
+    }
+
+    if (same_day) {
+        strftime(buf, buf_len, "%I:%M%p", &tm_msg);
+    } else {
+        strftime(buf, buf_len, "%d/%b/%y %I:%M%p", &tm_msg);
     }
 }
 
@@ -1511,12 +1556,15 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             char log_buf[800];
             int pos = 0;
             for (int i = 0; i < n; i++) {
+                char timebuf[32];
+                format_local_time(recent[i].timestamp, timebuf, sizeof(timebuf));
                 int w = snprintf(log_buf + pos, sizeof(log_buf) - pos,
-                    "%s  [%02X%02X]\n  RSSI %.0f  SNR %.1f  hops %s\n\n",
+                    "%s  [%02X%02X]\n  RSSI %.0f  SNR %.1f  hops %s\n  %s\n\n",
                     recent[i].name,
                     recent[i].pub_key_prefix[0], recent[i].pub_key_prefix[1],
                     recent[i].rssi, recent[i].snr,
-                    recent[i].path_len == 0xFF ? "direct" : "flood");
+                    recent[i].path_len == 0xFF ? "direct" : "flood",
+                    timebuf);
                 if (w > 0) pos += w;
             }
             log_buf[pos] = '\0';
@@ -1534,8 +1582,10 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             char buf[2048];
             int pos = 0;
             for (int i = n - 1; i >= 0; i--) {
+                char timebuf[32];
+                format_local_time(msgs[i].timestamp, timebuf, sizeof(timebuf));
                 int w = snprintf(buf + pos, sizeof(buf) - pos,
-                    "%s\n\n", msgs[i].text);
+                    "%s\n%s\n\n", msgs[i].text, timebuf);
                 if (w > 0) pos += w;
             }
             buf[pos] = '\0';

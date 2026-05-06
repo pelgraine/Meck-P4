@@ -197,6 +197,13 @@ public:
         uint32_t ts = _rtc_ref.getCurrentTime();
         bool ok = sendGroupMessage(ts, ch.channel, _prefs->node_name, text, strlen(text));
         if (ok) {
+            // Mark this (timestamp, channel) so flood-relayed copies of our
+            // own packet that bounce back via the mesh don't get re-stashed
+            // by onChannelMessageRecv as fresh incoming messages.
+            _recent_outgoing_ts[_recent_outgoing_idx] = ts;
+            _recent_outgoing_ch[_recent_outgoing_idx] = channel_idx;
+            _recent_outgoing_idx = (_recent_outgoing_idx + 1) % RECENT_OUTGOING_RING;
+
             // Local echo — add to message history so it shows on screen
             char echo[P4_MSG_TEXT_LEN];
             snprintf(echo, sizeof(echo), "%s: %s", _prefs->node_name, text);
@@ -496,6 +503,28 @@ protected:
     void onChannelMessageRecv(const mesh::GroupChannel& channel, mesh::Packet* pkt,
                                uint32_t timestamp, const char* text) override {
         uint8_t ch_idx = findChannelIdx(channel);
+
+        // Self-echo dedup: if this is our own packet bouncing back via flood,
+        // drop it. We already wrote a local-echo entry at send time. Update
+        // that entry's path_len to reflect the real flood-relay path so the
+        // user sees their message was successfully relayed.
+        if (isOurOwnEcho(timestamp, ch_idx)) {
+            uint8_t real_path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFE;
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            for (int i = 0; i < _msg_count; i++) {
+                int idx = (_msg_newest + P4_MSG_HISTORY_SIZE - i) % P4_MSG_HISTORY_SIZE;
+                P4ChannelMessage& existing = _messages[idx];
+                if (existing.valid && existing.timestamp == timestamp &&
+                    existing.channel_idx == ch_idx && existing.path_len == 0) {
+                    existing.path_len = real_path_len;
+                    _msg_dirty = true;
+                    break;
+                }
+            }
+            xSemaphoreGive(_mutex);
+            return;
+        }
+
         uint8_t path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
 
         printf("Meck: channel[%d] msg: %s\n", ch_idx, text);
@@ -555,36 +584,31 @@ protected:
                        uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override {
         BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
 
-       // Clock sync: defend against rogue future-stamped adverts.
-        //  - First sync from May-2024 fallback: accept if timestamp is plausible
-        //    AND not absurdly ahead of even our stale clock (rejects 1y+ rogues).
-        //  - Subsequent syncs: only within +/- 1h to absorb skew without drift.
+       // Clock sync: first valid sync wins, then we trust our own clock.
+        // Window is +/- 6 months from release time (update at release).
+        // 1730419200 = 1 Nov 2025 00:00 UTC
+        // 1762041600 = 1 Nov 2026 00:00 UTC
+        const uint32_t MIN_VALID = 1730419200U;
+        const uint32_t MAX_VALID = 1762041600U;
+        const uint32_t SYNC_THRESHOLD = 1750000000U;  // matches isClockSynced()
         uint32_t our_time = _rtc_ref.getCurrentTime();
-        const uint32_t MIN_VALID = 1750000000;       // 25 Jun 2025
-        const uint32_t MAX_VALID = 2000000000;       // 18 May 2033
-        const uint32_t TOLERANCE = 3600;             // 1 hour skew once synced
-        const uint32_t MAX_FORWARD_FROM_FALLBACK = 86400UL * 365UL; // 1 year
-        if (timestamp >= MIN_VALID && timestamp < MAX_VALID) {
-            bool synced = our_time >= MIN_VALID;
-            uint32_t diff = (timestamp > our_time) ? (timestamp - our_time) : (our_time - timestamp);
-            bool accept;
-            if (synced) {
-                accept = (diff < TOLERANCE);
-            } else {
-                // First sync from fallback: accept unless absurdly far ahead
-                accept = (timestamp <= our_time + MAX_FORWARD_FROM_FALLBACK);
+        bool synced = our_time >= SYNC_THRESHOLD;
+        if (timestamp < MIN_VALID || timestamp >= MAX_VALID) {
+            // Rogue or stale advert. Log once per session to avoid spam.
+            static bool warned_outofrange = false;
+            if (!warned_outofrange) {
+                printf("Meck: clock sync rejected, timestamp out of valid range (advert=%lu, valid=%lu..%lu)\n",
+                       (unsigned long)timestamp,
+                       (unsigned long)MIN_VALID, (unsigned long)MAX_VALID);
+                warned_outofrange = true;
             }
-            if (accept) {
-                _rtc_ref.setCurrentTime(timestamp);
-                printf("Meck: clock %s to %lu (was %lu)\n",
-                       synced ? "adjusted" : "synced",
-                       (unsigned long)timestamp, (unsigned long)our_time);
-            } else {
-                printf("Meck: clock sync REJECTED (advert=%lu ours=%lu diff=%lus synced=%d)\n",
-                       (unsigned long)timestamp, (unsigned long)our_time,
-                       (unsigned long)diff, synced ? 1 : 0);
-            }
+        } else if (!synced) {
+            _rtc_ref.setCurrentTime(timestamp);
+            printf("Meck: clock synced to %lu (was %lu)\n",
+                   (unsigned long)timestamp, (unsigned long)our_time);
         }
+        // After first sync, ignore all further timestamps until reboot or a
+        // higher-authority source (GPS, NTP) lands.
 
         // Extract name from advert data for UI
         char name[32] = "???";
@@ -714,6 +738,32 @@ private:
     unsigned long _contacts_save_at;
 
     SemaphoreHandle_t _mutex;
+
+    // ---- Self-echo dedup ----
+    // When we send a channel message, the dispatcher hands the packet to the
+    // radio but does NOT seed the seen-table with our originated packet hash.
+    // Other nodes relay our message via flood; those flood-relayed copies
+    // bounce back to us with different packet hashes (path field changes at
+    // each hop), so dispatcher dedup misses them. Without UI-level dedup we
+    // see our own message multiple times in the channel history.
+    //
+    // Track recent outgoing (timestamp, channel) pairs and drop matches in
+    // onChannelMessageRecv. Collision risk: another node sends on same
+    // channel at same epoch second, their message gets dropped. Acceptable
+    // at our mesh size.
+    static const int RECENT_OUTGOING_RING = 8;
+    uint32_t _recent_outgoing_ts[RECENT_OUTGOING_RING] = {0};
+    uint8_t  _recent_outgoing_ch[RECENT_OUTGOING_RING] = {0};
+    int      _recent_outgoing_idx = 0;
+
+    bool isOurOwnEcho(uint32_t ts, uint8_t ch_idx) const {
+        for (int i = 0; i < RECENT_OUTGOING_RING; i++) {
+            if (_recent_outgoing_ts[i] == ts && _recent_outgoing_ch[i] == ch_idx) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     // ---- Default channels (used on first boot only) ----
 
