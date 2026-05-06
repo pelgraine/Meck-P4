@@ -2,8 +2,9 @@
  * meck.h — public API for the Meck mesh stack on T-Display P4
  *
  * This is the only header to include from main.cpp. Internal implementation
- * details (radio adapter, mesh class, data store) are hidden behind these
- * three functions and live in target.h / Meck.h / MeckDataStore.h.
+ * details (radio adapter, mesh class, data store, UI) are hidden behind
+ * these functions and live in target.h / MeckMesh.h / MeckDataStore.h /
+ * MeckUI.h.
  *
  * Boot sequence in main.cpp's app_main():
  *
@@ -17,6 +18,8 @@
  *   4. meck_app_start()       — spawn meck_task, mesh starts processing RX
  *   5. System_Startup_Message_Init();   (LilyGo's modal popups for any
  *                                         failed init steps)
+ *   6. meck_ui_init()         — build LVGL home screen + 7-tile structure
+ *   7. meck_ui_show_home()    — switch the active screen to ours
  */
 
 #pragma once
@@ -38,6 +41,15 @@ bool meck_app_init();
 // Spawn the meck_task that drives the mesh protocol loop. Must be called
 // AFTER meck_app_init(). Runs forever.
 void meck_app_start();
+
+// Build all LVGL objects for the home screen and start the 500ms refresh
+// timer. Must be called AFTER meck_app_init() so the Meck instance exists,
+// and AFTER System_Startup_Message_Init() so any popups have finished.
+void meck_ui_init();
+
+// Switch the active LVGL screen to the Meck home screen. Must be called
+// AFTER meck_ui_init().
+void meck_ui_show_home();
 
 #ifdef __cplusplus
 }

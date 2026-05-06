@@ -5183,7 +5183,7 @@ extern "C" void app_main(void)
     xTaskCreate(device_battery_health_task, "device_battery_health_task", 8 * 1024, NULL, 3, NULL);
     xTaskCreate(device_gps_task, "device_gps_task", 8 * 1024, NULL, 3, &Gps_Task_Handle);
     xTaskCreate(device_ethernet_task, "device_ethernet_task", 4 * 1024, NULL, 3, &Ethernet_Task_Handle);
-    xTaskCreate(device_rtc_task, "device_rtc_task", 4 * 1024, NULL, 3, NULL);
+    //     xTaskCreate(device_rtc_task, "device_rtc_task", 4 * 1024, NULL, 3, NULL);
     xTaskCreate(device_at_task, "device_at_task", 4 * 1024, NULL, 3, &At_Task_Handle);
     // xTaskCreate(esp32p4_sleep_task, "esp32p4_sleep_task", 4 * 1024, NULL, 3, &Sleep_Task_Handle);
     // xTaskCreate(device_rf_task, "device_rf_task", 4 * 1024, NULL, 3, &Rf_Task_Handle);  // disabled — Meck owns the SX1262 now
@@ -5201,8 +5201,7 @@ extern "C" void app_main(void)
     printf("system ui init finish\n");
     System_Ui->set_vibration();
 
-    System_Startup_Message_Init();
-
+   
     // ---- Meck (MeshCore) radio attach — C.6 step A smoke test ----
     // Wraps LilyGo's already-running SX1262 with our mesh::Radio adapter and
     // reconfigures LoRa params to MeshCore's Australia Narrow preset
@@ -5211,6 +5210,11 @@ extern "C" void app_main(void)
     meck_radio_attach();
     meck_app_init();
     meck_app_start();
+
+     //     System_Startup_Message_Init();  // disabled, Meck does not need LilyGo factory popups
+    meck_ui_init();
+    meck_ui_show_home();
+    
     // ---- end Meck ----
 
     //     while (1)

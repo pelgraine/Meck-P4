@@ -23,3 +23,7 @@ extern P4SX1262Radio radio_driver;
 void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr);
 void radio_set_tx_power(uint8_t dbm);
 uint32_t radio_get_rng_seed();
+
+// Internal accessor — UI code uses this to read messages, contacts, recent heard
+class Meck;
+Meck* meck_get_instance();
