@@ -39,7 +39,7 @@ class P4RTCClock : public mesh::RTCClock {
     unsigned long prev_millis;
 public:
     P4RTCClock() : RTCClock() {
-        base_time = 1747267200;  // 15 May 2025 00:00 UTC fallback
+        base_time = 1715770351;  // 15 May 2024 as fallback
         accumulator = 0;
         prev_millis = millis();
     }

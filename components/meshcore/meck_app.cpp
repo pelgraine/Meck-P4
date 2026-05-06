@@ -74,6 +74,7 @@ static void meck_task(void* arg) {
     printf("meck_task: started\n");
     while (true) {
         radio_apply_pending_reconfig();
+        meck_apply_pending_send();
         if (g_the_mesh) {
             g_the_mesh->loop();
         }
@@ -87,4 +88,32 @@ extern "C" void meck_app_start() {
         return;
     }
     xTaskCreate(meck_task, "meck_task", 16 * 1024, NULL, 3, NULL);
+}
+
+// ============================================================================
+// Deferred send-message queue (avoids SPI race between LVGL task and meck_task)
+// ============================================================================
+static volatile bool    g_send_pending     = false;
+static volatile uint8_t g_send_pending_ch  = 0;
+static char             g_send_pending_text[200] = {};
+
+extern "C" void meck_request_send_text(uint8_t channel_idx, const char* text) {
+    if (!text) return;
+    g_send_pending_ch = channel_idx;
+    strncpy(g_send_pending_text, text, sizeof(g_send_pending_text) - 1);
+    g_send_pending_text[sizeof(g_send_pending_text) - 1] = '\0';
+    g_send_pending = true;
+    printf("meck_request_send_text: queued ch[%d] msg='%s'\n",
+           (int)channel_idx, g_send_pending_text);
+}
+
+extern "C" void meck_apply_pending_send() {
+    if (!g_send_pending) return;
+    g_send_pending = false;
+    if (!g_the_mesh) return;
+    if (g_the_mesh->sendChannelMessage(g_send_pending_ch, g_send_pending_text)) {
+        printf(">>> Sent on ch[%d]: %s\n", (int)g_send_pending_ch, g_send_pending_text);
+    } else {
+        printf(">>> FAILED to send on ch[%d]: %s\n", (int)g_send_pending_ch, g_send_pending_text);
+    }
 }

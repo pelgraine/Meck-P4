@@ -144,7 +144,6 @@ public:
 
     bool startSendRaw(const uint8_t* bytes, int len) override {
         _inReceiveMode = false;
-        printf("P4SX1262Radio::startSendRaw: %d bytes\n", len);
 
         // Configure for TX
         SX1262->start_lora_transmit(

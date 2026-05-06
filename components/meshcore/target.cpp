@@ -37,6 +37,7 @@ P4SX1262Radio radio_driver;
 
 bool meck_radio_attach() {
     printf("meck_radio_attach() — wrapping LilyGo's already-running SX1262\n");
+    meck_set_antenna_default();
 
     // Apply MeshCore's preset (overwrites LilyGo's demo SF9/125kHz/920MHz)
     radio_set_params(LORA_FREQ_DEFAULT, LORA_BW_DEFAULT,
@@ -162,3 +163,29 @@ extern "C" void radio_apply_pending_reconfig() {
     radio_set_tx_power(tx);
     printf("radio_apply_pending_reconfig: done\n");
 }
+
+// ============================================================================
+// SKY13453 antenna selection
+// VCTL HIGH = antenna A (internal/PCB)
+// VCTL LOW  = antenna B (external/SMA)
+// LilyGo's main.cpp configures the pin as OUTPUT but never writes a value,
+// so without this the state at boot is undefined and TX may go to the wrong
+// port. Standalone sx1262_lora_send_receive example sets it HIGH, so we do
+// the same.
+// ============================================================================
+extern "C" void meck_set_antenna_default() {
+    extern std::unique_ptr<Cpp_Bus_Driver::Xl95x5> XL9535;
+    if (XL9535) {
+        XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+        printf("meck_set_antenna_default: VCTL=HIGH (antenna A)\n");
+    }
+}
+
+// ============================================================================
+// SKY13453 antenna selection
+// VCTL HIGH = RF1 (internal/PCB antenna, LilyGo factory default)
+// VCTL LOW  = RF2 (external/SMA)
+// LilyGo configures the pin as OUTPUT but never writes a value, so without
+// this the boot state is undefined and TX may go to a disconnected port.
+// Will become a Settings toggle in a follow-up turn.
+// ============================================================================

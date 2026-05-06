@@ -90,7 +90,7 @@ struct P4NodePrefs {
         tx_power_dbm = LORA_TX_POWER_DEFAULT;
         strncpy(node_name, "NONAME", sizeof(node_name));
         utc_offset_hours = 0;
-        path_hash_mode = 1;  // default 2 bytes (matches AU mesh)
+        path_hash_mode = 0;
         airtime_factor = 1.0f;
         multi_acks = 1;
         manual_add_contacts = 0;

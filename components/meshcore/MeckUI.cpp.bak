@@ -916,8 +916,6 @@ static void create_settings_screen() {
     y += 65;
     create_settings_row(scroll, "TX Power (tap to cycle)",   &lbl_set_txpower, on_settings_txpower_tap, y);
     y += 65;
-    create_settings_row(scroll, "Path Hash (tap to cycle)", &lbl_set_pathhash, on_settings_pathhash_tap, y);
-    y += 65;
     create_settings_row(scroll, "UTC Offset (tap to cycle)", &lbl_set_utc,     on_settings_utc_tap,     y);
     y += 65;
 

@@ -34,3 +34,17 @@ Meck* meck_get_instance();
 // SPI bus contention with mesh.loop().
 extern "C" void radio_request_reconfig(float freq, float bw, uint8_t sf, uint8_t cr, uint8_t tx_power);
 extern "C" void radio_apply_pending_reconfig();
+
+// Deferred send-message. LVGL task calls meck_request_send_text() to queue;
+// meck_task picks up via meck_apply_pending_send() at the top of its loop.
+// Avoids the same SPI race as radio_request_reconfig.
+extern "C" void meck_request_send_text(uint8_t channel_idx, const char* text);
+extern "C" void meck_apply_pending_send();
+
+// Sets SKY13453 VCTL to a known antenna port (default HIGH = antenna A).
+// Should be called once at boot during meck_radio_attach.
+extern "C" void meck_set_antenna_default();
+
+// Sets SKY13453 VCTL to a known antenna port (HIGH = RF1 internal, default).
+// Should be called once at boot during meck_radio_attach.
+extern "C" void meck_set_antenna_default();
