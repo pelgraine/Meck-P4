@@ -1,22 +1,18 @@
 /*
  * target.cpp — MeshCore radio attach + LoRa params for T-Display P4 (Meck)
  *
- * Major surgery from the standalone version:
- *   - All XL9535 / power-rail / SX1262 reset code REMOVED.
- *     LilyGo's lvgl_9_ui factory init handles every bit of that.
- *   - radio_init() REMOVED — replaced by meck_radio_attach() which assumes
- *     the SX1262 is already up and just reconfigures LoRa params.
- *   - LDO power init REMOVED — handled by LilyGo.
- *   - Hardware object instantiation: only SX1262 here, as a duplicate
- *     cpp_bus_driver client. cpp_bus_driver clients are not exclusive
- *     hardware owners; multiple instances against the same SPI bus is fine
- *     so long as concurrent transactions are coordinated.
+ * Architecture: LilyGo's main.cpp constructs all hardware globals
+ * (XL9535, SX1262, SPI buses, etc.) at file scope as `auto` declarations
+ * with external linkage. We reference SX1262 here via a matching `extern`.
  *
- * What stays:
- *   - radio_set_params() — applies MeshCore's LoRa preset (AU Narrow)
- *   - radio_set_tx_power() — TX power adjust
- *   - radio_get_rng_seed() — esp_random()-backed identity seed
- *   - The MeshCore radio_driver instance
+ *   - meck_radio_attach() does NOT redo any hardware init. LilyGo already
+ *     called SX1262->begin(10MHz), set up power rails, sequenced reset, etc.
+ *     We only overwrite the LoRa modulation parameters with MeshCore's
+ *     Australia Narrow preset and put the radio back into RX with our IRQ
+ *     mask.
+ *   - The mesh::Radio interface is implemented entirely by P4SX1262Radio
+ *     (header-only); this file just provides the singleton and the
+ *     attach/configure helpers.
  */
 
 #include "target.h"
@@ -24,16 +20,11 @@
 #include "esp_random.h"
 #include <stdio.h>
 
-// ---- Hardware object — duplicate cpp_bus_driver client ----
-//
-// LilyGo's lvgl_9_ui already constructs its own SX1262 instance somewhere.
-// We construct a separate client object pointing at the same SPI bus and
-// chip pins. cpp_bus_driver objects are NOT hardware-exclusive; this is the
-// same pattern as the LilyGo sx1262_lora_send_receive example creating SX1262
-// from app_main without coordinating with any other init.
-
-static std::shared_ptr<Cpp_Bus_Driver::Hardware_Spi> _spi_bus;
-std::unique_ptr<Cpp_Bus_Driver::Sx126x> SX1262;
+// LilyGo's main.cpp defines `auto SX1262 = std::make_unique<...>(...)` at
+// file scope. We declare it extern here so target.cpp can reach it. The
+// declaration is also in P4SX1262Radio.h (transitively included via
+// target.h above) — duplicate extern declarations are fine, only duplicate
+// definitions break.
 
 // ---- MeshCore radio adapter instance ----
 P4SX1262Radio radio_driver;
@@ -47,27 +38,12 @@ P4SX1262Radio radio_driver;
 bool meck_radio_attach() {
     printf("meck_radio_attach() — wrapping LilyGo's already-running SX1262\n");
 
-    // Create our cpp_bus_driver client.
-    // The hardware (XL9535, power rails, SX1262 RST sequence) was already
-    // done by LilyGo. We're constructing the SPI client object only.
-    _spi_bus = std::make_shared<Cpp_Bus_Driver::Hardware_Spi>(
-        SPI_1_MOSI, SPI_1_SCLK, SPI_1_MISO, SPI2_HOST, 0
-    );
-    SX1262 = std::make_unique<Cpp_Bus_Driver::Sx126x>(
-        _spi_bus,
-        Cpp_Bus_Driver::Sx126x::Chip_Type::SX1262,
-        SX1262_BUSY,
-        SX1262_CS,
-        DEFAULT_CPP_BUS_DRIVER_VALUE
-    );
-    SX1262->begin(10000000);  // 10 MHz SPI
-
     // Apply MeshCore's preset (overwrites LilyGo's demo SF9/125kHz/920MHz)
     radio_set_params(LORA_FREQ_DEFAULT, LORA_BW_DEFAULT,
                      LORA_SF_DEFAULT, LORA_CR_DEFAULT);
     radio_set_tx_power(LORA_TX_POWER_DEFAULT);
 
-    // Enter RX mode, MeshCore-style
+    // Re-enter RX mode with MeshCore-friendly IRQ mask
     SX1262->clear_buffer();
     SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::RX);
     SX1262->set_irq_pin_mode(

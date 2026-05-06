@@ -23,10 +23,14 @@
 #include "cpp_bus_driver_library.h"
 #include "t_display_p4_config.h"
 
-// Forward declarations for hardware objects (instantiated in target.cpp)
-extern std::shared_ptr<Cpp_Bus_Driver::Hardware_Spi> SPI_Bus;
+// LilyGo's main.cpp defines `auto SX1262 = std::make_unique<...>(...)` at
+// file scope. That gives a global with external linkage. We reference it
+// here so the radio adapter methods can drive the chip.
+//
+// NOTE: this header MUST NOT be included by main.cpp directly — doing so
+// produces a conflicting-declaration error against the same-named `auto`
+// global. Internal meshcore-component code is fine to include it.
 extern std::unique_ptr<Cpp_Bus_Driver::Sx126x> SX1262;
-extern std::unique_ptr<Cpp_Bus_Driver::Xl95x5> XL9535;
 
 class P4SX1262Radio : public mesh::Radio {
 public:

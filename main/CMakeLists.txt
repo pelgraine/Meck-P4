@@ -64,7 +64,29 @@ elseif(CONFIG_EXAMPLE_BUILD_BQ25896)
 endif()
         
 idf_component_register(SRC_DIRS ${project_path} 
-                        INCLUDE_DIRS ${project_path})
+                        INCLUDE_DIRS ${project_path}
+                        REQUIRES
+                            meshcore
+                            esp_lcd
+                            esp_driver_gpio
+                            esp_driver_ppa
+                            esp_driver_sdmmc
+                            esp_event
+                            esp_eth
+                            spi_flash
+                            esp_netif
+                            esp_mm
+                            esp_video
+                            esp_timer
+                            ethernet_init
+                            fatfs
+                            cpp_bus_driver
+                            arduino_cpp_bus_driver
+                            private_library
+                            ICM20948_WE
+                            ST25R3916
+                            NFC-RFAL
+                            RadioLib)
 
 target_compile_options(
     ${COMPONENT_LIB}

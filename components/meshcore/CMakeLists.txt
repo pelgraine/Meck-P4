@@ -1,15 +1,23 @@
 # MeshCore protocol stack + radio adapter + globals for T-Display P4 (Meck)
 #
-# Phase C.5: adds meck_globals.cpp providing FreeRTOSClock, HwRng,
-# SoftRtcClock instances. Still passive — nothing in app_main calls into
-# this layer yet — but should compile and link cleanly.
+# Phase C.6 step A — smoke test. Compiles:
+#   - MeshCore protocol stack (Mesh, Dispatcher, Packet, etc.)
+#   - ed25519 crypto
+#   - arduino_compat shim
+#   - target.cpp        (radio attach, LoRa params, meck_radio_attach())
+#   - meck_globals.cpp  (clock, rng, rtc, packets, tables singletons)
+#
+# Excluded:
+#   helpers/IdentityStore.cpp  — uses Arduino LittleFS/SD API (FILESYSTEM, File)
+#   meshcore_src/TransportKeyStore.cpp — depends on IdentityStore.h
+# Both will be replaced with NVS-backed equivalents later.
 
 file(GLOB MESHCORE_SRCS
     "meshcore_src/*.cpp"
     "meshcore_src/helpers/*.cpp"
 )
 
-# Prune Arduino-FS-dependent files (deferred to step C.6)
+# Prune Arduino-FS-dependent files
 list(FILTER MESHCORE_SRCS EXCLUDE REGEX ".*IdentityStore\\.cpp$")
 list(FILTER MESHCORE_SRCS EXCLUDE REGEX ".*TransportKeyStore\\.cpp$")
 

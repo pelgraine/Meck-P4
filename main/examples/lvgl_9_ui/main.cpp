@@ -32,6 +32,13 @@
 #include "kode_bq25896.h"
 #endif
 #include "lvgl_ui.h"
+
+// Meck (MeshCore on T-Display P4) — minimal public interface only.
+// Do NOT include "target.h" here — that header pulls in MeshCore protocol
+// headers (Mesh.h, Dispatcher.h) and the SX1262 extern declaration, which
+// conflict with LilyGo's `auto SX1262` global at file scope below.
+#include "meck.h"
+
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "esp_vfs_fat.h"
 #include "New Notification 010_c2_b16_s44100.h"
@@ -5195,6 +5202,14 @@ extern "C" void app_main(void)
     System_Ui->set_vibration();
 
     System_Startup_Message_Init();
+
+    // ---- Meck (MeshCore) radio attach — C.6 step A smoke test ----
+    // Wraps LilyGo's already-running SX1262 with our mesh::Radio adapter and
+    // reconfigures LoRa params to MeshCore's Australia Narrow preset
+    // (916.575 MHz / 62.5 kHz / SF7 / sync word 0x1424).
+    // Nothing else in Meck is wired up yet — this only proves coexistence.
+    meck_radio_attach();
+    // ---- end Meck ----
 
     //     while (1)
     //     {
