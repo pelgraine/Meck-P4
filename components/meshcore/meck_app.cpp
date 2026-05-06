@@ -73,6 +73,7 @@ extern "C" bool meck_app_init() {
 static void meck_task(void* arg) {
     printf("meck_task: started\n");
     while (true) {
+        radio_apply_pending_reconfig();
         if (g_the_mesh) {
             g_the_mesh->loop();
         }

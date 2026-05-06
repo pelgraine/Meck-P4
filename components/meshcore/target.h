@@ -27,3 +27,10 @@ uint32_t radio_get_rng_seed();
 // Internal accessor — UI code uses this to read messages, contacts, recent heard
 class Meck;
 Meck* meck_get_instance();
+
+// Deferred radio reconfig. Call radio_request_reconfig() from any task to
+// queue a config change. meck_task picks it up at the top of its loop via
+// radio_apply_pending_reconfig() and applies it in its own context, avoiding
+// SPI bus contention with mesh.loop().
+extern "C" void radio_request_reconfig(float freq, float bw, uint8_t sf, uint8_t cr, uint8_t tx_power);
+extern "C" void radio_apply_pending_reconfig();

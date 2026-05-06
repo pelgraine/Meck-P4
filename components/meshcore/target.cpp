@@ -125,3 +125,40 @@ void radio_set_tx_power(uint8_t dbm) {
 uint32_t radio_get_rng_seed() {
     return esp_random();
 }
+
+// ============================================================================
+// Deferred radio reconfig (avoids SPI race between LVGL task and meck_task)
+// ============================================================================
+static volatile bool    g_radio_reconfig_pending = false;
+static volatile float   g_pending_freq           = 0;
+static volatile float   g_pending_bw             = 0;
+static volatile uint8_t g_pending_sf             = 0;
+static volatile uint8_t g_pending_cr             = 0;
+static volatile uint8_t g_pending_tx_power       = 0;
+
+extern "C" void radio_request_reconfig(float freq, float bw, uint8_t sf, uint8_t cr, uint8_t tx_power) {
+    g_pending_freq     = freq;
+    g_pending_bw       = bw;
+    g_pending_sf       = sf;
+    g_pending_cr       = cr;
+    g_pending_tx_power = tx_power;
+    g_radio_reconfig_pending = true;
+    printf("radio_request_reconfig: queued freq=%.3f bw=%.0f sf=%d cr=4/%d tx=%d\n",
+           freq, bw, (int)sf, (int)cr, (int)tx_power);
+}
+
+extern "C" void radio_apply_pending_reconfig() {
+    if (!g_radio_reconfig_pending) return;
+    g_radio_reconfig_pending = false;
+
+    float   freq = g_pending_freq;
+    float   bw   = g_pending_bw;
+    uint8_t sf   = g_pending_sf;
+    uint8_t cr   = g_pending_cr;
+    uint8_t tx   = g_pending_tx_power;
+
+    printf("radio_apply_pending_reconfig: applying queued config\n");
+    radio_set_params(freq, bw, sf, cr);
+    radio_set_tx_power(tx);
+    printf("radio_apply_pending_reconfig: done\n");
+}
