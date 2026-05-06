@@ -75,6 +75,7 @@ static void meck_task(void* arg) {
     while (true) {
         radio_apply_pending_reconfig();
         meck_apply_pending_send();
+        meck_apply_pending_save();
         if (g_the_mesh) {
             g_the_mesh->loop();
         }
@@ -115,5 +116,76 @@ extern "C" void meck_apply_pending_send() {
         printf(">>> Sent on ch[%d]: %s\n", (int)g_send_pending_ch, g_send_pending_text);
     } else {
         printf(">>> FAILED to send on ch[%d]: %s\n", (int)g_send_pending_ch, g_send_pending_text);
+    }
+}
+
+// ============================================================================
+// Deferred SD-save queue for channel messages
+// ----------------------------------------------------------------------------
+// Ring-write call sites in MeckMesh enqueue completed messages. The
+// meck_task drains the queue and writes each record to SD via the
+// P4DataStore append helper. SD writes never block LVGL or receive paths.
+//
+// Queue size 16: at typical channel-message arrival rates (~1/sec) the
+// drain stays empty most of the time. On overflow we drop the oldest
+// pending save and log it; the message is still in the in-RAM ring and
+// visible until reboot, just not persisted.
+// ============================================================================
+#define MECK_SAVE_QUEUE_SIZE 16
+
+struct PendingSaveEntry {
+    uint8_t channel_idx;
+    P4ChannelMessage msg;
+};
+
+static PendingSaveEntry g_save_queue[MECK_SAVE_QUEUE_SIZE];
+static volatile int g_save_head = 0;  // next slot to write (producer)
+static volatile int g_save_tail = 0;  // next slot to read  (consumer)
+
+extern "C" void meck_request_save_message(uint8_t channel_idx, const P4ChannelMessage* msg) {
+    if (!msg) return;
+
+    int next_head = (g_save_head + 1) % MECK_SAVE_QUEUE_SIZE;
+    if (next_head == g_save_tail) {
+        // Queue full — drop oldest pending save by advancing tail.
+        g_save_tail = (g_save_tail + 1) % MECK_SAVE_QUEUE_SIZE;
+        printf("meck_save: queue full, dropping oldest pending save\n");
+    }
+
+    g_save_queue[g_save_head].channel_idx = channel_idx;
+    g_save_queue[g_save_head].msg = *msg;
+    g_save_head = next_head;
+}
+
+extern "C" void meck_apply_pending_save() {
+    if (g_save_tail == g_save_head) return;  // queue empty
+    if (!g_the_mesh) return;
+    P4DataStore* store = g_the_mesh->getDataStore();
+    if (!store) return;
+
+    // Drain everything pending. Each iteration is one fopen/fwrite/fclose
+    // (~1-3 ms on a healthy SD card), so draining 16 entries is well under
+    // a 100ms budget.
+    while (g_save_tail != g_save_head) {
+        PendingSaveEntry& e = g_save_queue[g_save_tail];
+
+        // Convert in-memory P4ChannelMessage to packed on-disk record.
+        P4MsgFileRecord rec = {};
+        rec.timestamp    = e.msg.timestamp;
+        rec.dm_peer_hash = 0;                        // reserved for DM use
+        rec.channel_idx  = e.msg.channel_idx;
+        rec.path_len     = e.msg.path_len;
+        rec.snr_x4       = 0;                        // reserved (schema v2)
+        rec.flags        = e.msg.valid ? 0x01 : 0x00;
+        memset(rec.path, 0, sizeof(rec.path));       // reserved (schema v2)
+        memcpy(rec.text, e.msg.text, P4_MSG_TEXT_LEN);
+
+        store->appendChannelMessageRecord(
+            e.channel_idx,
+            P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
+            (uint16_t)sizeof(P4MsgFileRecord),
+            &rec);
+
+        g_save_tail = (g_save_tail + 1) % MECK_SAVE_QUEUE_SIZE;
     }
 }

@@ -893,17 +893,7 @@ static void create_page_battery(lv_obj_t *page) {
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     lbl_battery_detail = lv_label_create(page);
-    lv_label_set_text(lbl_battery_detail,
-        "BQ27220:    detected\n"
-        "Voltage:    --\n"
-        "Percent:    --\n"
-        "Time empty: --\n"
-        "Avg current: --\n"
-        "Avg power:  --\n"
-        "Remaining:  --\n"
-        "Design cap: --\n"
-        "Temp:       --\n\n"
-        "(readout pending - see TODO in MeckUI.cpp)");
+    lv_label_set_text(lbl_battery_detail, "Reading BQ27220...");
     lv_obj_set_style_text_color(lbl_battery_detail, lv_color_white(), 0);
     lv_obj_set_style_text_font(lbl_battery_detail, &lv_font_montserrat_18, 0);
     lv_label_set_long_mode(lbl_battery_detail, LV_LABEL_LONG_WRAP);
@@ -1544,6 +1534,62 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         snprintf(buf, sizeof(buf), "%.0f dBm / %.1f dB",
                  radio_driver.getLastRSSI(), radio_driver.getLastSNR());
         lv_label_set_text(lbl_home_rssi, buf);
+    }
+
+    // Battery tile: refresh every tick. Voltage is authoritative; if the
+    // BQ27220's reported SoC disagrees with the voltage curve by more than
+    // 15 points, surface it so the user can decide what to trust.
+    if (lbl_battery_detail) {
+        if (!meck_battery_available()) {
+            lv_label_set_text(lbl_battery_detail, "BQ27220 not detected");
+        } else {
+            uint16_t mv         = meck_battery_voltage_mv();
+            int16_t  ma         = meck_battery_current_ma();
+            uint8_t  pct_chip   = meck_battery_pct_from_chip();
+            uint8_t  pct_volts  = meck_battery_pct_from_voltage(mv);
+            int8_t   temp_c     = meck_battery_temp_c();
+            uint16_t rem_mah    = meck_battery_remaining_mah();
+            uint16_t full_mah   = meck_battery_full_charge_mah();
+            uint16_t tte_min    = meck_battery_time_to_empty_min();
+
+            const char* current_label;
+            int16_t     current_abs = ma < 0 ? -ma : ma;
+            if (current_abs < 5)      current_label = "idle";
+            else if (ma > 0)          current_label = "charging";
+            else                      current_label = "discharging";
+
+            char tte_buf[32];
+            if (tte_min == 0xFFFF || tte_min == 0 || ma > 0) {
+                snprintf(tte_buf, sizeof(tte_buf), "--");
+            } else {
+                snprintf(tte_buf, sizeof(tte_buf), "%uh %02um",
+                         (unsigned)(tte_min / 60),
+                         (unsigned)(tte_min % 60));
+            }
+
+            int diff = (int)pct_chip - (int)pct_volts;
+            if (diff < 0) diff = -diff;
+            const char* trust_note = (diff > 15)
+                ? "\nNote: BQ27220 SoC disagrees with voltage,\ncell calibration may need attention."
+                : "";
+
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                "Voltage:    %u mV (~%u%%)\n"
+                "Charge:     %u%%  [BQ27220]\n"
+                "Current:    %s%d mA  (%s)\n"
+                "Temp:       %d C\n\n"
+                "Remaining:  %u / %u mAh\n"
+                "Time empty: %s%s",
+                (unsigned)mv,           (unsigned)pct_volts,
+                (unsigned)pct_chip,
+                ma > 0 ? "+" : "",      (int)ma,        current_label,
+                (int)temp_c,
+                (unsigned)rem_mah,      (unsigned)full_mah,
+                tte_buf,
+                trust_note);
+            lv_label_set_text(lbl_battery_detail, buf);
+        }
     }
 
     // Recent Heard tile

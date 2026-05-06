@@ -26,6 +26,12 @@
 #include "mbedtls/sha256.h"
 #include "mbedtls/base64.h"
 
+// Forward decl for the deferred SD-save queue, defined in meck_app.cpp.
+// Allows ring-write call sites in this header to enqueue without including
+// target.h (which would pull P4SX1262Radio.h into hot paths).
+struct P4ChannelMessage;
+extern "C" void meck_request_save_message(uint8_t channel_idx, const P4ChannelMessage* msg);
+
 // ---- ESP-IDF clock/RNG implementations ----
 
 class P4MillisecondClock : public mesh::MillisecondClock {
@@ -69,7 +75,7 @@ public:
 
 // ---- Channel message ring buffer ----
 
-#define P4_MSG_HISTORY_SIZE  32
+#define P4_MSG_PER_CHANNEL  500
 #define P4_MSG_TEXT_LEN      300
 
 struct P4ChannelMessage {
@@ -79,6 +85,30 @@ struct P4ChannelMessage {
     uint8_t path_len;
     bool valid;
 };
+
+// ---- On-disk format for channel message persistence ----
+//
+// File path: /sdcard/meshcore/messages/ch_<idx>.bin (one per channel)
+// Schema version 1 ships with just timestamp/channel/path_len/text/valid;
+// fields like SNR, hop path, and DM peer hash are reserved zeros so
+// schema version 2 can fill them in without changing record size again.
+// Magic 'MCMS' (Meck Channel Message Store) — distinct from upstream Meck's
+// 'MCHS' since the storage strategy differs (per-channel vs single file).
+
+#define P4_MSG_FILE_MAGIC    0x4D434D53U  // 'MCMS' little-endian
+#define P4_MSG_FILE_VERSION  1
+
+struct __attribute__((packed)) P4MsgFileRecord {
+    uint32_t timestamp;
+    uint32_t dm_peer_hash;       // reserved (0) — DM persistence pending
+    uint8_t  channel_idx;
+    uint8_t  path_len;
+    int8_t   snr_x4;             // reserved (0) — bumped to v2 when wired
+    uint8_t  flags;              // bit 0 = valid; rest reserved
+    uint8_t  path[8];            // reserved zeros — hop hashes pending
+    char     text[P4_MSG_TEXT_LEN];
+};
+// Total: 4 + 4 + 1 + 1 + 1 + 1 + 8 + 300 = 320 bytes
 
 // ---- Recent heard ring buffer ----
 
@@ -106,11 +136,26 @@ public:
                         *new StaticPoolPacketManager(16), tables),
           _rtc_ref(rtc), _store(nullptr), _prefs(nullptr)
     {
-        _msg_count = 0;
-        _msg_newest = -1;
+        // Per-channel message rings, each P4_MSG_PER_CHANNEL entries in PSRAM.
+        // 8 channels × 500 msgs × ~308 bytes ≈ 1.2 MB total. PSRAM has plenty.
+        size_t per_ring = P4_MSG_PER_CHANNEL * sizeof(P4ChannelMessage);
+        for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            _msgs_ch[i] = (P4ChannelMessage*)heap_caps_malloc(per_ring, MALLOC_CAP_SPIRAM);
+            if (_msgs_ch[i]) {
+                memset(_msgs_ch[i], 0, per_ring);
+            } else {
+                printf("Meck: PSRAM alloc FAILED for channel %d ring (%zu bytes)\n",
+                       i, per_ring);
+            }
+            _msg_count_ch[i]  = 0;
+            _msg_newest_ch[i] = -1;
+        }
+        printf("Meck: allocated %d channel msg rings × %d entries (%zu KB total)\n",
+               MAX_GROUP_CHANNELS, P4_MSG_PER_CHANNEL,
+               (size_t)(MAX_GROUP_CHANNELS * per_ring) / 1024);
+
         memset((void*)_msg_unread_ch, 0, sizeof(_msg_unread_ch));
         _msg_dirty = false;
-        memset(_messages, 0, sizeof(_messages));
 
         _recent_count = 0;
         _recent_newest = -1;
@@ -157,6 +202,9 @@ public:
 
         // Load contacts from NVS
         loadContactsFromStore();
+
+        // Load channel message history from SD (per-channel ring tail)
+        loadMessagesFromStore();
 
         printf("Meck: ready — %02X%02X%02X%02X, name='%s'\n",
                self_id.pub_key[0], self_id.pub_key[1],
@@ -209,17 +257,30 @@ public:
             snprintf(echo, sizeof(echo), "%s: %s", _prefs->node_name, text);
 
             xSemaphoreTake(_mutex, portMAX_DELAY);
-            _msg_newest = (_msg_newest + 1) % P4_MSG_HISTORY_SIZE;
-            P4ChannelMessage& m = _messages[_msg_newest];
-            m.timestamp = ts;
-            m.channel_idx = channel_idx;
-            m.path_len = 0;  // local
-            m.valid = true;
-            strncpy(m.text, echo, P4_MSG_TEXT_LEN - 1);
-            m.text[P4_MSG_TEXT_LEN - 1] = '\0';
-            if (_msg_count < P4_MSG_HISTORY_SIZE) _msg_count++;
-            _msg_dirty = true;
+            P4ChannelMessage* ring = (channel_idx < MAX_GROUP_CHANNELS)
+                                       ? _msgs_ch[channel_idx] : nullptr;
+            P4ChannelMessage saved_copy;
+            bool wrote = false;
+            if (ring) {
+                _msg_newest_ch[channel_idx] = (_msg_newest_ch[channel_idx] + 1) % P4_MSG_PER_CHANNEL;
+                P4ChannelMessage& m = ring[_msg_newest_ch[channel_idx]];
+                m.timestamp = ts;
+                m.channel_idx = channel_idx;
+                m.path_len = 0;  // local
+                m.valid = true;
+                strncpy(m.text, echo, P4_MSG_TEXT_LEN - 1);
+                m.text[P4_MSG_TEXT_LEN - 1] = '\0';
+                if (_msg_count_ch[channel_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[channel_idx]++;
+                _msg_dirty = true;
+                saved_copy = m;
+                wrote = true;
+            }
             xSemaphoreGive(_mutex);
+
+            // Queue the SD save outside the mutex (deferred to meck_task)
+            if (wrote) {
+                meck_request_save_message(channel_idx, &saved_copy);
+            }
         }
         return ok;
     }
@@ -436,6 +497,60 @@ public:
         printf("Meck: %d contacts loaded from NVS\n", loaded);
     }
 
+    // ---- Channel message persistence (load from SD on boot) ----
+    //
+    // For each channel, opens /sdcard/meshcore/messages/ch_<idx>.bin and
+    // loads up to P4_MSG_PER_CHANNEL most recent records into the in-RAM
+    // ring. The file may have grown beyond the ring size; only the tail
+    // is loaded. Sets _msg_count_ch and _msg_newest_ch to match.
+    void loadMessagesFromStore() {
+        if (!_store) return;
+
+        // Buffer for one channel's tail. ~160KB on stack would overflow,
+        // so allocate from PSRAM heap (we already have plenty there).
+        size_t buf_size = P4_MSG_PER_CHANNEL * sizeof(P4MsgFileRecord);
+        P4MsgFileRecord* buf = (P4MsgFileRecord*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        if (!buf) {
+            printf("Meck: loadMessagesFromStore malloc failed\n");
+            return;
+        }
+
+        int total_loaded = 0;
+        for (uint8_t ch = 0; ch < MAX_GROUP_CHANNELS; ch++) {
+            P4ChannelMessage* ring = _msgs_ch[ch];
+            if (!ring) continue;
+
+            int n = _store->loadChannelMessageTail(
+                ch,
+                P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
+                (uint16_t)sizeof(P4MsgFileRecord),
+                buf, P4_MSG_PER_CHANNEL);
+            if (n <= 0) continue;
+
+            // Records are in chronological order (oldest first). Copy into
+            // the ring at indices 0..n-1; newest sits at index n-1.
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            for (int i = 0; i < n; i++) {
+                P4ChannelMessage& m = ring[i];
+                m.timestamp = buf[i].timestamp;
+                m.channel_idx = buf[i].channel_idx;
+                m.path_len = buf[i].path_len;
+                m.valid = (buf[i].flags & 0x01) != 0;
+                memcpy(m.text, buf[i].text, P4_MSG_TEXT_LEN);
+                m.text[P4_MSG_TEXT_LEN - 1] = '\0';
+            }
+            _msg_count_ch[ch]  = n;
+            _msg_newest_ch[ch] = n - 1;
+            _msg_dirty = true;
+            xSemaphoreGive(_mutex);
+            total_loaded += n;
+        }
+
+        free(buf);
+        printf("Meck: loadMessagesFromStore — %d total messages loaded across %d channels\n",
+               total_loaded, MAX_GROUP_CHANNELS);
+    }
+
     // ---- Accessors ----
 
     const char* getNodeName() const { return _prefs ? _prefs->node_name : "NONAME"; }
@@ -468,13 +583,18 @@ public:
     }
 
     int getMessages(P4ChannelMessage* dest, int max_count, uint8_t channel_idx) {
+        if (channel_idx >= MAX_GROUP_CHANNELS) return 0;
+        P4ChannelMessage* ring = _msgs_ch[channel_idx];
+        if (!ring) return 0;
+
         xSemaphoreTake(_mutex, portMAX_DELAY);
+        int newest = _msg_newest_ch[channel_idx];
+        int count  = _msg_count_ch[channel_idx];
         int out = 0;
-        for (int i = 0; i < P4_MSG_HISTORY_SIZE && out < max_count; i++) {
-            int idx = (_msg_newest - i + P4_MSG_HISTORY_SIZE) % P4_MSG_HISTORY_SIZE;
-            if (!_messages[idx].valid) continue;
-            if (_messages[idx].channel_idx != channel_idx) continue;
-            dest[out++] = _messages[idx];
+        for (int i = 0; i < count && out < max_count; i++) {
+            int idx = (newest - i + P4_MSG_PER_CHANNEL) % P4_MSG_PER_CHANNEL;
+            if (!ring[idx].valid) continue;
+            dest[out++] = ring[idx];
         }
         xSemaphoreGive(_mutex);
         return out;
@@ -511,14 +631,19 @@ protected:
         if (isOurOwnEcho(timestamp, ch_idx)) {
             uint8_t real_path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFE;
             xSemaphoreTake(_mutex, portMAX_DELAY);
-            for (int i = 0; i < _msg_count; i++) {
-                int idx = (_msg_newest + P4_MSG_HISTORY_SIZE - i) % P4_MSG_HISTORY_SIZE;
-                P4ChannelMessage& existing = _messages[idx];
-                if (existing.valid && existing.timestamp == timestamp &&
-                    existing.channel_idx == ch_idx && existing.path_len == 0) {
-                    existing.path_len = real_path_len;
-                    _msg_dirty = true;
-                    break;
+            P4ChannelMessage* ring = (ch_idx < MAX_GROUP_CHANNELS) ? _msgs_ch[ch_idx] : nullptr;
+            if (ring) {
+                int newest = _msg_newest_ch[ch_idx];
+                int count  = _msg_count_ch[ch_idx];
+                for (int i = 0; i < count; i++) {
+                    int idx = (newest + P4_MSG_PER_CHANNEL - i) % P4_MSG_PER_CHANNEL;
+                    P4ChannelMessage& existing = ring[idx];
+                    if (existing.valid && existing.timestamp == timestamp &&
+                        existing.path_len == 0) {
+                        existing.path_len = real_path_len;
+                        _msg_dirty = true;
+                        break;
+                    }
                 }
             }
             xSemaphoreGive(_mutex);
@@ -530,18 +655,30 @@ protected:
         printf("Meck: channel[%d] msg: %s\n", ch_idx, text);
 
         xSemaphoreTake(_mutex, portMAX_DELAY);
-        _msg_newest = (_msg_newest + 1) % P4_MSG_HISTORY_SIZE;
-        P4ChannelMessage& m = _messages[_msg_newest];
-        m.timestamp = timestamp;
-        m.channel_idx = ch_idx;
-        m.path_len = path_len;
-        m.valid = true;
-        strncpy(m.text, text, P4_MSG_TEXT_LEN - 1);
-        m.text[P4_MSG_TEXT_LEN - 1] = '\0';
-        if (_msg_count < P4_MSG_HISTORY_SIZE) _msg_count++;
-        _msg_unread_ch[ch_idx]++;
-        _msg_dirty = true;
+        P4ChannelMessage* ring = (ch_idx < MAX_GROUP_CHANNELS) ? _msgs_ch[ch_idx] : nullptr;
+        P4ChannelMessage saved_copy;
+        bool wrote = false;
+        if (ring) {
+            _msg_newest_ch[ch_idx] = (_msg_newest_ch[ch_idx] + 1) % P4_MSG_PER_CHANNEL;
+            P4ChannelMessage& m = ring[_msg_newest_ch[ch_idx]];
+            m.timestamp = timestamp;
+            m.channel_idx = ch_idx;
+            m.path_len = path_len;
+            m.valid = true;
+            strncpy(m.text, text, P4_MSG_TEXT_LEN - 1);
+            m.text[P4_MSG_TEXT_LEN - 1] = '\0';
+            if (_msg_count_ch[ch_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[ch_idx]++;
+            _msg_unread_ch[ch_idx]++;
+            _msg_dirty = true;
+            saved_copy = m;
+            wrote = true;
+        }
         xSemaphoreGive(_mutex);
+
+        // Queue the SD save outside the mutex (deferred to meck_task)
+        if (wrote) {
+            meck_request_save_message(ch_idx, &saved_copy);
+        }
     }
 
     void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt,
@@ -719,9 +856,9 @@ private:
     P4DataStore* _store;
     P4NodePrefs* _prefs;
 
-    P4ChannelMessage _messages[P4_MSG_HISTORY_SIZE];
-    int _msg_count;
-    int _msg_newest;
+    P4ChannelMessage* _msgs_ch[MAX_GROUP_CHANNELS];
+    int _msg_count_ch[MAX_GROUP_CHANNELS];
+    int _msg_newest_ch[MAX_GROUP_CHANNELS];
     volatile int _msg_unread_ch[MAX_GROUP_CHANNELS];
     volatile bool _msg_dirty;
 

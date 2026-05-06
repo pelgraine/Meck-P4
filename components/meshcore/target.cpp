@@ -182,6 +182,111 @@ extern "C" void meck_set_antenna_default() {
 }
 
 // ============================================================================
+// Battery readout — wrappers around LilyGo's BQ27220 fuel gauge
+// ----------------------------------------------------------------------------
+// LilyGo's main.cpp constructs `auto BQ27220 = std::make_unique<...>(...)` at
+// file scope. We extern it here so the meshcore component can read battery
+// state. Voltage is always trustworthy; the chip's SoC% may drift if the
+// cell isn't characterised in the BQ27220's data flash (a known issue
+// across Meshcore P4 forks — see MeshOS issue #2192).
+//
+// LilyGo's BQ27220 ships with a Design Capacity of 3000 mAh in its data
+// flash, but the physical cell on both T-Deck Pro and T-Display P4 is
+// approximately 2000 mAh. The chip's reported full / remaining mAh are
+// therefore inflated. We work around this by:
+//   - Treating Full Charge as a fixed 2000 mAh constant
+//   - Computing Remaining from the voltage curve, not from the chip
+// This makes Voltage, Charge%, and Remaining mAh internally consistent in
+// the UI. Reprogramming the BQ27220's data flash to set Design Capacity =
+// 2000 would be a more proper fix, but is out of scope here.
+// ============================================================================
+
+extern std::unique_ptr<Cpp_Bus_Driver::Bq27220xxxx> BQ27220;
+
+// Actual physical cell capacity. LilyGo factory default in the BQ27220's
+// data flash reads 3000 mAh, which is wrong for both T-Deck Pro and
+// T-Display P4. Override here.
+static const uint16_t MECK_BATTERY_CAP_MAH = 2000;
+
+extern "C" bool meck_battery_available() {
+    return (bool)BQ27220;
+}
+
+extern "C" uint16_t meck_battery_voltage_mv() {
+    if (!BQ27220) return 0;
+    return BQ27220->get_voltage();
+}
+
+extern "C" int16_t meck_battery_current_ma() {
+    if (!BQ27220) return 0;
+    return BQ27220->get_current();
+}
+
+extern "C" uint8_t meck_battery_pct_from_chip() {
+    if (!BQ27220) return 0;
+    uint16_t soc = BQ27220->get_status_of_charge();
+    if (soc > 100) soc = 100;  // clamp; chip can momentarily report >100
+    return (uint8_t)soc;
+}
+
+extern "C" int8_t meck_battery_temp_c() {
+    if (!BQ27220) return 0;
+    return (int8_t)BQ27220->get_chip_temperature_celsius();
+}
+
+// Forward decl for use below
+extern "C" uint8_t meck_battery_pct_from_voltage(uint16_t mv);
+
+extern "C" uint16_t meck_battery_remaining_mah() {
+    if (!BQ27220) return 0;
+    // Derive from voltage so this stays consistent with the displayed
+    // voltage curve % even when the chip's own SoC drifts.
+    uint16_t mv = BQ27220->get_voltage();
+    uint8_t pct = meck_battery_pct_from_voltage(mv);
+    return (uint16_t)(((uint32_t)MECK_BATTERY_CAP_MAH * pct) / 100);
+}
+
+extern "C" uint16_t meck_battery_full_charge_mah() {
+    // Always report the actual cell capacity, not what the chip thinks.
+    return MECK_BATTERY_CAP_MAH;
+}
+
+extern "C" uint16_t meck_battery_time_to_empty_min() {
+    if (!BQ27220) return 0;
+    return BQ27220->get_time_to_empty();
+}
+
+// Voltage-to-SoC for a single Li-ion cell at rest. Always trustworthy
+// regardless of BQ27220 calibration state. Linear interpolation between
+// well-known points on the discharge curve. Under load this will read
+// slightly low; while charging slightly high — acceptable for a sanity
+// check against the chip's reported SoC.
+extern "C" uint8_t meck_battery_pct_from_voltage(uint16_t mv) {
+    struct Point { uint16_t mv; uint8_t pct; };
+    static const Point curve[] = {
+        {3300,   0},
+        {3500,   5},
+        {3700,  20},
+        {3850,  50},
+        {4000,  85},
+        {4200, 100},
+    };
+    const int N = sizeof(curve) / sizeof(curve[0]);
+    if (mv <= curve[0].mv)     return 0;
+    if (mv >= curve[N-1].mv)   return 100;
+    for (int i = 1; i < N; i++) {
+        if (mv < curve[i].mv) {
+            uint16_t mv0 = curve[i-1].mv;
+            uint16_t mv1 = curve[i].mv;
+            uint8_t  p0  = curve[i-1].pct;
+            uint8_t  p1  = curve[i].pct;
+            return p0 + (uint8_t)(((uint32_t)(mv - mv0) * (p1 - p0)) / (mv1 - mv0));
+        }
+    }
+    return 100;
+}
+
+// ============================================================================
 // SKY13453 antenna selection
 // VCTL HIGH = RF1 (internal/PCB antenna, LilyGo factory default)
 // VCTL LOW  = RF2 (external/SMA)

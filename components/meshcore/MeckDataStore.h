@@ -35,6 +35,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
@@ -110,6 +113,7 @@ class P4DataStore {
     static constexpr const char* SD_CHANNELS_PATH = "/sdcard/meshcore/channels.bin";
     static constexpr const char* SD_IDENTITY_PATH = "/sdcard/meshcore/identity/_main.id";
     static constexpr const char* SD_CONTACTS_PATH = "/sdcard/meshcore/contacts.bin";
+    static constexpr const char* SD_MESSAGES_DIR  = "/sdcard/meshcore/messages";
 
     bool _initialized;
 
@@ -534,11 +538,30 @@ public:
         ESP_LOGI(TAG, "backupToSD: prefs and channels backed up");
     }
 
+    // Ensure all Meck SD directories exist. Idempotent — safe to call on
+    // every boot. POSIX mkdir doesn't create parents, so we walk top-down.
+    // Logs a warning if any level can't be created but continues — caller
+    // sites will fail with their own warning if writes can't proceed.
+    void ensureSDDirectories() {
+        if (!p4_sdcard_is_mounted()) return;
+        if (!ensureDir("/sdcard/meshcore")) {
+            ESP_LOGW(TAG, "ensureSDDirectories: cannot create /sdcard/meshcore (errno=%d)", errno);
+            return;
+        }
+        if (!ensureDir("/sdcard/meshcore/identity")) {
+            ESP_LOGW(TAG, "ensureSDDirectories: cannot create /sdcard/meshcore/identity (errno=%d)", errno);
+        }
+        if (!ensureDir(SD_MESSAGES_DIR)) {
+            ESP_LOGW(TAG, "ensureSDDirectories: cannot create %s (errno=%d)", SD_MESSAGES_DIR, errno);
+        }
+    }
+
     // Restore from SD if NVS is empty (e.g. after erase_flash).
     // Called once during boot, before mesh starts.
     // Returns true if anything was restored.
     bool restoreFromSD() {
         if (!p4_sdcard_is_mounted()) return false;
+        ensureSDDirectories();  // create dirs once per boot for fresh SDs
         bool restored = false;
 
         // Check if NVS has identity
@@ -656,5 +679,210 @@ public:
         nvs_close(handle);
 
         return (err == ESP_OK && len == PRV_KEY_SIZE + PUB_KEY_SIZE);
+    }
+
+    // =====================================================================
+    // Channel message history persistence (SD card only — too large for NVS)
+    //
+    // File layout: /sdcard/meshcore/messages/ch_<idx>.bin per channel
+    //   [P4MsgFileHeader]   16 bytes (magic, version, record_size, reserved)
+    //   [record 0][record 1]...[record N-1]   each record_size bytes
+    //
+    // Append-only: each new message appends one record to the tail. Header
+    // is written once when the file is created and never modified again, so
+    // record count is computed at load time from file size. This keeps per-
+    // message IO tiny (~308 bytes) and avoids rewriting the whole file.
+    //
+    // Schema mismatch policy: file is renamed to ch_<idx>.bin.bak and a
+    // fresh file is created. Old data is preserved (renamed) for recovery
+    // but the in-RAM ring starts empty.
+    // =====================================================================
+
+    // Build the per-channel file path. out_buf must be >= 64 bytes.
+    static void buildMessagePath(uint8_t channel_idx, char* out_buf, size_t buf_len) {
+        snprintf(out_buf, buf_len, "%s/ch_%u.bin", SD_MESSAGES_DIR, (unsigned)channel_idx);
+    }
+
+    // Ensure a single directory exists. Returns true if it now exists (was
+    // created or already there), false on hard error. POSIX mkdir doesn't
+    // create parents, so callers must build paths top-down.
+    static bool ensureDir(const char* path) {
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            return S_ISDIR(st.st_mode);
+        }
+        if (mkdir(path, 0755) == 0) return true;
+        return false;
+    }
+
+    // Ensure the messages directory and its parent exist. Called lazily on
+    // first save in case earlier persistence flows haven't already created
+    // /sdcard/meshcore/.
+    void ensureMessagesDir() {
+        if (!p4_sdcard_is_mounted()) return;
+        if (!ensureDir("/sdcard/meshcore")) {
+            ESP_LOGW(TAG, "ensureMessagesDir: cannot create /sdcard/meshcore (errno=%d)", errno);
+            return;
+        }
+        if (!ensureDir(SD_MESSAGES_DIR)) {
+            ESP_LOGW(TAG, "ensureMessagesDir: cannot create %s (errno=%d)", SD_MESSAGES_DIR, errno);
+        }
+    }
+
+    // Append one record to a channel's message file. The header is created
+    // on first write; thereafter we append to the tail. On magic/version
+    // mismatch the existing file is renamed to .bak and a fresh one written.
+    // Returns true on successful append.
+    bool appendChannelMessageRecord(uint8_t channel_idx,
+                                     uint32_t expected_magic,
+                                     uint16_t expected_version,
+                                     uint16_t record_size,
+                                     const void* record_bytes)
+    {
+        if (!record_bytes || record_size == 0) return false;
+        if (!p4_sdcard_is_mounted()) return false;
+
+        ensureMessagesDir();
+
+        char path[80];
+        buildMessagePath(channel_idx, path, sizeof(path));
+
+        // Try opening for read/write (existing file); fall through to fresh
+        // create if it doesn't exist or is truncated.
+        FILE* f = fopen(path, "r+b");
+        bool fresh_file = false;
+
+        if (f) {
+            // Existing file. Validate header.
+            struct {
+                uint32_t magic;
+                uint16_t version;
+                uint16_t record_size;
+                uint32_t reserved[2];
+            } __attribute__((packed)) hdr;
+
+            if (fread(&hdr, sizeof(hdr), 1, f) == 1 &&
+                hdr.magic == expected_magic &&
+                hdr.version == expected_version &&
+                hdr.record_size == record_size) {
+                // Header OK; seek to end and append
+                fseek(f, 0, SEEK_END);
+                size_t wrote = fwrite(record_bytes, 1, record_size, f);
+                fclose(f);
+                return wrote == record_size;
+            }
+
+            // Header mismatch — rename and fall through to fresh create
+            fclose(f);
+            char bak_path[96];
+            snprintf(bak_path, sizeof(bak_path), "%s.bak", path);
+            remove(bak_path);  // ignore failure if no prior bak
+            if (rename(path, bak_path) == 0) {
+                ESP_LOGW(TAG, "appendChannelMessageRecord: schema mismatch on ch %u, "
+                              "renamed to %s, starting fresh", (unsigned)channel_idx, bak_path);
+            } else {
+                ESP_LOGW(TAG, "appendChannelMessageRecord: schema mismatch on ch %u, "
+                              "rename failed (errno=%d), overwriting", (unsigned)channel_idx, errno);
+            }
+            fresh_file = true;
+        } else {
+            fresh_file = true;
+        }
+
+        // Fresh file: write header then first record.
+        f = fopen(path, "wb");
+        if (!f) {
+            ESP_LOGW(TAG, "appendChannelMessageRecord: fopen(%s, wb) failed (errno=%d)",
+                     path, errno);
+            return false;
+        }
+
+        struct {
+            uint32_t magic;
+            uint16_t version;
+            uint16_t record_size;
+            uint32_t reserved[2];
+        } __attribute__((packed)) hdr;
+        hdr.magic = expected_magic;
+        hdr.version = expected_version;
+        hdr.record_size = record_size;
+        hdr.reserved[0] = 0;
+        hdr.reserved[1] = 0;
+
+        bool ok = (fwrite(&hdr, sizeof(hdr), 1, f) == 1) &&
+                  (fwrite(record_bytes, 1, record_size, f) == record_size);
+        fclose(f);
+
+        if (ok && fresh_file) {
+            ESP_LOGI(TAG, "appendChannelMessageRecord: created %s", path);
+        }
+        return ok;
+    }
+
+    // Load up to max_records most recent records from a channel's file into
+    // records_buf (each entry record_size bytes). Returns number actually
+    // loaded. If the file's record count exceeds max_records, only the
+    // last max_records are loaded.
+    int loadChannelMessageTail(uint8_t channel_idx,
+                                uint32_t expected_magic,
+                                uint16_t expected_version,
+                                uint16_t record_size,
+                                void* records_buf,
+                                int max_records)
+    {
+        if (!records_buf || record_size == 0 || max_records <= 0) return 0;
+        if (!p4_sdcard_is_mounted()) return 0;
+
+        char path[80];
+        buildMessagePath(channel_idx, path, sizeof(path));
+        if (!p4_sdcard_file_exists(path)) return 0;
+
+        FILE* f = fopen(path, "rb");
+        if (!f) return 0;
+
+        struct {
+            uint32_t magic;
+            uint16_t version;
+            uint16_t record_size;
+            uint32_t reserved[2];
+        } __attribute__((packed)) hdr;
+
+        if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
+            fclose(f);
+            return 0;
+        }
+
+        if (hdr.magic != expected_magic ||
+            hdr.version != expected_version ||
+            hdr.record_size != record_size) {
+            fclose(f);
+            ESP_LOGW(TAG, "loadChannelMessageTail: schema mismatch on ch %u, "
+                          "skipping load (caller will rename on next save)",
+                     (unsigned)channel_idx);
+            return 0;
+        }
+
+        // Compute total record count from file size (append-only: count
+        // grows beyond max_records over time but only the tail is loaded).
+        fseek(f, 0, SEEK_END);
+        long file_size = ftell(f);
+        long data_size = file_size - (long)sizeof(hdr);
+        if (data_size < 0) { fclose(f); return 0; }
+
+        long total_records = data_size / record_size;
+        long skip_records = (total_records > max_records) ? (total_records - max_records) : 0;
+        long load_records = total_records - skip_records;
+
+        long offset = (long)sizeof(hdr) + (skip_records * record_size);
+        if (fseek(f, offset, SEEK_SET) != 0) { fclose(f); return 0; }
+
+        size_t bytes_to_read = (size_t)(load_records * record_size);
+        size_t got = fread(records_buf, 1, bytes_to_read, f);
+        fclose(f);
+
+        int loaded = (int)(got / record_size);
+        ESP_LOGI(TAG, "loadChannelMessageTail: ch %u loaded %d of %ld total",
+                 (unsigned)channel_idx, loaded, total_records);
+        return loaded;
     }
 };

@@ -69,4 +69,5 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DMAX_GROUP_CHANNELS=8
+    -DMAX_CONTACTS=2000
 )
