@@ -1,16 +1,22 @@
-# MeshCore protocol stack + radio adapter + globals for T-Display P4 (Meck)
+# MeshCore protocol stack + radio adapter + Meck application for T-Display P4
 #
-# Phase C.6 step A — smoke test. Compiles:
-#   - MeshCore protocol stack (Mesh, Dispatcher, Packet, etc.)
+# Phase B.1 — full Meck stack instantiation. Compiles:
+#   - MeshCore protocol stack (Mesh, Dispatcher, Packet, Identity, etc.)
 #   - ed25519 crypto
 #   - arduino_compat shim
-#   - target.cpp        (radio attach, LoRa params, meck_radio_attach())
-#   - meck_globals.cpp  (clock, rng, rtc, packets, tables singletons)
+#   - target.cpp        (radio attach: meck_radio_attach())
+#   - meck_globals.cpp  (legacy globals from C.5, currently unused but harmless)
+#   - meck_app.cpp      (Meck instance, NVS init, meck_task)
+#
+# Headers (no .cpp):
+#   - Meck.h            (BaseChatMesh subclass, ported from old repo's P4Mesh.h)
+#   - MeckDataStore.h   (NVS + SD backed storage, ported from P4DataStore.h)
+#   - MeckSDCard.h      (read-only SD helpers; LilyGo handles the actual mount)
 #
 # Excluded:
 #   helpers/IdentityStore.cpp  — uses Arduino LittleFS/SD API (FILESYSTEM, File)
 #   meshcore_src/TransportKeyStore.cpp — depends on IdentityStore.h
-# Both will be replaced with NVS-backed equivalents later.
+# Both are replaced by MeckDataStore for our P4 environment.
 
 file(GLOB MESHCORE_SRCS
     "meshcore_src/*.cpp"
@@ -32,6 +38,7 @@ idf_component_register(
         "arduino_compat.cpp"
         "target.cpp"
         "meck_globals.cpp"
+        "meck_app.cpp"
     INCLUDE_DIRS
         "."
         "meshcore_src"
@@ -47,6 +54,8 @@ idf_component_register(
         esp_system
         esp_hw_support
         freertos
+        vfs
+        fatfs
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

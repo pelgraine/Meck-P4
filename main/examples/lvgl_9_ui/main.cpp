@@ -5186,7 +5186,7 @@ extern "C" void app_main(void)
     xTaskCreate(device_rtc_task, "device_rtc_task", 4 * 1024, NULL, 3, NULL);
     xTaskCreate(device_at_task, "device_at_task", 4 * 1024, NULL, 3, &At_Task_Handle);
     // xTaskCreate(esp32p4_sleep_task, "esp32p4_sleep_task", 4 * 1024, NULL, 3, &Sleep_Task_Handle);
-    xTaskCreate(device_rf_task, "device_rf_task", 4 * 1024, NULL, 3, &Rf_Task_Handle);
+    // xTaskCreate(device_rf_task, "device_rf_task", 4 * 1024, NULL, 3, &Rf_Task_Handle);  // disabled — Meck owns the SX1262 now
     xTaskCreate(iis_transmission_data_stream_task, "iis_transmission_data_stream_task", 4 * 1024, NULL, 4, &Iis_Transmission_Data_Stream_Task);
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     xTaskCreate(device_nfc_task, "device_nfc_task", 8 * 1024, NULL, 3, &Nfc_Task_Handle);
@@ -5209,6 +5209,8 @@ extern "C" void app_main(void)
     // (916.575 MHz / 62.5 kHz / SF7 / sync word 0x1424).
     // Nothing else in Meck is wired up yet — this only proves coexistence.
     meck_radio_attach();
+    meck_app_init();
+    meck_app_start();
     // ---- end Meck ----
 
     //     while (1)
