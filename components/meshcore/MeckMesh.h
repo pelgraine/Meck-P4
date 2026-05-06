@@ -660,7 +660,11 @@ protected:
     ContactInfo* processAck(const uint8_t* data) override { return NULL; }
 
     uint8_t getPathHashSize() const override {
-        return _prefs ? _prefs->path_hash_mode : 1;
+        // path_hash_mode is a 0-indexed mode per the MeshCore companion
+        // protocol: mode 0 = 1 byte, mode 1 = 2 bytes, mode 2 = 3 bytes.
+        // Default is mode 0 (= 1 byte), which is the safe interop choice
+        // until firmware >= 1.14 reaches critical mass on the network.
+        return (_prefs ? _prefs->path_hash_mode : 0) + 1;
     }
 
 private:
