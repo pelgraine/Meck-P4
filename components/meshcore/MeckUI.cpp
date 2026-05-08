@@ -6,7 +6,7 @@
  *   - Tile 1: Recent Heard (live list of received adverts)
  *   - Tile 2: Radio Details (current freq/BW/SF/CR/TX/sync word)
  *   - Tile 3: Advert (long-press to send manual advert)
- *   - Tile 4: GPS (placeholder, awaiting accessor wiring)
+ *   - Tile 4: GPS (status/fix/sats/position/altitude + last NMEA sentences)
  *   - Tile 5: Battery Gauge (placeholder, awaiting accessor wiring)
  *   - Tile 6: Hibernate (long-press handler comes in B.5)
  *
@@ -41,6 +41,7 @@
 #include <sys/lock.h>
 #include "lvgl.h"
 #include "t_display_p4_driver.h"
+#include "esp_timer.h"
 
 #include <cstdio>
 #include <cstring>
@@ -856,7 +857,14 @@ static void create_page_advert(lv_obj_t *page) {
 }
 
 // ============================================================================
-// Tile 4: GPS (placeholder)
+// Tile 4: GPS
+//
+// Layout: title (green) + single detail block with 6 sections:
+//   Status, Fix, Satellites, Position, Altitude, Sentences (count + rate).
+//
+// Data is pulled via meck_gps_get_snapshot() in ui_update_timer_cb at 500ms.
+// device_gps_task in main.cpp populates Sys_Status.l76k continuously, so
+// display values are at most ~500ms stale.
 // ============================================================================
 
 static void create_page_gps(lv_obj_t *page) {
@@ -867,13 +875,7 @@ static void create_page_gps(lv_obj_t *page) {
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     lbl_gps_detail = lv_label_create(page);
-    lv_label_set_text(lbl_gps_detail,
-        "Status:     L76K detected\n"
-        "Fix:        --\n"
-        "Satellites: --\n"
-        "Position:   --\n"
-        "Altitude:   --\n\n"
-        "(GPS data hookup pending)");
+    lv_label_set_text(lbl_gps_detail, "Loading...");
     lv_obj_set_style_text_color(lbl_gps_detail, lv_color_white(), 0);
     lv_obj_set_style_text_font(lbl_gps_detail, &lv_font_montserrat_18, 0);
     lv_label_set_long_mode(lbl_gps_detail, LV_LABEL_LONG_WRAP);
@@ -1656,8 +1658,112 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         }
     }
 
-    // Battery readout TODO: needs LilyGo battery accessor identified.
-    // See B.4 follow-up for grep commands.
+    // GPS tile: refresh detail block at 500ms tick.
+    // Data is populated by device_gps_task in main.cpp at ~1Hz, so we may
+    // see the same values across two consecutive ticks — that's fine.
+    // Sentence rate is computed as a delta between consecutive timer ticks,
+    // smoothed with a running average over 4 samples (~2 sec window) so
+    // the displayed rate doesn't jitter.
+    if (lbl_gps_detail) {
+        MeckGpsSnapshot snap;
+        meck_gps_get_snapshot(&snap);
+
+        if (!snap.init_ok) {
+            lv_label_set_text(lbl_gps_detail, "L76K not detected");
+        } else {
+            // --- Sentence rate calc (smoothed) ---
+            static uint32_t prev_count = 0;
+            static uint32_t prev_ms    = 0;
+            static float    rate_avg   = 0.0f;
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+            if (prev_ms != 0 && now_ms > prev_ms && snap.sentence_count >= prev_count) {
+                uint32_t delta_count = snap.sentence_count - prev_count;
+                uint32_t delta_ms    = now_ms - prev_ms;
+                float    instant_rate = (delta_count * 1000.0f) / delta_ms;
+                // Exponential moving average, alpha=0.25 (4-sample equivalent)
+                rate_avg = (rate_avg == 0.0f)
+                    ? instant_rate
+                    : (rate_avg * 0.75f + instant_rate * 0.25f);
+            }
+            prev_count = snap.sentence_count;
+            prev_ms    = now_ms;
+
+            // Status — surface the location_status char + init flag
+            const char *status_str;
+            switch (snap.status) {
+                case 'A': status_str = "Active";       break;
+                case 'V': status_str = "Acquiring";    break;
+                case 'D': status_str = "Differential"; break;
+                default:  status_str = "Unknown";      break;
+            }
+
+            // Fix — combine GGA mode with RMC status. Show TTFF once we have it.
+            char fix_str[64];
+            if (!snap.fix_valid) {
+                snprintf(fix_str, sizeof(fix_str), "No fix");
+            } else {
+                const char *mode_str;
+                switch (snap.gps_mode) {
+                    case 1:  mode_str = "GPS";  break;
+                    case 2:  mode_str = "DGPS"; break;
+                    case 6:  mode_str = "DR";   break;
+                    default: mode_str = "?";    break;
+                }
+                snprintf(fix_str, sizeof(fix_str), "%s  TTFF %us",
+                    mode_str, (unsigned)snap.time_to_first_fix_s);
+            }
+
+            // Satellites — visible/used split + HDOP if meaningful.
+            // "Visible" comes from GSV (heard but not necessarily locked);
+            // "used" comes from GGA (contributing to current fix). Big gap
+            // between visible and used = marginal sky view or RF problem.
+            char sat_str[80];
+            if (snap.hdop > 0.0f && snap.hdop < 25.0f) {
+                snprintf(sat_str, sizeof(sat_str),
+                    "%u visible, %u used  HDOP %.1f",
+                    (unsigned)snap.sats_visible,
+                    (unsigned)snap.sats_used, snap.hdop);
+            } else {
+                snprintf(sat_str, sizeof(sat_str),
+                    "%u visible, %u used",
+                    (unsigned)snap.sats_visible,
+                    (unsigned)snap.sats_used);
+            }
+
+            // Position — decimal degrees, 6dp (~11cm precision)
+            char pos_str[64];
+            if (snap.fix_valid) {
+                snprintf(pos_str, sizeof(pos_str), "%.6f, %.6f",
+                    snap.lat_e7 / 1e7, snap.lon_e7 / 1e7);
+            } else {
+                snprintf(pos_str, sizeof(pos_str), "--");
+            }
+
+            // Altitude — meters MSL
+            char alt_str[32];
+            if (snap.altitude_valid && snap.fix_valid) {
+                snprintf(alt_str, sizeof(alt_str), "%.1f m", snap.altitude_m);
+            } else {
+                snprintf(alt_str, sizeof(alt_str), "--");
+            }
+
+            // Sentences — total count + smoothed rate
+            char sent_str[48];
+            snprintf(sent_str, sizeof(sent_str), "%u  (%.0f/sec)",
+                (unsigned)snap.sentence_count, rate_avg);
+
+            char buf[384];
+            snprintf(buf, sizeof(buf),
+                "Status:     %s\n"
+                "Fix:        %s\n"
+                "Satellites: %s\n"
+                "Position:   %s\n"
+                "Altitude:   %s\n"
+                "Sentences:  %s",
+                status_str, fix_str, sat_str, pos_str, alt_str, sent_str);
+            lv_label_set_text(lbl_gps_detail, buf);
+        }
+    }
 }
 
 // ============================================================================

@@ -58,6 +58,21 @@
 #include "esp_private/esp_cache_private.h"
 #include <fstream>
 
+// =============================================================================
+// Meck build-time configuration
+// =============================================================================
+
+// Force the L76K to stay at 9600 baud, bypassing LilyGo's auto-upgrade to
+// 115200. Originally added to test whether the L76K was actually settled
+// at 9600 (as was the case with the T-Echo Card) and the apparent "115200
+// NMEA" was just well-aligned UART framing of 9600 data. Diagnostic ran
+// 2026-05-08: at 9600 the UART read garbage (binary high bits, no `$G`
+// prefixes). That's 115200 data bits being read at 9600 — module is
+// genuinely at 115200. Setting back to 0; leaving the switch in place
+// for future modules where the hypothesis might apply.
+#define MECK_GPS_FORCE_9600 0
+
+
 #define SD_FILE_PATH_MUSIC "/sdcard/t_display_p4_lvgl_9_ui_resource/music/Erik Satie-Gymnopedie 1-Chase Coleman (piano).wav"
 
 #define LVGL_TICK_PERIOD_MS 1
@@ -235,6 +250,38 @@ struct System_Status
     struct
     {
         bool init_flag = false;
+
+        // Status / fix (from RMC + GGA)
+        char location_status = 'V';        // 'A'=active, 'V'=void, 'D'=diff
+        bool fix_valid = false;            // ever had a fix this session
+        uint8_t gps_mode = 0;              // GGA: 0=none, 1=GPS, 2=DGPS, 6=DR
+        uint8_t sats_used = 0;             // GGA online_satellite_count
+        uint8_t sats_visible = 0;          // GSV sum across all constellations
+        float hdop = 99.9f;                // GGA HDOP (lower = better)
+
+        // Position — signed degrees * 1e7 (atomic 32-bit store on ESP32,
+        // ~11mm precision, matches the e7 format used by Meck contact records)
+        int32_t lat_e7 = 0;                // signed: S = negative
+        int32_t lon_e7 = 0;                // signed: W = negative
+
+        // Altitude (meters MSL, scanned from raw GGA — LilyGo's parser drops it)
+        float altitude_m = 0.0f;
+        bool altitude_valid = false;
+
+        // Last UTC fix time (from RMC)
+        uint16_t year = 0; uint8_t month = 0, day = 0;
+        uint8_t hour = 0, minute = 0; float second = 0.0f;
+        bool time_valid = false;
+
+        // Diagnostics
+        uint32_t time_to_first_fix_s = 0;
+        uint32_t last_sentence_ms = 0;
+        uint32_t sentence_count = 0;
+
+        // NMEA sentence ring for the Sentences view (last 8 lines, 96 char each)
+        static constexpr uint8_t SENTENCE_RING_N = 8;
+        char sentences[SENTENCE_RING_N][96];
+        uint8_t sentence_head = 0;         // index of next slot to write
     } l76k;
 
     struct
@@ -1311,10 +1358,174 @@ void device_battery_health_task(void *arg)
     }
 }
 
+// =============================================================================
+// GPS helpers — push parsed L76k data into Sys_Status.l76k for UI consumption
+// =============================================================================
+
+// Push one NMEA line into the sentence ring (skips non-$ lines, trims \r).
+static void l76k_push_sentence(const char *line, size_t len)
+{
+    if (len == 0 || line[0] != '$') return;
+    if (len > 95) len = 95;
+    while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n')) len--;
+    if (len == 0) return;
+
+    char *slot = Sys_Status.l76k.sentences[Sys_Status.l76k.sentence_head];
+    memcpy(slot, line, len);
+    slot[len] = '\0';
+
+    Sys_Status.l76k.sentence_head =
+        (Sys_Status.l76k.sentence_head + 1) % Sys_Status.l76k.SENTENCE_RING_N;
+    Sys_Status.l76k.sentence_count++;
+    Sys_Status.l76k.last_sentence_ms = esp_log_timestamp();
+}
+
+// Split a raw NMEA buffer into lines and feed each into the ring.
+static void l76k_split_buffer_into_sentences(const uint8_t *data, size_t len)
+{
+    const char *p = (const char *)data;
+    size_t line_start = 0;
+    for (size_t i = 0; i < len; i++)
+    {
+        if (p[i] == '\n')
+        {
+            l76k_push_sentence(p + line_start, i - line_start);
+            line_start = i + 1;
+        }
+    }
+}
+
+// Scan the buffer for any *GGA sentence and pull altitude (field 9, meters MSL).
+// Handles GP/GN/GL/BD/GA/GB talker prefixes. Returns true on success.
+static bool l76k_extract_altitude(const uint8_t *data, size_t len, float &alt_m)
+{
+    const char *p = (const char *)data;
+    for (size_t i = 0; i + 7 < len; i++)
+    {
+        if (p[i] == '$' && p[i + 3] == 'G' && p[i + 4] == 'G' &&
+            p[i + 5] == 'A' && p[i + 6] == ',')
+        {
+            // Walk to start of field 9 (9 commas from start of sentence)
+            size_t j = i;
+            int field = 0;
+            while (j < len && field < 9)
+            {
+                if (p[j] == ',') field++;
+                j++;
+            }
+            if (field != 9 || j >= len) continue;
+            // Parse decimal until next comma or '*'
+            char tmp[16] = {0};
+            int k = 0;
+            while (j < len && k < 15 && p[j] != ',' && p[j] != '*')
+            {
+                tmp[k++] = p[j++];
+            }
+            if (k > 0)
+            {
+                alt_m = atof(tmp);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Scan the buffer for *GSV sentences and sum the "total satellites in view"
+// field across all constellations (GP=GPS, GL=GLONASS, BD/GB=BeiDou, GA=Galileo,
+// GN=combined). Each constellation reports its own count in field 3 of its
+// FIRST GSV sentence (when there are >4 sats, GSV is split across multiple
+// sentences with the same total — we want the FIRST per talker only).
+//
+// This is diagnostic data: tells us how many satellites the receiver can
+// hear, regardless of whether it can lock onto enough for a fix. Used
+// versus visible reveals "antenna deaf" vs "marginal sky view".
+static uint8_t l76k_extract_sats_visible(const uint8_t *data, size_t len)
+{
+    const char *p = (const char *)data;
+    // Track which talker prefixes we've already counted to avoid summing
+    // multi-sentence GSV groups (e.g. $GPGSV,3,1,... $GPGSV,3,2,... ).
+    bool seen_gp = false, seen_gl = false, seen_bd = false;
+    bool seen_ga = false, seen_gn = false, seen_gb = false;
+    uint8_t total = 0;
+
+    for (size_t i = 0; i + 7 < len; i++)
+    {
+        if (p[i] != '$') continue;
+        if (p[i + 3] != 'G' || p[i + 4] != 'S' || p[i + 5] != 'V' || p[i + 6] != ',')
+            continue;
+
+        // Identify talker prefix (chars at i+1, i+2)
+        bool *seen_flag = nullptr;
+        if      (p[i + 1] == 'G' && p[i + 2] == 'P') seen_flag = &seen_gp;
+        else if (p[i + 1] == 'G' && p[i + 2] == 'L') seen_flag = &seen_gl;
+        else if (p[i + 1] == 'B' && p[i + 2] == 'D') seen_flag = &seen_bd;
+        else if (p[i + 1] == 'G' && p[i + 2] == 'A') seen_flag = &seen_ga;
+        else if (p[i + 1] == 'G' && p[i + 2] == 'N') seen_flag = &seen_gn;
+        else if (p[i + 1] == 'G' && p[i + 2] == 'B') seen_flag = &seen_gb;
+        else continue;
+
+        if (*seen_flag) continue;        // already counted this constellation
+        *seen_flag = true;
+
+        // Walk to start of field 3 (satellites-in-view count): 3 commas in
+        size_t j = i;
+        int field = 0;
+        while (j < len && field < 3)
+        {
+            if (p[j] == ',') field++;
+            j++;
+        }
+        if (field != 3 || j >= len) continue;
+
+        // Parse the integer up to the next comma or '*'
+        char tmp[8] = {0};
+        int k = 0;
+        while (j < len && k < 7 && p[j] != ',' && p[j] != '*')
+        {
+            tmp[k++] = p[j++];
+        }
+        if (k > 0)
+        {
+            int n = atoi(tmp);
+            if (n > 0 && n < 100) total += (uint8_t)n;
+        }
+    }
+    return total;
+}
+
+// Convert L76k's degrees+minutes+direction to signed degrees * 1e7.
+static inline int32_t rmc_lat_to_e7(uint8_t deg, float min,
+                                    const std::string &dir)
+{
+    double d = (double)deg + (double)min / 60.0;
+    if (dir == "S") d = -d;
+    return (int32_t)(d * 1e7);
+}
+static inline int32_t rmc_lon_to_e7(uint8_t deg, float min,
+                                    const std::string &dir)
+{
+    double d = (double)deg + (double)min / 60.0;
+    if (dir == "W") d = -d;
+    return (int32_t)(d * 1e7);
+}
+
 void device_gps_task(void *arg)
 {
     printf("device_gps_task start\n");
-    vTaskSuspend(Gps_Task_Handle);
+    // NOTE: boot-time vTaskSuspend removed — GPS task runs always-on so
+    // Sys_Status.l76k is continuously fresh for the GPS tile, future Map
+    // tile, and clock-from-GPS. Sleep/wake logic in the LilyGo GPS test
+    // page callback (around line 2944) is still intact for that path,
+    // but isn't reached from Meck UI.
+
+    // Meck guard: explicitly null LilyGo's GPS test page label pointer.
+    // Without this, the field holds uninitialized PSRAM garbage (NOT zero),
+    // and the NULL checks below the parser would let lv_label_set_text run
+    // on a wild pointer, crashing in lv_label_revert_dots. If the LilyGo
+    // GPS test page is ever opened, its create function will overwrite this
+    // with a valid label pointer and the guarded updates resume.
+    System_Ui->_registry.win.cit.gps_test.data_label = nullptr;
 
     size_t cycle_time = 0;
 
@@ -1332,11 +1543,87 @@ void device_gps_task(void *arg)
 
                 if (L76K->get_info_data(buffer, &buffer_length) == true)
                 {
+                    // -- Meck additions: feed Sys_Status.l76k from raw + parsers --
+                    // Push raw NMEA lines into the sentence ring (for Sentences view)
+                    l76k_split_buffer_into_sentences(buffer.get(), buffer_length);
+
+                    // Pull altitude out of any *GGA sentence (LilyGo parser drops it)
+                    {
+                        float new_alt = 0.0f;
+                        if (l76k_extract_altitude(buffer.get(), buffer_length, new_alt))
+                        {
+                            Sys_Status.l76k.altitude_m = new_alt;
+                            Sys_Status.l76k.altitude_valid = true;
+                        }
+                    }
+
+                    // Parse GGA for fix quality, sat count, HDOP
+                    {
+                        Cpp_Bus_Driver::L76k::Gga gga;
+                        if (L76K->parse_gga_info(buffer.get(), buffer_length, gga) == true)
+                        {
+                            if (gga.gps_mode_status != (uint8_t)-1)
+                                Sys_Status.l76k.gps_mode = gga.gps_mode_status;
+                            if (gga.online_satellite_count != (uint8_t)-1)
+                                Sys_Status.l76k.sats_used = gga.online_satellite_count;
+                            if (gga.hdop > 0)
+                                Sys_Status.l76k.hdop = gga.hdop;
+                        }
+                    }
+
+                    // GSV scan — diagnostic. Tells us how many sats the
+                    // receiver can hear, regardless of whether it can lock.
+                    Sys_Status.l76k.sats_visible =
+                        l76k_extract_sats_visible(buffer.get(), buffer_length);
+                    // -- End Meck additions --
+
                     // 打印RMC的相关信息
                     Cpp_Bus_Driver::L76k::Rmc rmc;
 
                     if (L76K->parse_rmc_info(buffer.get(), buffer_length, rmc) == true)
                     {
+                        // -- Meck addition: mirror RMC into Sys_Status.l76k --
+                        if (!rmc.location_status.empty())
+                            Sys_Status.l76k.location_status = rmc.location_status[0];
+
+                        if (rmc.utc.update_flag)
+                        {
+                            Sys_Status.l76k.hour   = rmc.utc.hour;
+                            Sys_Status.l76k.minute = rmc.utc.minute;
+                            Sys_Status.l76k.second = rmc.utc.second;
+                            Sys_Status.l76k.time_valid = true;
+                        }
+                        if (rmc.data.update_flag)
+                        {
+                            Sys_Status.l76k.year  = (uint16_t)rmc.data.year + 2000;
+                            Sys_Status.l76k.month = rmc.data.month;
+                            Sys_Status.l76k.day   = rmc.data.day;
+                        }
+                        if (rmc.location.lat.update_flag &&
+                            rmc.location.lat.direction_update_flag)
+                        {
+                            Sys_Status.l76k.lat_e7 = rmc_lat_to_e7(
+                                rmc.location.lat.degrees,
+                                rmc.location.lat.minutes,
+                                rmc.location.lat.direction);
+                        }
+                        if (rmc.location.lon.update_flag &&
+                            rmc.location.lon.direction_update_flag)
+                        {
+                            Sys_Status.l76k.lon_e7 = rmc_lon_to_e7(
+                                rmc.location.lon.degrees,
+                                rmc.location.lon.minutes,
+                                rmc.location.lon.direction);
+                        }
+                        if (Sys_Status.l76k.location_status == 'A' &&
+                            !Sys_Status.l76k.fix_valid)
+                        {
+                            Sys_Status.l76k.fix_valid = true;
+                            Sys_Status.l76k.time_to_first_fix_s =
+                                L76k_Gps_Positioning_Time;
+                        }
+                        // -- End Meck addition --
+
                         std::string rmc_data_str = "";
                         if (L76k_Gps_Positioning_Flag == false)
                         {
@@ -1392,18 +1679,26 @@ void device_gps_task(void *arg)
                         }
 
                         // 更新数据的标签
-                        _lock_acquire(&lvgl_api_lock);
-                        lv_label_set_text(System_Ui->_registry.win.cit.gps_test.data_label, rmc_data_str.c_str());
-                        _lock_release(&lvgl_api_lock);
+                        // Meck guard: LilyGo's GPS test page may not exist when running under
+                        // Meck UI, in which case data_label is uninitialized PSRAM garbage.
+                        if (System_Ui->_registry.win.cit.gps_test.data_label != nullptr)
+                        {
+                            _lock_acquire(&lvgl_api_lock);
+                            lv_label_set_text(System_Ui->_registry.win.cit.gps_test.data_label, rmc_data_str.c_str());
+                            _lock_release(&lvgl_api_lock);
+                        }
                     }
                     else
                     {
                         std::string rmc_data_str = "gps data:\nread fail";
 
                         // 更新数据的标签
-                        _lock_acquire(&lvgl_api_lock);
-                        lv_label_set_text(System_Ui->_registry.win.cit.gps_test.data_label, rmc_data_str.c_str());
-                        _lock_release(&lvgl_api_lock);
+                        if (System_Ui->_registry.win.cit.gps_test.data_label != nullptr)
+                        {
+                            _lock_acquire(&lvgl_api_lock);
+                            lv_label_set_text(System_Ui->_registry.win.cit.gps_test.data_label, rmc_data_str.c_str());
+                            _lock_release(&lvgl_api_lock);
+                        }
                     }
                 }
                 else
@@ -1411,9 +1706,12 @@ void device_gps_task(void *arg)
                     std::string rmc_data_str = "gps data:\nread null";
 
                     // 更新数据的标签
-                    _lock_acquire(&lvgl_api_lock);
-                    lv_label_set_text(System_Ui->_registry.win.cit.gps_test.data_label, rmc_data_str.c_str());
-                    _lock_release(&lvgl_api_lock);
+                    if (System_Ui->_registry.win.cit.gps_test.data_label != nullptr)
+                    {
+                        _lock_acquire(&lvgl_api_lock);
+                        lv_label_set_text(System_Ui->_registry.win.cit.gps_test.data_label, rmc_data_str.c_str());
+                        _lock_release(&lvgl_api_lock);
+                    }
                 }
 
                 cycle_time = esp_log_timestamp() + 1000;
@@ -4670,6 +4968,67 @@ void System_Startup_Message_Init(void)
     }
 }
 
+// =============================================================================
+// Meck GPS accessor — implementation of the C-API declared in target.h.
+// Lives here (not in target.cpp) because it needs direct access to
+// Sys_Status, which target.cpp can't see without dragging in a lot of
+// LilyGo headers. The corresponding declaration in target.h includes the
+// MeckGpsSnapshot struct definition that callers use.
+// =============================================================================
+
+// Forward declaration of the snapshot struct defined in target.h. Re-declared
+// here so we don't need to #include target.h from main.cpp (which would pull
+// MeshCore + P4SX1262Radio includes and trigger -Wreorder against LilyGo's
+// strict flags). The shape MUST stay in sync with target.h.
+extern "C" {
+    struct MeckGpsSnapshot {
+        bool     init_ok;
+        bool     fix_valid;
+        char     status;
+        uint8_t  gps_mode;
+        uint8_t  sats_used;
+        uint8_t  sats_visible;
+        float    hdop;
+        int32_t  lat_e7;
+        int32_t  lon_e7;
+        float    altitude_m;
+        bool     altitude_valid;
+        bool     time_valid;
+        uint16_t year;
+        uint8_t  month, day, hour, minute;
+        float    second;
+        uint32_t time_to_first_fix_s;
+        uint32_t sentence_count;
+        uint32_t last_sentence_ms;
+    };
+
+    void meck_gps_get_snapshot(MeckGpsSnapshot *out)
+    {
+        if (!out) return;
+        out->init_ok             = Sys_Status.l76k.init_flag;
+        out->fix_valid           = Sys_Status.l76k.fix_valid;
+        out->status              = Sys_Status.l76k.location_status;
+        out->gps_mode            = Sys_Status.l76k.gps_mode;
+        out->sats_used           = Sys_Status.l76k.sats_used;
+        out->sats_visible        = Sys_Status.l76k.sats_visible;
+        out->hdop                = Sys_Status.l76k.hdop;
+        out->lat_e7              = Sys_Status.l76k.lat_e7;
+        out->lon_e7              = Sys_Status.l76k.lon_e7;
+        out->altitude_m          = Sys_Status.l76k.altitude_m;
+        out->altitude_valid      = Sys_Status.l76k.altitude_valid;
+        out->time_valid          = Sys_Status.l76k.time_valid;
+        out->year                = Sys_Status.l76k.year;
+        out->month               = Sys_Status.l76k.month;
+        out->day                 = Sys_Status.l76k.day;
+        out->hour                = Sys_Status.l76k.hour;
+        out->minute              = Sys_Status.l76k.minute;
+        out->second              = Sys_Status.l76k.second;
+        out->time_to_first_fix_s = Sys_Status.l76k.time_to_first_fix_s;
+        out->sentence_count      = Sys_Status.l76k.sentence_count;
+        out->last_sentence_ms    = Sys_Status.l76k.last_sentence_ms;
+    }
+}
+
 extern "C" void app_main(void)
 {
     printf("Ciallo\n");
@@ -5106,6 +5465,12 @@ extern "C" void app_main(void)
     XL9535->pin_write(XL9535_GPS_WAKE_UP, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
     if (L76K->begin() == false)
     {
+#if MECK_GPS_FORCE_9600
+        // Force-9600 mode: don't upgrade. If begin() fails at 9600 we report
+        // failure rather than retrying at 115200.
+        printf("l76k init fail (force-9600 mode, no 115200 retry)\n");
+        Sys_Status.l76k.init_flag = false;
+#else
         L76K_Uart_Bus->set_baud_rate(115200);
 
         if (L76K->begin() == false)
@@ -5118,18 +5483,26 @@ extern "C" void app_main(void)
             printf("l76k init success\n");
             Sys_Status.l76k.init_flag = true;
         }
+#endif
     }
     else
     {
         printf("l76k init success\n");
         Sys_Status.l76k.init_flag = true;
 
+#if MECK_GPS_FORCE_9600
+        printf("l76k: holding at 9600 baud (MECK_GPS_FORCE_9600)\n");
+#else
         L76K->set_baud_rate(Cpp_Bus_Driver::L76k::Baud_Rate::BR_115200_BPS);
+#endif
     }
     printf("get_baud_rate:%ld\n", L76K->get_baud_rate());
     L76K->set_update_frequency(Cpp_Bus_Driver::L76k::Update_Freq::FREQ_5HZ);
     L76K->clear_rx_buffer_data();
-    L76K->sleep(true);
+    // Meck change: was sleep(true) — LilyGo's design puts the module to sleep
+    // at boot and wakes it only when their GPS test page opens. For Meck the
+    // GPS task runs always-on, so wake the module here so NMEA flows from boot.
+    L76K->sleep(false);
 
     _lock_acquire(&lvgl_api_lock);
     Set_Lvgl_Startup_Progress_Bar(90);

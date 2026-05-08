@@ -67,6 +67,39 @@ extern "C" uint16_t meck_battery_full_charge_mah();
 extern "C" uint16_t meck_battery_time_to_empty_min();
 extern "C" uint8_t  meck_battery_pct_from_voltage(uint16_t mv);
 
+// ---- GPS readout (L76K module owned by main.cpp) ----
+//
+// LilyGo's device_gps_task in main.cpp parses RMC + GGA into Sys_Status.l76k
+// at ~1Hz. These accessors copy a snapshot out so UI code (which runs in
+// the LVGL task) can read it without seeing main.cpp's System_Status type.
+//
+// Lat/lon are stored as signed degrees * 1e7 (atomic 32-bit on the P4,
+// matches the e7 format used by Meck contact records). Position values
+// are only meaningful when fix_valid is true.
+extern "C" {
+    struct MeckGpsSnapshot {
+        bool     init_ok;
+        bool     fix_valid;
+        char     status;            // 'A' active, 'V' void, 'D' differential
+        uint8_t  gps_mode;          // 0 none, 1 GPS, 2 DGPS, 6 DR
+        uint8_t  sats_used;
+        uint8_t  sats_visible;      // GSV total across all constellations
+        float    hdop;
+        int32_t  lat_e7;
+        int32_t  lon_e7;
+        float    altitude_m;
+        bool     altitude_valid;
+        bool     time_valid;
+        uint16_t year;
+        uint8_t  month, day, hour, minute;
+        float    second;
+        uint32_t time_to_first_fix_s;
+        uint32_t sentence_count;
+        uint32_t last_sentence_ms;
+    };
+    void meck_gps_get_snapshot(MeckGpsSnapshot *out);
+}
+
 // Sets SKY13453 VCTL to a known antenna port (HIGH = RF1 internal, default).
 // Should be called once at boot during meck_radio_attach.
 extern "C" void meck_set_antenna_default();
