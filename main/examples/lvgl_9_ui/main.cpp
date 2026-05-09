@@ -17,6 +17,7 @@
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_ldo_regulator.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl.h"
@@ -1510,6 +1511,109 @@ static inline int32_t rmc_lon_to_e7(uint8_t deg, float min,
     return (int32_t)(d * 1e7);
 }
 
+// =============================================================================
+// Meck: GPS-derived clock helpers
+//
+// device_gps_task pushes parsed UTC into both the soft RTC (for MeshCore's
+// advert timestamps) and the PCF8563 hardware RTC (so it survives reboots).
+// PCF8563 stores UTC here, not local time. This differs from Save_Real_Time()
+// above which adds +8 for China display time. UI screens that read PCF8563
+// will therefore show UTC; apply the user's UTC Offset setting at display
+// time when needed.
+// =============================================================================
+
+// Forward declaration of the meck.h C-linkage soft-RTC setter. main.cpp
+// already includes meck.h above, so this is just an inline reminder of the
+// signature for the helpers below.
+extern "C" void meck_clock_set_utc(uint32_t epoch);
+
+static bool meck_is_leap_year(uint16_t y) {
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+
+static uint32_t meck_utc_to_epoch(uint16_t year, uint8_t mon, uint8_t day,
+                                  uint8_t hour, uint8_t min, float sec)
+{
+    if (year < 1970 || mon < 1 || mon > 12 || day < 1 || day > 31) return 0;
+    static const uint16_t mday[12] =
+        {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+    uint32_t days = 0;
+    for (uint16_t y = 1970; y < year; y++) {
+        days += meck_is_leap_year(y) ? 366 : 365;
+    }
+    days += mday[mon - 1];
+    if (meck_is_leap_year(year) && mon > 2) days += 1;
+    days += (day - 1);
+    return days * 86400UL
+         + (uint32_t)hour * 3600
+         + (uint32_t)min * 60
+         + (uint32_t)sec;
+}
+
+// Push UTC year/month/day/hour/minute/second into the PCF8563 unmodified
+// (no timezone offset applied). Day-of-week computed internally via
+// Sakamoto's algorithm so the caller does not have to provide it.
+static void Save_Real_Time_Utc(uint16_t year, uint8_t month, uint8_t day,
+                               uint8_t hour, uint8_t minute, uint8_t second)
+{
+    if (!PCF8563 || Sys_Status.pcf8563.init_flag == false) return;
+
+    // Sakamoto: returns 0=Sunday, 1=Monday, ..., 6=Saturday.
+    static const int sakamoto_t[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    int y = year - (month < 3 ? 1 : 0);
+    int dow = (y + y/4 - y/100 + y/400 + sakamoto_t[month - 1] + day) % 7;
+
+    static const Cpp_Bus_Driver::Pcf8563x::Week wk_lookup[7] = {
+        Cpp_Bus_Driver::Pcf8563x::Week::SUNDAY,
+        Cpp_Bus_Driver::Pcf8563x::Week::MONDAY,
+        Cpp_Bus_Driver::Pcf8563x::Week::TUESDAY,
+        Cpp_Bus_Driver::Pcf8563x::Week::WEDNESDAY,
+        Cpp_Bus_Driver::Pcf8563x::Week::THURSDAY,
+        Cpp_Bus_Driver::Pcf8563x::Week::FRIDAY,
+        Cpp_Bus_Driver::Pcf8563x::Week::SATURDAY,
+    };
+
+    Cpp_Bus_Driver::Pcf8563x::Time t = {
+        .second = second,
+        .minute = minute,
+        .hour   = hour,                       // UTC, no offset applied
+        .day    = day,
+        .week   = wk_lookup[dow],
+        .month  = month,
+        .year   = (uint8_t)(year - 2000),
+    };
+    PCF8563->set_time(t);
+}
+
+// =============================================================================
+// Meck: L76K NMEA command sender
+//
+// Sends a NMEA command to the L76K with checksum and CRLF appended. Used to
+// configure features the cpp_bus_driver doesn't expose, in particular:
+//   - $PCAS04,7        Multi-constellation (GPS + GLONASS + BeiDou)
+//   - $PMTK869,1,1     Enable EASY (predicted ephemeris)
+// Both materially shorten cold-start TTFF on the L76K. Public references:
+//   SoftRF (lyusupov/SoftRF GNSS.cpp), T-Beam Supreme (LoRa-Series #210).
+//
+// Writes directly to UART_NUM_1, the same UART number L76K_Uart_Bus is bound
+// to (see auto L76K_Uart_Bus = ... line ~375). We bypass the cpp_bus_driver
+// abstraction here because it doesn't expose a public "send raw NMEA" method.
+// =============================================================================
+
+static void meck_l76k_send_nmea(const char *body) {
+    if (!body) return;
+    // Compute XOR checksum of all chars between $ and *
+    uint8_t cs = 0;
+    for (const char *p = body; *p; p++) cs ^= (uint8_t)*p;
+    char out[96];
+    int n = snprintf(out, sizeof(out), "$%s*%02X\r\n", body, cs);
+    if (n > 0 && n < (int)sizeof(out)) {
+        uart_write_bytes(UART_NUM_1, out, (size_t)n);
+        // Log without the trailing CRLF for readability
+        printf("meck_l76k_send_nmea: $%s*%02X\n", body, cs);
+    }
+}
+
 void device_gps_task(void *arg)
 {
     printf("device_gps_task start\n");
@@ -1623,6 +1727,42 @@ void device_gps_task(void *arg)
                                 L76k_Gps_Positioning_Time;
                         }
                         // -- End Meck addition --
+
+                        // -- Meck addition: push GPS UTC to soft RTC + PCF8563 --
+                        //
+                        // Acts only when this RMC frame carries fresh time AND
+                        // fresh date. The year >= 2024 guard rejects pre-lock
+                        // free-running clock readings (the L76K typically emits
+                        // year 1980 or 2000 before it has decoded real GPS time).
+                        // Soft RTC push runs every fresh RMC (cheap). PCF8563
+                        // I2C write throttled to once per minute.
+                        if (rmc.utc.update_flag && rmc.data.update_flag) {
+                            uint16_t gy = (uint16_t)rmc.data.year + 2000;
+                            uint8_t  gM = rmc.data.month;
+                            uint8_t  gd = rmc.data.day;
+                            uint8_t  gh = rmc.utc.hour;
+                            uint8_t  gm = rmc.utc.minute;
+                            float    gs = rmc.utc.second;
+                            if (gy >= 2024 && gy < 2100 &&
+                                gM >= 1 && gM <= 12 &&
+                                gd >= 1 && gd <= 31)
+                            {
+                                uint32_t epoch = meck_utc_to_epoch(gy, gM, gd, gh, gm, gs);
+                                if (epoch != 0) {
+                                    meck_clock_set_utc(epoch);
+
+                                    static uint32_t last_pcf_write_s = 0;
+                                    if (last_pcf_write_s == 0 ||
+                                        (epoch - last_pcf_write_s) >= 60)
+                                    {
+                                        Save_Real_Time_Utc(gy, gM, gd, gh, gm,
+                                                           (uint8_t)gs);
+                                        last_pcf_write_s = epoch;
+                                    }
+                                }
+                            }
+                        }
+                        // -- End Meck clock-from-GPS addition --
 
                         std::string rmc_data_str = "";
                         if (L76k_Gps_Positioning_Flag == false)
@@ -5503,6 +5643,26 @@ extern "C" void app_main(void)
     // at boot and wakes it only when their GPS test page opens. For Meck the
     // GPS task runs always-on, so wake the module here so NMEA flows from boot.
     L76K->sleep(false);
+
+    // -- Meck: extra L76K configuration the cpp_bus_driver doesn't apply --
+    //
+    // Enable multi-constellation receive. Without this, the chip listens on
+    // GPS only and typically sees ~10 satellites in clear sky. With GPS +
+    // GLONASS + BeiDou, the visible count roughly doubles or triples in the
+    // southern hemisphere, giving the chip many more options for completing
+    // ephemeris demodulation during cold start.
+    if (Sys_Status.l76k.init_flag) {
+        meck_l76k_send_nmea("PCAS04,7");           // GPS + GLONASS + BeiDou
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        // Enable EASY (predicted ephemeris). Once on, the chip extrapolates
+        // future ephemeris from current data for up to ~3 days and stores it
+        // internally, so subsequent cold starts behave like warm starts. This
+        // is the high-impact one for repeated reboots.
+        meck_l76k_send_nmea("PMTK869,1,1");        // EASY on
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    // -- End Meck L76K extra config --
 
     _lock_acquire(&lvgl_api_lock);
     Set_Lvgl_Startup_Progress_Bar(90);

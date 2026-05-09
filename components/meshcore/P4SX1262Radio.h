@@ -22,6 +22,7 @@
 #include <Dispatcher.h>   // for mesh::Radio interface
 #include "cpp_bus_driver_library.h"
 #include "t_display_p4_config.h"
+#include "esp_timer.h"
 
 // LilyGo's main.cpp defines `auto SX1262 = std::make_unique<...>(...)` at
 // file scope. That gives a global with external linkage. We reference it
@@ -44,6 +45,8 @@ public:
         , _currentBW(0)
         , _currentSF(0)
         , _currentCR(0)
+        , _noiseFloor(-120)            // matches MeshCore's clamp / cold-start
+        , _lastFloorSampleUs(0)
     {}
 
     // ---- mesh::Radio interface implementation ----
@@ -55,6 +58,17 @@ public:
     }
 
     int recvRaw(uint8_t* bytes, int sz) override {
+        // Periodic noise-floor sample. This rides the existing recvRaw()
+        // call cadence (Dispatcher loop, SPI lock already held). Fires at
+        // most every 2 s — the same rate MeshCore uses for its calibrate
+        // tick. sampleNoiseFloor() handles its own gating (must be in RX
+        // mode, must not be mid-packet).
+        uint64_t now_us = esp_timer_get_time();
+        if (now_us - _lastFloorSampleUs >= 2000000ULL) {
+            _lastFloorSampleUs = now_us;
+            sampleNoiseFloor();
+        }
+
         if (!_inReceiveMode) return 0;
 
         // Poll IRQ status register directly via SPI (DIO1 via XL9535 unreliable)
@@ -198,7 +212,35 @@ public:
     float getLastSNR() const override { return _lastSNR; }
 
     int getNoiseFloor() const override {
-        return -120;  // Typical SX1262 noise floor estimate
+        return _noiseFloor;
+    }
+
+    // Sample the chip's instantaneous RSSI and fold it into the running
+    // noise-floor estimate. Called periodically from recvRaw() under the
+    // SPI lock. Skips when not in RX mode or while a packet is mid-decode
+    // (BUSY high), to avoid contaminating the floor with signal energy.
+    // Smoothing: simple 8-sample EMA. Clamp at -120 dBm matches MeshCore.
+    void sampleNoiseFloor() {
+        if (!_inReceiveMode) return;
+        // Skip if a packet is currently being demodulated. Same guard
+        // isReceiving() uses, repeated here so this method can be safely
+        // called from anywhere without depending on caller's gating.
+        if (gpio_get_level((gpio_num_t)SX1262_BUSY) == 1) return;
+
+        int8_t inst = SX1262->get_rssi_inst();
+        if (inst == 0) return;             // read/parse failure
+        int sample = (int)inst;
+
+        // Reject implausibly-high readings (likely a signal leaking in
+        // before BUSY went high, or a transient). Anything stronger than
+        // -50 dBm is not noise, regardless of band.
+        if (sample > -50) return;
+
+        // EMA: alpha = 1/8 — responsive enough to follow band changes,
+        // smoothed enough that a single weak packet edge doesn't budge
+        // the floor visibly.
+        _noiseFloor = (_noiseFloor * 7 + sample) / 8;
+        if (_noiseFloor < -120) _noiseFloor = -120;
     }
 
     void resetAGC() override {
@@ -231,6 +273,12 @@ private:
     float _currentBW;
     uint8_t _currentSF;
     uint8_t _currentCR;
+
+    // Noise-floor estimator state. Updated periodically from recvRaw().
+    // _noiseFloor is the current running value in dBm; _lastFloorSampleUs
+    // throttles sampling to ~2 s intervals.
+    int      _noiseFloor;
+    uint64_t _lastFloorSampleUs;
 
     void resetToRx() {
         SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::RX);

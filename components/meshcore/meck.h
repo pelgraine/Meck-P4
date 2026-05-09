@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,6 +52,16 @@ void meck_ui_init();
 // Switch the active LVGL screen to the Meck home screen. Must be called
 // AFTER meck_ui_init().
 void meck_ui_show_home();
+
+// Push a UTC epoch (seconds since 1970-01-01 00:00 UTC) into the soft RTC.
+// Called from main.cpp's device_gps_task whenever a fresh, sane RMC time
+// is parsed. Cheap: just stores _epoch_offset = utc - boot_seconds, so
+// safe to call at the GPS sentence rate (~1 Hz).
+void meck_clock_set_utc(uint32_t epoch);
+
+// Read the soft RTC. Returns 0 if it has never been set, otherwise the
+// current UTC epoch in seconds.
+uint32_t meck_clock_get_utc(void);
 
 #ifdef __cplusplus
 }

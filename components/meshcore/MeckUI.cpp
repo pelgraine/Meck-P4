@@ -42,17 +42,25 @@
 #include "lvgl.h"
 #include "t_display_p4_driver.h"
 #include "esp_timer.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <climits>
 
 extern _lock_t lvgl_api_lock;
 
 #define NOTCH_SAFE_X  20
 #define NOTCH_SAFE_Y  20
+
+// Firmware identity, surfaced on the Settings screen. The home screen now
+// shows the user's chosen node name instead.
+#define MECK_FIRMWARE_NAME    "Meck P4"
+#define MECK_FIRMWARE_VERSION "0.1"
 
 // ============================================================================
 // Radio preset table (17 community presets)
@@ -91,12 +99,46 @@ static const RadioPreset RADIO_PRESETS[] = {
 static const uint8_t TX_POWER_OPTIONS[] = { 10, 14, 17, 20, 22 };
 #define NUM_TX_POWER_OPTIONS 5
 
-// Channel button color cycle
+// Channel + sender colour cycle. Used by:
+//   - channel picker bubble borders / text
+//   - active channel name in the messages header
+//   - home tile borders in Multi colour scheme
+//   - per-sender message bubble bg + sender label
+// Order: the first 6 entries match the original palette so existing
+// channels keep their colour. Entries 6+ are added to widen the hash
+// distribution for sender colours where collisions matter (hundreds
+// of nodes means 6 buckets is far too coarse). Ordering also matters
+// for the channel picker — adjacent indices are kept visually distinct
+// so channels 0/1/2... don't look the same on the list.
 static const lv_palette_t CH_COLORS[] = {
-    LV_PALETTE_CYAN, LV_PALETTE_ORANGE, LV_PALETTE_LIGHT_GREEN,
-    LV_PALETTE_PURPLE, LV_PALETTE_YELLOW, LV_PALETTE_PINK,
+    LV_PALETTE_CYAN,         LV_PALETTE_ORANGE,
+    LV_PALETTE_LIGHT_GREEN,  LV_PALETTE_PURPLE,
+    LV_PALETTE_YELLOW,       LV_PALETTE_PINK,
+    LV_PALETTE_BLUE,         LV_PALETTE_RED,
+    LV_PALETTE_TEAL,         LV_PALETTE_AMBER,
+    LV_PALETTE_DEEP_PURPLE,  LV_PALETTE_LIME,
+    LV_PALETTE_INDIGO,       LV_PALETTE_DEEP_ORANGE,
+    LV_PALETTE_LIGHT_BLUE,   LV_PALETTE_GREEN,
 };
 #define NUM_CH_COLORS ((int)(sizeof(CH_COLORS) / sizeof(CH_COLORS[0])))
+
+// ============================================================================
+// Home tile colour scheme. Stored in its own NVS namespace ("meckui") so we
+// don't have to add a field to P4NodePrefs (which would change the on-disk
+// schema for the prefs blob). Adding a new scheme is two changes: extend
+// the enum and add a branch in get_tile_colors().
+// ============================================================================
+typedef enum {
+    HOME_COLOR_PLAIN = 0,   // dark bg + grey-blue border, original look
+    HOME_COLOR_MULTI = 1,   // dark bg + per-tile coloured border (CH_COLORS)
+    HOME_COLOR_COUNT
+} MeckHomeColor;
+
+static int g_home_color_scheme = HOME_COLOR_PLAIN;
+
+#define MECK_HOME_TILE_COUNT 10
+static lv_obj_t *tile_buttons[MECK_HOME_TILE_COUNT] = {};
+static int       tile_button_count = 0;
 
 // ============================================================================
 // LVGL objects (file-scope so the refresh timer can update them)
@@ -106,6 +148,7 @@ static lv_obj_t *scr_home          = NULL;
 static lv_obj_t *g_tileview        = NULL;
 
 // Home tile header labels
+static lv_obj_t *lbl_home_title    = NULL;
 static lv_obj_t *lbl_home_packets  = NULL;
 static lv_obj_t *lbl_home_rssi     = NULL;
 static lv_obj_t *lbl_home_unread   = NULL;
@@ -117,6 +160,12 @@ static lv_obj_t *lbl_advert_status = NULL;
 static lv_obj_t *lbl_gps_detail    = NULL;
 static lv_obj_t *lbl_battery_detail = NULL;
 
+// Noise floor display cache. The estimator itself lives in P4SX1262Radio
+// (sampled every 2 s under the SPI lock via SX126x GetRssiInst, opcode
+// 0x15). We cache the last-displayed value here so we only redraw the
+// radio detail label when it actually changes.
+static int g_last_noise_floor_displayed = INT_MIN;
+
 // Settings screen
 static lv_obj_t *scr_settings      = NULL;
 static lv_obj_t *lbl_set_name      = NULL;
@@ -124,6 +173,7 @@ static lv_obj_t *lbl_set_radio     = NULL;
 static lv_obj_t *lbl_set_txpower   = NULL;
 static lv_obj_t *lbl_set_utc       = NULL;
 static lv_obj_t *lbl_set_pathhash  = NULL;
+static lv_obj_t *lbl_set_homecolor = NULL;
 static lv_obj_t *lbl_set_identity  = NULL;
 static lv_obj_t *obj_name_edit_panel = NULL;
 static lv_obj_t *ta_settings_name    = NULL;
@@ -168,6 +218,7 @@ static void goto_contacts(lv_event_t *e);
 static void goto_contacts_from_detail(lv_event_t *e);
 static void goto_channel_n(lv_event_t *e);
 static void load_channel_view(uint8_t ch_idx);
+static void rebuild_message_bubbles(uint8_t ch_idx);
 
 static void settings_update_labels();
 static void update_radio_detail_label();
@@ -204,6 +255,72 @@ static void on_ch_add_kb_event(lv_event_t *e);
 static void cb_todo_reader(lv_event_t* e)   { printf("MeckUI: Reader tile clicked (TODO)\n"); }
 static void cb_todo_notes(lv_event_t* e)    { printf("MeckUI: Notes tile clicked (TODO)\n"); }
 static void cb_todo_discover(lv_event_t* e) { printf("MeckUI: Discover tile clicked (TODO)\n"); }
+static void cb_todo_trace(lv_event_t* e)    { printf("MeckUI: Trace tile clicked (TODO)\n"); }
+static void cb_todo_maps(lv_event_t* e)     { printf("MeckUI: Maps tile clicked (TODO)\n"); }
+static void cb_todo_audio(lv_event_t* e)    { printf("MeckUI: Audio tile clicked (TODO)\n"); }
+static void cb_todo_web(lv_event_t* e)      { printf("MeckUI: Web tile clicked (TODO)\n"); }
+
+// ============================================================================
+// Home tile colour scheme: NVS persistence + style application.
+// Stored under namespace "meckui", key "home_color" as a uint8_t. nvs_open
+// failures fall back silently to the default scheme (Plain).
+// ============================================================================
+
+static void load_home_color_from_nvs() {
+    nvs_handle_t h;
+    if (nvs_open("meckui", NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t v = HOME_COLOR_PLAIN;
+    if (nvs_get_u8(h, "home_color", &v) == ESP_OK && v < HOME_COLOR_COUNT) {
+        g_home_color_scheme = v;
+    }
+    nvs_close(h);
+}
+
+static void save_home_color_to_nvs() {
+    nvs_handle_t h;
+    if (nvs_open("meckui", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "home_color", (uint8_t)g_home_color_scheme);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// Returns the bg/border colours and border width for tile `idx` under the
+// current scheme. Adding a new scheme = adding a branch here.
+static void get_tile_colors(int idx, lv_color_t *bg, lv_color_t *border,
+                            int *border_w) {
+    switch (g_home_color_scheme) {
+        case HOME_COLOR_MULTI: {
+            // Match channel-bubble look: dark bg + 2 px coloured border per
+            // tile, palette indexed off tile position so adjacent tiles
+            // never share a colour.
+            *bg       = lv_color_make(25, 25, 35);
+            *border   = lv_palette_main(CH_COLORS[idx % NUM_CH_COLORS]);
+            *border_w = 2;
+            break;
+        }
+        case HOME_COLOR_PLAIN:
+        default: {
+            *bg       = lv_color_make(30, 30, 40);
+            *border   = lv_color_make(80, 80, 100);
+            *border_w = 1;
+            break;
+        }
+    }
+}
+
+// Repaint every registered tile to match the current scheme. Cheap: just
+// style setters, no re-layout.
+static void apply_tile_colors() {
+    for (int i = 0; i < tile_button_count; i++) {
+        if (!tile_buttons[i]) continue;
+        lv_color_t bg, border;
+        int border_w;
+        get_tile_colors(i, &bg, &border, &border_w);
+        lv_obj_set_style_bg_color(tile_buttons[i], bg, 0);
+        lv_obj_set_style_border_color(tile_buttons[i], border, 0);
+        lv_obj_set_style_border_width(tile_buttons[i], border_w, 0);
+    }
+}
 
 // ============================================================================
 // Helpers (back button, tile button, settings row)
@@ -228,8 +345,10 @@ static lv_obj_t* create_back_button(lv_obj_t *parent) {
 
 static lv_obj_t* create_tile_button(lv_obj_t *parent, const char *label,
                                     lv_event_cb_t cb, int col, int row) {
-    int tileW = (SCREEN_WIDTH - 60) / 3;
-    int tileH = 100;
+    // 2-column grid (was 3). With margins of 20 px each side and a 10 px
+    // gap between cols, tile width is (SCREEN_WIDTH - 50) / 2.
+    int tileW = (SCREEN_WIDTH - 50) / 2;
+    int tileH = 170;          // tall enough to feel tappable; icons + label fit
     int gapX  = 10;
     int gapY  = 10;
     int gridX = 20;
@@ -241,19 +360,32 @@ static lv_obj_t* create_tile_button(lv_obj_t *parent, const char *label,
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_size(btn, tileW, tileH);
     lv_obj_set_pos(btn, x, y);
-    lv_obj_set_style_bg_color(btn, lv_color_make(30, 30, 40), 0);
+    // Scheme-driven colours. Index by tile creation order so colours follow
+    // the same left-to-right, top-to-bottom progression in Multi mode.
+    int tile_idx = tile_button_count;
+    lv_color_t tile_bg, tile_border;
+    int tile_border_w;
+    get_tile_colors(tile_idx, &tile_bg, &tile_border, &tile_border_w);
+    lv_obj_set_style_bg_color(btn, tile_bg, 0);
     lv_obj_set_style_bg_color(btn, lv_color_make(50, 50, 70), LV_STATE_PRESSED);
     lv_obj_set_style_radius(btn, 12, 0);
-    lv_obj_set_style_border_color(btn, lv_color_make(80, 80, 100), 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, tile_border, 0);
+    lv_obj_set_style_border_width(btn, tile_border_w, 0);
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, label);
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+    // Was _18; bumped to _28 to match the home title and to make icons
+    // (which are glyphs in the same font) visibly larger.
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(lbl);
 
     if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    if (tile_button_count < MECK_HOME_TILE_COUNT) {
+        tile_buttons[tile_button_count++] = btn;
+    }
     return btn;
 }
 
@@ -337,6 +469,15 @@ static void settings_update_labels() {
         snprintf(buf, sizeof(buf), "%+d hours", (int)prefs->utc_offset_hours);
         lv_label_set_text(lbl_set_utc, buf);
     }
+    if (lbl_set_homecolor) {
+        const char* hcs;
+        switch (g_home_color_scheme) {
+            case HOME_COLOR_PLAIN: hcs = "Plain"; break;
+            case HOME_COLOR_MULTI: hcs = "Multi"; break;
+            default:               hcs = "?";     break;
+        }
+        lv_label_set_text(lbl_set_homecolor, hcs);
+    }
 }
 
 // ============================================================================
@@ -384,6 +525,255 @@ static void format_local_time(uint32_t utc_epoch, char* buf, size_t buf_len) {
 }
 
 // ============================================================================
+// strip_unrenderable
+// ----------------------------------------------------------------------------
+// Copy `src` to `dst`, dropping any UTF-8 codepoint above U+00FF. The default
+// Montserrat fonts compiled with LVGL cover ASCII + Latin-1 supplement (so
+// é, ñ, ø all work), but emoji, CJK, and other higher-plane Unicode render
+// as the missing-glyph "tofu" box. Pre-stripping at render time gives clean
+// text instead of brackets.
+// ============================================================================
+
+static void strip_unrenderable(const char *src, char *dst, size_t dst_sz) {
+    if (!dst || dst_sz == 0) return;
+    if (!src) { dst[0] = '\0'; return; }
+    size_t di = 0;
+    const unsigned char *p = (const unsigned char*)src;
+    while (*p && di + 1 < dst_sz) {
+        unsigned char b = *p;
+        if (b < 0x80) {
+            // ASCII
+            dst[di++] = (char)b;
+            p++;
+        } else if ((b & 0xE0) == 0xC0) {
+            // 2-byte UTF-8: codepoint U+0080..U+07FF
+            if ((p[1] & 0xC0) != 0x80) { p++; continue; }  // malformed, skip
+            uint32_t cp = ((b & 0x1F) << 6) | (p[1] & 0x3F);
+            if (cp <= 0x00FF && di + 2 < dst_sz) {
+                dst[di++] = (char)p[0];
+                dst[di++] = (char)p[1];
+            }
+            p += 2;
+        } else if ((b & 0xF0) == 0xE0) {
+            // 3-byte UTF-8: codepoint > 0x07FF, always above 0x00FF — drop
+            p += 3;
+        } else if ((b & 0xF8) == 0xF0) {
+            // 4-byte UTF-8: emoji and other supplementary planes — drop
+            p += 4;
+        } else {
+            // continuation or invalid lead byte
+            p++;
+        }
+    }
+    dst[di] = '\0';
+}
+
+// ============================================================================
+// sender_bubble_color
+// ----------------------------------------------------------------------------
+// Hash a sender name into a hue and return an HSV-derived RGB colour for
+// the message bubble background. This replaced an earlier 16-entry palette
+// approach which collided heavily across hundreds of nodes — going to HSV
+// gives effectively one bucket per hue degree (360 unique buckets), and
+// fixed S/V keep the result readable under white body text regardless of
+// hue. The same name always maps to the same colour.
+// ============================================================================
+
+static lv_color_t sender_bubble_color(const char *name) {
+    if (!name || !*name) {
+        return lv_color_make(40, 40, 50);   // neutral grey for nameless
+    }
+    unsigned hash = 5381;
+    for (const char *p = name; *p; p++) {
+        hash = hash * 33 + (unsigned char)*p;
+    }
+    // Saturation 70 keeps the colour clearly chromatic without being
+    // garish; value 35 keeps it dark enough that white text reads on
+    // every hue (yellow stays manageable, deep blue doesn't crush).
+    return lv_color_hsv_to_rgb((uint16_t)(hash % 360), 70, 35);
+}
+
+// Companion to sender_bubble_color: same hash, but higher value so the
+// resulting colour sits visibly *above* the bubble bg. Used as the fill
+// for the sender-name chip so the name reads as a distinct pill rather
+// than blending into the body text.
+static lv_color_t sender_chip_color(const char *name) {
+    if (!name || !*name) {
+        return lv_color_make(180, 180, 200);  // light grey fallback
+    }
+    unsigned hash = 5381;
+    for (const char *p = name; *p; p++) {
+        hash = hash * 33 + (unsigned char)*p;
+    }
+    // S=60, V=75 — light enough that black text reads on every hue,
+    // saturated enough to still feel like the sender's colour.
+    return lv_color_hsv_to_rgb((uint16_t)(hash % 360), 60, 75);
+}
+
+// ============================================================================
+// rebuild_message_bubbles
+// ----------------------------------------------------------------------------
+// Tear down and rebuild the message list inside obj_msg_scroll. Each message
+// becomes a row (full width, transparent, horizontal flex) containing an
+// inner bubble. Bubbles align right for messages we sent (sender == our
+// node name), left otherwise. Sender names get their own colour from a
+// hash-into-CH_COLORS for visual identification across the conversation.
+// ============================================================================
+
+static void rebuild_message_bubbles(uint8_t ch_idx) {
+    if (!obj_msg_scroll) return;
+    Meck* mesh = meck_get_instance();
+
+    // Burn down old bubbles. obj_msg_scroll is the parent for everything
+    // we render here, so a single clean() resets the whole conversation.
+    lv_obj_clean(obj_msg_scroll);
+    lbl_messages_body = NULL;   // it lived as a child of obj_msg_scroll
+
+    // Make sure the scroll container lays its children top-to-bottom.
+    // (Idempotent — safe to set every rebuild.)
+    lv_obj_set_layout(obj_msg_scroll, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(obj_msg_scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(obj_msg_scroll, 6, 0);
+
+    P4ChannelMessage msgs[16];
+    int n = mesh ? mesh->getMessages(msgs, 16, ch_idx) : 0;
+
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(obj_msg_scroll);
+        lv_label_set_text(empty, "No messages yet.");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        lv_obj_set_style_text_font(empty, &lv_font_montserrat_18, 0);
+        lbl_messages_body = empty;  // keep dirty-flag gate happy
+        return;
+    }
+
+    // Our own node name, used to detect sent vs received messages.
+    P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : nullptr;
+    char my_name_clean[40] = "";
+    if (prefs && prefs->node_name[0]) {
+        strip_unrenderable(prefs->node_name, my_name_clean, sizeof(my_name_clean));
+    }
+
+    int row_max_w = (SCREEN_WIDTH - 20) - 20; // scroll inner width minus its pad
+    int bubble_max_w = (int)((float)row_max_w * 0.78f);
+
+    // getMessages returns newest-first. We want oldest at top, newest at
+    // bottom (standard chat order), so iterate reverse.
+    for (int i = n - 1; i >= 0; i--) {
+        // Strip non-renderable Unicode from the raw text. After this step
+        // we operate on a buffer that the font can actually display.
+        char clean_text[256];
+        strip_unrenderable(msgs[i].text, clean_text, sizeof(clean_text));
+
+        // Split sender / body on first ": ". If there's no colon, treat
+        // the whole thing as body with empty sender.
+        char sender[64] = "";
+        const char *body = clean_text;
+        const char *colon = strstr(clean_text, ": ");
+        if (colon) {
+            int sender_len = (int)(colon - clean_text);
+            if (sender_len > 0 && sender_len < (int)sizeof(sender)) {
+                memcpy(sender, clean_text, sender_len);
+                sender[sender_len] = '\0';
+                body = colon + 2;
+            }
+        }
+        // Trim leading "- " / spaces that some sender strings carry.
+        char *trim_sender = sender;
+        while (*trim_sender == '-' || *trim_sender == ' ') trim_sender++;
+
+        bool is_sent = (my_name_clean[0] != '\0' &&
+                        strcmp(trim_sender, my_name_clean) == 0);
+
+        // Per-sender colour from sender_bubble_color() — hashes the name
+        // (parsed sender for received, our own node name for sent) onto
+        // a 360-degree hue circle. Same name → same colour every time.
+        const char *color_name = is_sent ? my_name_clean : trim_sender;
+
+        // ---- Row: full-width, transparent, holds the bubble. ----
+        lv_obj_t *row = lv_obj_create(obj_msg_scroll);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_scroll_dir(row, LV_DIR_NONE);
+        lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row,
+            is_sent ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
+            LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+        // ---- Bubble: rounded, padded, content-sized up to bubble_max_w. ----
+        lv_obj_t *bubble = lv_obj_create(row);
+        lv_obj_set_width(bubble, LV_SIZE_CONTENT);
+        lv_obj_set_height(bubble, LV_SIZE_CONTENT);
+        lv_obj_set_style_max_width(bubble, bubble_max_w, 0);
+        lv_obj_set_style_radius(bubble, 12, 0);
+        lv_obj_set_style_pad_all(bubble, 10, 0);
+        lv_obj_set_style_border_width(bubble, 0, 0);
+        lv_obj_set_scroll_dir(bubble, LV_DIR_NONE);
+        lv_obj_set_style_bg_color(bubble, sender_bubble_color(color_name), 0);
+        lv_obj_set_layout(bubble, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(bubble, 2, 0);
+
+        // Sender name on received messages only; sent messages don't need
+        // it (the right-alignment makes "from me" obvious). Wrapped in a
+        // pill-shaped chip whose colour comes from sender_chip_color() —
+        // same hue as the bubble, but lighter — so the name reads as a
+        // distinct label rather than blending with the body text.
+        if (!is_sent && trim_sender[0]) {
+            lv_obj_t *chip = lv_obj_create(bubble);
+            lv_obj_set_size(chip, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+            lv_obj_set_style_bg_color(chip, sender_chip_color(color_name), 0);
+            lv_obj_set_style_radius(chip, 8, 0);
+            lv_obj_set_style_border_width(chip, 0, 0);
+            lv_obj_set_style_pad_left(chip, 10, 0);
+            lv_obj_set_style_pad_right(chip, 10, 0);
+            lv_obj_set_style_pad_top(chip, 3, 0);
+            lv_obj_set_style_pad_bottom(chip, 3, 0);
+            lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+
+            lv_obj_t *lbl_sender = lv_label_create(chip);
+            lv_label_set_text(lbl_sender, trim_sender);
+            // Black text on a V=75 chip reads cleanly across every hue,
+            // even on yellow and lime where white would wash out.
+            lv_obj_set_style_text_color(lbl_sender, lv_color_black(), 0);
+            lv_obj_set_style_text_font(lbl_sender, &lv_font_montserrat_22, 0);
+        }
+
+        // Message body. Width-bounded so wrapping kicks in inside the bubble.
+        lv_obj_t *lbl_body = lv_label_create(bubble);
+        lv_label_set_text(lbl_body, body);
+        lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
+        lv_obj_set_style_text_font(lbl_body, &lv_font_montserrat_22, 0);
+        lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(lbl_body, bubble_max_w - 22);
+
+        // Timestamp footer in muted grey.
+        char timebuf[32];
+        format_local_time(msgs[i].timestamp, timebuf, sizeof(timebuf));
+        if (timebuf[0]) {
+            lv_obj_t *lbl_time = lv_label_create(bubble);
+            lv_label_set_text(lbl_time, timebuf);
+            lv_obj_set_style_text_color(lbl_time, lv_palette_main(LV_PALETTE_GREY), 0);
+            lv_obj_set_style_text_font(lbl_time, &lv_font_montserrat_14, 0);
+            // Right-justify timestamp on sent bubbles to mirror chat-app convention.
+            lv_obj_set_style_text_align(lbl_time,
+                is_sent ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
+        }
+    }
+
+    // Hold a non-NULL pointer in lbl_messages_body so the timer callback's
+    // dirty-check still gates correctly. We point it at the last bubble
+    // (which gets cleaned along with everything else on next rebuild).
+    lbl_messages_body = lv_obj_get_child(obj_msg_scroll, -1);
+
+    lv_obj_scroll_to_y(obj_msg_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+// ============================================================================
 // update_radio_detail_label
 // ============================================================================
 
@@ -394,16 +784,23 @@ static void update_radio_detail_label() {
     P4NodePrefs* prefs = mesh->getNodePrefs();
     if (!prefs) return;
 
-    char buf[256];
+    // Real noise floor from the radio_driver estimator. Backed by SX126x
+    // GetRssiInst (opcode 0x15) sampled every ~2 s in P4SX1262Radio's
+    // recvRaw. Cold-starts at -120 dBm and converges within a few samples.
+    int nf = radio_driver.getNoiseFloor();
+
+    char buf[320];
     snprintf(buf, sizeof(buf),
         "Frequency:     %.3f MHz\n"
         "Bandwidth:     %.1f kHz\n"
         "Spread Factor: SF%d\n"
         "Coding Rate:   4/%d\n"
         "TX Power:      %d dBm\n"
-        "Sync Word:     0x1424",
+        "Sync Word:     0x1424\n"
+        "Noise Floor:   %d dBm",
         prefs->freq, prefs->bw, prefs->sf, prefs->cr,
-        (int)prefs->tx_power_dbm);
+        (int)prefs->tx_power_dbm,
+        nf);
     lv_label_set_text(lbl_radio_detail, buf);
 }
 
@@ -527,6 +924,26 @@ static void on_settings_utc_tap(lv_event_t *e) {
     mesh->getDataStore()->savePrefs(*prefs);
     printf("Settings: UTC offset = %+d\n", (int)prefs->utc_offset_hours);
     settings_update_labels();
+}
+
+// Home Color row. Bound to BOTH LV_EVENT_CLICKED (tap = forward cycle) and
+// LV_EVENT_GESTURE (swipe-left = forward, swipe-right = back). With only two
+// schemes today both directions land on the other one, but the structure is
+// ready for more schemes to be added to the enum.
+static void on_settings_homecolor_input(lv_event_t *e) {
+    int dir = +1;  // tap (LV_EVENT_CLICKED) defaults to forward
+    if (lv_event_get_code(e) == LV_EVENT_GESTURE) {
+        lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
+        if (d == LV_DIR_LEFT)  dir = +1;
+        else if (d == LV_DIR_RIGHT) dir = -1;
+        else return;  // vertical swipe: ignore so scrolling still works
+    }
+    int n = (int)HOME_COLOR_COUNT;
+    g_home_color_scheme = ((g_home_color_scheme + dir) % n + n) % n;
+    save_home_color_to_nvs();
+    apply_tile_colors();
+    settings_update_labels();
+    printf("Settings: home color = %d\n", g_home_color_scheme);
 }
 
 // ============================================================================
@@ -717,11 +1134,23 @@ static void create_page_home(lv_obj_t *page) {
     Meck* mesh = meck_get_instance();
     P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : nullptr;
 
-    lv_obj_t *title = lv_label_create(page);
-    lv_label_set_text(title, "Meck P4");
-    lv_obj_set_style_text_color(title, lv_color_white(), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
+    // Reload the home colour scheme from NVS (idempotent — safe even on a
+    // rebuild) and clear the tile registry so this build's tiles are the
+    // only ones tracked.
+    load_home_color_from_nvs();
+    tile_button_count = 0;
+    for (int i = 0; i < MECK_HOME_TILE_COUNT; i++) tile_buttons[i] = NULL;
+
+    // Title is the user-chosen node name. Updated each tick by
+    // ui_update_timer_cb so a rename in Settings shows up live.
+    lbl_home_title = lv_label_create(page);
+    const char *initial_name = (prefs && prefs->node_name[0])
+                             ? prefs->node_name
+                             : "(no name)";
+    lv_label_set_text(lbl_home_title, initial_name);
+    lv_obj_set_style_text_color(lbl_home_title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl_home_title, &lv_font_montserrat_28, 0);
+    lv_obj_align(lbl_home_title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     lv_obj_t *radio = lv_label_create(page);
     lv_label_set_long_mode(radio, LV_LABEL_LONG_WRAP);
@@ -757,12 +1186,21 @@ static void create_page_home(lv_obj_t *page) {
     lv_obj_set_style_text_font(lbl_home_rssi, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_home_rssi, LV_ALIGN_TOP_RIGHT, -10, 80);
 
+    // Navigation grid: 10 tiles in 2 columns × 5 rows. First two rows are
+    // the high-traffic items; placeholder tiles for Trace, Maps, Audio, and
+    // Web are at the bottom as visual markers for future work. Tap any
+    // placeholder to print a TODO line to serial. The Web tile will host
+    // the text-based browser + IRC client ported from other Meck builds.
     create_tile_button(page, LV_SYMBOL_ENVELOPE "\nMessages", goto_channel_picker, 0, 0);
-    create_tile_button(page, LV_SYMBOL_LIST "\nContacts",     goto_contacts,       1, 0);
-    create_tile_button(page, LV_SYMBOL_SETTINGS "\nSettings", goto_settings,       2, 0);
-    create_tile_button(page, LV_SYMBOL_FILE "\nReader",       cb_todo_reader,      0, 1);
-    create_tile_button(page, LV_SYMBOL_EDIT "\nNotes",        cb_todo_notes,       1, 1);
-    create_tile_button(page, LV_SYMBOL_GPS "\nDiscover",      cb_todo_discover,    2, 1);
+    create_tile_button(page, LV_SYMBOL_LIST     "\nContacts", goto_contacts,       1, 0);
+    create_tile_button(page, LV_SYMBOL_SETTINGS "\nSettings", goto_settings,       0, 1);
+    create_tile_button(page, LV_SYMBOL_FILE     "\nReader",   cb_todo_reader,      1, 1);
+    create_tile_button(page, LV_SYMBOL_EDIT     "\nNotes",    cb_todo_notes,       0, 2);
+    create_tile_button(page, LV_SYMBOL_GPS      "\nDiscover", cb_todo_discover,    1, 2);
+    create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
+    create_tile_button(page, LV_SYMBOL_IMAGE    "\nMaps",     cb_todo_maps,        1, 3);
+    create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    cb_todo_audio,       0, 4);
+    create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_todo_web,         1, 4);
 
     lv_obj_t *hint = lv_label_create(page);
     lv_label_set_text(hint, "Swipe left for more pages " LV_SYMBOL_RIGHT);
@@ -957,6 +1395,15 @@ static void create_settings_screen() {
     y += 65;
     create_settings_row(scroll, "UTC Offset (tap to cycle)", &lbl_set_utc,     on_settings_utc_tap,     y);
     y += 65;
+    // Home Color: tap to forward-cycle. (Swipe gesture is also wired up
+    // below for future use, but tap is the documented interaction since
+    // small rows often catch the touch as a tap before a swipe registers.)
+    lv_obj_t *home_color_row = create_settings_row(
+        scroll, "Home Color (tap to cycle)", &lbl_set_homecolor,
+        on_settings_homecolor_input, y);
+    lv_obj_add_event_cb(home_color_row, on_settings_homecolor_input,
+                        LV_EVENT_GESTURE, NULL);
+    y += 65;
 
     lv_obj_t *id_row = lv_obj_create(scroll);
     lv_obj_set_size(id_row, SCREEN_WIDTH - 40, 110);
@@ -993,6 +1440,31 @@ static void create_settings_screen() {
     lv_obj_set_style_text_color(lbl_set_identity, lv_palette_main(LV_PALETTE_CYAN), 0);
     lv_obj_set_style_text_font(lbl_set_identity, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_set_identity, LV_ALIGN_TOP_LEFT, 0, 22);
+
+    // Firmware row at the bottom of the settings list. Static; not tappable.
+    // The home screen used to display "Meck P4" as its title; now that the
+    // title shows the user's chosen node name, the firmware identity belongs
+    // here on the Settings screen instead.
+    y += 120;  // clear past the identity panel (height 110 + a small gap)
+    lv_obj_t *fw_row = lv_obj_create(scroll);
+    lv_obj_set_size(fw_row, SCREEN_WIDTH - 40, 55);
+    lv_obj_set_pos(fw_row, 20, y);
+    lv_obj_set_style_bg_color(fw_row, lv_color_make(15, 15, 20), 0);
+    lv_obj_set_style_radius(fw_row, 10, 0);
+    lv_obj_set_style_border_width(fw_row, 0, 0);
+    lv_obj_set_style_pad_all(fw_row, 10, 0);
+
+    lv_obj_t *fw_title_lbl = lv_label_create(fw_row);
+    lv_label_set_text(fw_title_lbl, "Firmware");
+    lv_obj_set_style_text_color(fw_title_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_text_font(fw_title_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(fw_title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *fw_value_lbl = lv_label_create(fw_row);
+    lv_label_set_text(fw_value_lbl, MECK_FIRMWARE_NAME " v" MECK_FIRMWARE_VERSION);
+    lv_obj_set_style_text_color(fw_value_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(fw_value_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(fw_value_lbl, LV_ALIGN_RIGHT_MID, 0, 0);
 
     // Name edit overlay
     obj_name_edit_panel = lv_obj_create(scr_settings);
@@ -1261,13 +1733,11 @@ static void create_messages_screen() {
     lv_obj_set_style_radius(obj_msg_scroll, 8, 0);
     lv_obj_set_style_pad_all(obj_msg_scroll, 10, 0);
     lv_obj_set_scroll_dir(obj_msg_scroll, LV_DIR_VER);
-
-    lbl_messages_body = lv_label_create(obj_msg_scroll);
-    lv_label_set_text(lbl_messages_body, "No messages yet.");
-    lv_obj_set_style_text_color(lbl_messages_body, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_messages_body, &lv_font_montserrat_16, 0);
-    lv_label_set_long_mode(lbl_messages_body, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(lbl_messages_body, SCREEN_WIDTH - 50);
+    // rebuild_message_bubbles() populates this container with one bubble
+    // per message and (re)applies a flex column layout. We deliberately
+    // don't add a static body label here — the previous implementation
+    // dumped all messages into one big label, which couldn't do
+    // bubbles/alignment/sender colouring.
 
     ta_compose = lv_textarea_create(scr_messages);
     lv_obj_set_size(ta_compose, SCREEN_WIDTH - 100, 50);
@@ -1324,23 +1794,7 @@ static void load_channel_view(uint8_t ch_idx) {
         lv_obj_set_style_text_color(lbl_msg_channel_name, color, 0);
     }
 
-    if (lbl_messages_body) {
-        P4ChannelMessage msgs[16];
-        int n = mesh ? mesh->getMessages(msgs, 16, ch_idx) : 0;
-        if (n == 0) {
-            lv_label_set_text(lbl_messages_body, "No messages yet.");
-        } else {
-            char buf[2048];
-            int pos = 0;
-            for (int i = n - 1; i >= 0; i--) {
-                int w = snprintf(buf + pos, sizeof(buf) - pos, "%s\n\n", msgs[i].text);
-                if (w > 0) pos += w;
-            }
-            buf[pos] = '\0';
-            lv_label_set_text(lbl_messages_body, buf);
-            if (obj_msg_scroll) lv_obj_scroll_to_y(obj_msg_scroll, LV_COORD_MAX, LV_ANIM_OFF);
-        }
-    }
+    rebuild_message_bubbles(ch_idx);
 
     if (ta_compose) lv_textarea_set_text(ta_compose, "");
     if (kb_compose) lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
@@ -1515,6 +1969,17 @@ static void goto_contacts(lv_event_t *e) {
 static void ui_update_timer_cb(lv_timer_t *t) {
     Meck* mesh = meck_get_instance();
 
+    // Home title: show the user's chosen node name. Refreshed every tick so
+    // a rename in Settings shows up without needing to rebuild the screen.
+    if (lbl_home_title && mesh) {
+        P4NodePrefs* prefs = mesh->getNodePrefs();
+        if (prefs && prefs->node_name[0]) {
+            lv_label_set_text(lbl_home_title, prefs->node_name);
+        } else {
+            lv_label_set_text(lbl_home_title, "(no name)");
+        }
+    }
+
     // Home tile: unread count
     if (lbl_home_unread && mesh) {
         int unread = mesh->getUnreadCount();
@@ -1528,6 +1993,17 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     if (lbl_home_packets) {
         uint32_t rx = radio_driver.getPacketsRecv();
         lv_label_set_text_fmt(lbl_home_packets, "RX: %lu", (unsigned long)rx);
+    }
+
+    // Radio detail: redraw when the noise floor moves. The actual
+    // sampling happens in P4SX1262Radio under the SPI lock; we just
+    // mirror the cached value into the UI when it changes.
+    {
+        int nf = radio_driver.getNoiseFloor();
+        if (nf != g_last_noise_floor_displayed) {
+            g_last_noise_floor_displayed = nf;
+            update_radio_detail_label();
+        }
     }
 
     // Home tile: last RSSI/SNR
@@ -1620,26 +2096,11 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         }
     }
 
-    // Messages screen: live update for active channel
-    if (lbl_messages_body && mesh && mesh->isMessageDirty()) {
-        P4ChannelMessage msgs[16];
-        int n = mesh->getMessages(msgs, 16, g_active_channel);
-        if (n == 0) {
-            lv_label_set_text(lbl_messages_body, "No messages yet.");
-        } else {
-            char buf[2048];
-            int pos = 0;
-            for (int i = n - 1; i >= 0; i--) {
-                char timebuf[32];
-                format_local_time(msgs[i].timestamp, timebuf, sizeof(timebuf));
-                int w = snprintf(buf + pos, sizeof(buf) - pos,
-                    "%s\n%s\n\n", msgs[i].text, timebuf);
-                if (w > 0) pos += w;
-            }
-            buf[pos] = '\0';
-            lv_label_set_text(lbl_messages_body, buf);
-            if (obj_msg_scroll) lv_obj_scroll_to_y(obj_msg_scroll, LV_COORD_MAX, LV_ANIM_ON);
-        }
+    // Messages screen: live update for active channel. Rebuild the bubble
+    // list whenever the mesh signals new content. obj_msg_scroll is the
+    // sentinel — if it exists, the messages screen has been built.
+    if (obj_msg_scroll && mesh && mesh->isMessageDirty()) {
+        rebuild_message_bubbles(g_active_channel);
     }
 
     // Channel picker unread badges
@@ -1752,15 +2213,42 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             snprintf(sent_str, sizeof(sent_str), "%u  (%.0f/sec)",
                 (unsigned)snap.sentence_count, rate_avg);
 
-            char buf[384];
+            // UTC time captured from RMC. Only meaningful once GPS has
+            // decoded real time; year >= 2024 rejects pre-lock garbage.
+            char time_str[40];
+            if (snap.time_valid && snap.year >= 2024) {
+                snprintf(time_str, sizeof(time_str),
+                    "%04u-%02u-%02u %02u:%02u:%02uz",
+                    (unsigned)snap.year, (unsigned)snap.month, (unsigned)snap.day,
+                    (unsigned)snap.hour, (unsigned)snap.minute,
+                    (unsigned)snap.second);
+            } else {
+                snprintf(time_str, sizeof(time_str), "--");
+            }
+
+            // Soft RTC sync indicator. 0 means it has never been set; any
+            // non-zero value means device_gps_task has pushed at least once.
+            char rtc_str[40];
+            uint32_t rtc_now = meck_clock_get_utc();
+            if (rtc_now == 0) {
+                snprintf(rtc_str, sizeof(rtc_str), "not set");
+            } else {
+                snprintf(rtc_str, sizeof(rtc_str), "set (epoch %u)",
+                    (unsigned)rtc_now);
+            }
+
+            char buf[512];
             snprintf(buf, sizeof(buf),
                 "Status:     %s\n"
                 "Fix:        %s\n"
                 "Satellites: %s\n"
                 "Position:   %s\n"
                 "Altitude:   %s\n"
+                "UTC:        %s\n"
+                "RTC:        %s\n"
                 "Sentences:  %s",
-                status_str, fix_str, sat_str, pos_str, alt_str, sent_str);
+                status_str, fix_str, sat_str, pos_str, alt_str,
+                time_str, rtc_str, sent_str);
             lv_label_set_text(lbl_gps_detail, buf);
         }
     }

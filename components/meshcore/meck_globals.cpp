@@ -77,3 +77,17 @@ StaticPoolPacketManager packets(16 /*slot count*/);
 SimpleMeshTables   tables;
 
 }  // namespace meck
+
+// ============================================================================
+// C-linkage bridge for main.cpp. Uses the meck::rtc singleton declared above.
+// Lives outside the meck namespace because main.cpp can only see plain C
+// names (it includes meck.h, not meck_globals.h).
+// ============================================================================
+
+extern "C" void meck_clock_set_utc(uint32_t epoch) {
+    meck::rtc.setCurrentTime(epoch);
+}
+
+extern "C" uint32_t meck_clock_get_utc(void) {
+    return meck::rtc.getCurrentTime();
+}
