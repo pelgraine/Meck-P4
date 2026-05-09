@@ -188,24 +188,25 @@ extern "C" void meck_set_antenna_default() {
 // file scope. We extern it here so the meshcore component can read battery
 // state. Voltage is always trustworthy; the chip's SoC% may drift if the
 // cell isn't characterised in the BQ27220's data flash (a known issue
-// across Meshcore P4 forks — see MeshOS issue #2192).
+// across MeshCore P4 forks — see MeshOS issue #2192).
 //
-// LilyGo's BQ27220 ships with a Design Capacity of 3000 mAh in its data
-// flash, but the physical cell on both T-Deck Pro and T-Display P4 is
-// approximately 2000 mAh. The chip's reported full / remaining mAh are
-// therefore inflated. We work around this by:
-//   - Treating Full Charge as a fixed 2000 mAh constant
-//   - Computing Remaining from the voltage curve, not from the chip
-// This makes Voltage, Charge%, and Remaining mAh internally consistent in
-// the UI. Reprogramming the BQ27220's data flash to set Design Capacity =
-// 2000 would be a more proper fix, but is out of scope here.
+// LilyGo's example firmware and wiki tell users to set Design Capacity to
+// 1000 mAh, which is wrong — the physical cell shipped on the T-Display P4
+// is 2000 mAh. Our main.cpp now writes 2000 at boot via
+// BQ27220->set_design_capacity(2000), so the chip's own current/SoC/time
+// readings should now scale correctly. We still treat full-charge mAh as
+// a fixed constant here to keep the UI's "Remaining mAh" consistent with
+// our voltage-curve-derived percentage, regardless of any drift in the
+// chip's learned full-charge value.
 // ============================================================================
 
 extern std::unique_ptr<Cpp_Bus_Driver::Bq27220xxxx> BQ27220;
 
-// Actual physical cell capacity. LilyGo factory default in the BQ27220's
-// data flash reads 3000 mAh, which is wrong for both T-Deck Pro and
-// T-Display P4. Override here.
+// Actual physical cell capacity. Confirmed via reports from a T-Display P4
+// owner (Tony Podlaski, December 2025) and consistent with LilyGo's own
+// 2000 mAh advertised spec. Used both in main.cpp's set_design_capacity
+// call (so the BQ27220's reported current/SoC scale correctly) and here
+// for "Remaining mAh" derivation in the UI.
 static const uint16_t MECK_BATTERY_CAP_MAH = 2000;
 
 extern "C" bool meck_battery_available() {
@@ -231,6 +232,19 @@ extern "C" uint8_t meck_battery_pct_from_chip() {
 
 extern "C" int8_t meck_battery_temp_c() {
     if (!BQ27220) return 0;
+    // BQ27220 die (chip) temperature, NOT battery temperature. The
+    // T-Display P4 schematic wires the cell's NTC thermistor to the
+    // LGS4056H charge IC for over-temperature protection during charging
+    // (see LilyGo's GitHub README), not to the BQ27220's TS pin. Even
+    // with EXTERNAL_NTC mode set in main.cpp, get_temperature_celsius()
+    // would read whatever floats on the disconnected TS pin — typically
+    // near the floor of the gauge's range and meaningless.
+    //
+    // The die temperature is at least real and tracks roughly with
+    // ambient + load. Expect ~35-45°C with screen on / LoRa active /
+    // GPS running, dropping toward ambient as the device idles. This is
+    // surfaced in the UI as "Chip temp" so the user isn't misled into
+    // thinking the cell itself is at this temperature.
     return (int8_t)BQ27220->get_chip_temperature_celsius();
 }
 

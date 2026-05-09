@@ -5610,7 +5610,11 @@ extern "C" void app_main(void)
     }
 
     // 设置的电池容量会在没有电池插入的时候自动还原为默认值
-    BQ27220->set_design_capacity(1000);
+    // The T-Display P4 ships with a 2000 mAh cell. LilyGo's example
+    // and wiki both hardcode 1000 mAh, which scales every gauge
+    // reading (current, SOC, time-to-empty) by 0.5x. Setting the real
+    // capacity makes those readings match reality.
+    BQ27220->set_design_capacity(2000);
     BQ27220->set_temperature_mode(Cpp_Bus_Driver::Bq27220xxxx::Temperature_Mode::EXTERNAL_NTC);
     BQ27220->set_sleep_current_threshold(50);
 

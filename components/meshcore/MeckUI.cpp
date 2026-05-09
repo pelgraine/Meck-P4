@@ -2819,7 +2819,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                 "Voltage:    %u mV (~%u%%)\n"
                 "Charge:     %u%%  [BQ27220]\n"
                 "Current:    %s%d mA  (%s)\n"
-                "Temp:       %d C\n\n"
+                "Chip temp:  %d C\n\n"
                 "Remaining:  %u / %u mAh\n"
                 "Time empty: %s%s",
                 (unsigned)mv,           (unsigned)pct_volts,
