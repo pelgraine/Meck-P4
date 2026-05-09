@@ -107,6 +107,7 @@ enum class Battery_Health_Mode
 enum class Gps_Mode
 {
     TEST = 0,
+    OFF  = 1,    // L76K held in standby; device_gps_task idles
 };
 
 enum class Ethernet_Mode
@@ -1859,6 +1860,28 @@ void device_gps_task(void *arg)
         }
         break;
 
+        case Gps_Mode::OFF:
+        {
+            // GPS gated off by the user via long-press on the GPS tile.
+            // We keep the FreeRTOS task alive (so the mode switch is
+            // dynamic) but skip every UART read and parser call. The
+            // actual standby command was sent to the L76K when the mode
+            // transitioned — see meck_gps_set_enabled.
+            //
+            // Mark the snapshot as "off" so the UI can render an explicit
+            // disabled state rather than a stale "no fix" panel that
+            // looks like a hardware fault.
+            Sys_Status.l76k.location_status = 'X';   // sentinel for OFF
+            Sys_Status.l76k.fix_valid = false;
+            Sys_Status.l76k.time_valid = false;
+
+            // Long sleep so we don't busy-wait. 1 sec is plenty — the
+            // user will tolerate a 1-sec delay between long-pressing the
+            // tile and seeing the GPS come back.
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        break;
+
         default:
             break;
         }
@@ -3173,6 +3196,53 @@ bool Set_T_Mixrf_Lr1121_Sleep()
 }
 
 #endif
+
+// Public brightness setter, declared in meck.h. Called by:
+//  - meck_app_init   to apply the saved-prefs brightness on boot
+//  - MeckUI's Screen Brightness picker when the user cycles the value
+//  - the auto screen-off timer to fade to 0 / restore on wake
+//
+// The set_rm69a10_brightness call writes register 0x51 on the AMOLED
+// driver; the panel itself does the dimming, so this is cheap and smooth.
+extern "C" void meck_screen_set_brightness(uint8_t value)
+{
+#if defined CONFIG_SCREEN_TYPE_RM69A10
+    if (Screen_Mipi_Dpi_Panel) {
+        set_rm69a10_brightness(Screen_Mipi_Dpi_Panel, value);
+    }
+#elif defined CONFIG_SCREEN_TYPE_HI8561
+    // HI8561 uses PWM-based dimming via a different API. Map 0..255 onto
+    // its native 0..100 percentage and use start_pwm_gradient_time for
+    // smooth transitions on screen-off / wake.
+    if (HI8561_T) {
+        uint8_t pct = (uint16_t)value * 100 / 255;
+        HI8561_T->start_pwm_gradient_time(pct, 100);
+    }
+#endif
+}
+
+// GPS power gate. Switching to OFF puts the L76K into standby (~25 mA
+// savings at the module) and stops device_gps_task from polling. Switch
+// back to TEST wakes the module and resumes parsing. The almanac is
+// preserved across standby cycles so re-acquisition is fast (seconds
+// rather than the cold-start TTFF).
+extern "C" void meck_gps_set_enabled(bool enabled)
+{
+    if (enabled) {
+        if (L76K) L76K->sleep(false);   // wake
+        L76k_Gps_Mode = Gps_Mode::TEST;
+        printf("Meck GPS: enabled\n");
+    } else {
+        L76k_Gps_Mode = Gps_Mode::OFF;
+        if (L76K) L76K->sleep(true);    // standby
+        printf("Meck GPS: disabled (L76K in standby)\n");
+    }
+}
+
+extern "C" bool meck_gps_is_enabled(void)
+{
+    return L76k_Gps_Mode != Gps_Mode::OFF;
+}
 
 bool Sdmmc_Init(const char *base_path)
 {

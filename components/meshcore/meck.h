@@ -63,6 +63,19 @@ void meck_clock_set_utc(uint32_t epoch);
 // current UTC epoch in seconds.
 uint32_t meck_clock_get_utc(void);
 
+// Set the AMOLED panel brightness (0-255). 0 is fully dark (used by the
+// auto screen-off timer); higher values write to the panel's hardware
+// brightness register. Implementation lives in main.cpp because it needs
+// the Screen_Mipi_Dpi_Panel handle that LilyGo's BSP creates there.
+void meck_screen_set_brightness(uint8_t value);
+
+// GPS power gate. When disabled, device_gps_task holds the L76K in
+// standby (sleep(true)) and stops parsing NMEA — saves ~25 mA at the
+// module and suppresses parser log chatter. Implementation lives in
+// main.cpp where the L76K driver handle is in scope.
+void meck_gps_set_enabled(bool enabled);
+bool meck_gps_is_enabled(void);
+
 #ifdef __cplusplus
 }
 #endif

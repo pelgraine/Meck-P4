@@ -82,7 +82,17 @@ struct P4NodePrefs {
     uint8_t manual_add_contacts;  // 0 = auto-add, 1 = manual only
     uint8_t autoadd_config;       // bitmask: overwrite|chat|repeater|room|sensor
     uint8_t dark_mode;            // 0 = light, 1 = dark
-    uint8_t reserved[5];          // future fields, zero-initialized
+    // Screen control. Both fields use 0 as "not set / use default" so
+    // existing NVS blobs (which had reserved[] zeroed) keep working —
+    // setDefaults below maps 0 → a sane initial value at first boot.
+    uint8_t screen_brightness;    // 0 = default (200), else 1..255
+    uint8_t screen_off_minutes;   // 0 = never, else minutes until dim
+    // GPS power gate. 0 = use default (on); 1 = explicitly on; 2 = off.
+    // The 3-state encoding lets us distinguish "user has actively turned
+    // GPS off" from "fresh prefs, never set" — useful if we ever change
+    // the default. Existing NVS blobs read as 0 → default-on, no surprise.
+    uint8_t gps_enabled;
+    uint8_t reserved[2];          // future fields, zero-initialized
 
     // Initialize with defaults from variant.h
     void setDefaults() {
@@ -99,6 +109,9 @@ struct P4NodePrefs {
         manual_add_contacts = 0;
         autoadd_config = 0x1E;  // all types, no overwrite (chat|repeater|room|sensor)
         dark_mode = 0;
+        screen_brightness = 200;
+        screen_off_minutes = 5;
+        gps_enabled = 1;        // on by default
         memset(reserved, 0, sizeof(reserved));
     }
 };
@@ -413,7 +426,11 @@ public:
     }
 
     // =====================================================================
-    // Contacts — NVS primary (no SD backup yet, pending SD card init fix)
+    // Contacts — NVS primary, SD backup
+    //
+    // saveContacts writes both NVS (primary) and SD (best-effort backup).
+    // loadContacts tries NVS first; if empty/corrupt it falls back to the
+    // SD copy and the next saveContacts re-populates NVS.
     // =====================================================================
 
     // Compact contact record for NVS storage (80 bytes each).
@@ -468,6 +485,19 @@ public:
             nvs_close(handle);
         }
 
+        // Backup to SD. Best-effort — a failed SD write must not fail the
+        // overall save, since NVS is the primary store. Mirrors the pattern
+        // used by savePrefs and saveChannels.
+        if (p4_sdcard_is_mounted()) {
+            FILE* f = fopen(SD_CONTACTS_PATH, "wb");
+            if (f) {
+                fwrite(blob, 1, blobSize, f);
+                fclose(f);
+            } else {
+                ESP_LOGW(TAG, "saveContacts: SD backup open failed (errno=%d)", errno);
+            }
+        }
+
         free(blob);
 
         if (err != ESP_OK) {
@@ -482,25 +512,51 @@ public:
     int loadContacts(ContactRecord* records, int maxCount) {
         if (!_initialized) return 0;
 
+        // Try NVS first.
+        size_t blobSize = 0;
+        uint8_t* blob = NULL;
+        bool loaded = false;
+
         nvs_handle_t handle;
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
-        if (err != ESP_OK) return 0;
-
-        // Query blob size first
-        size_t blobSize = 0;
-        err = nvs_get_blob(handle, "contacts", NULL, &blobSize);
-        if (err != ESP_OK || blobSize < sizeof(ContactsHeader)) {
+        if (err == ESP_OK) {
+            err = nvs_get_blob(handle, "contacts", NULL, &blobSize);
+            if (err == ESP_OK && blobSize >= sizeof(ContactsHeader)) {
+                blob = (uint8_t*)malloc(blobSize);
+                if (blob) {
+                    err = nvs_get_blob(handle, "contacts", blob, &blobSize);
+                    if (err == ESP_OK) loaded = true;
+                    else { free(blob); blob = NULL; }
+                }
+            }
             nvs_close(handle);
-            return 0;
         }
 
-        uint8_t* blob = (uint8_t*)malloc(blobSize);
-        if (!blob) { nvs_close(handle); return 0; }
+        // NVS empty or corrupt — fall back to SD. Same pattern as
+        // loadChannels: if NVS was wiped (fresh flash, factory reset) but
+        // the SD card retains a backup, restore from there. The SD copy
+        // gets written to NVS implicitly on the next saveContacts.
+        if (!loaded && p4_sdcard_is_mounted() && p4_sdcard_file_exists(SD_CONTACTS_PATH)) {
+            size_t fsize = p4_sdcard_file_size(SD_CONTACTS_PATH);
+            if (fsize >= sizeof(ContactsHeader)) {
+                blob = (uint8_t*)malloc(fsize);
+                if (blob) {
+                    FILE* f = fopen(SD_CONTACTS_PATH, "rb");
+                    if (f) {
+                        size_t rd = fread(blob, 1, fsize, f);
+                        fclose(f);
+                        if (rd == fsize) {
+                            blobSize = fsize;
+                            loaded = true;
+                            ESP_LOGI(TAG, "loadContacts: restored from SD");
+                        }
+                    }
+                    if (!loaded) { free(blob); blob = NULL; }
+                }
+            }
+        }
 
-        err = nvs_get_blob(handle, "contacts", blob, &blobSize);
-        nvs_close(handle);
-
-        if (err != ESP_OK) { free(blob); return 0; }
+        if (!loaded || !blob) return 0;
 
         ContactsHeader* hdr = (ContactsHeader*)blob;
         if (memcmp(hdr->magic, "MCC", 3) != 0 || hdr->version != 1) {
@@ -530,12 +586,68 @@ public:
     // Backup / Restore — bulk operations for fresh-flash recovery
     // =====================================================================
 
-    // Backup everything to SD card. Called after any significant change.
-    void backupToSD() {
-        if (!p4_sdcard_is_mounted()) return;
-        // Prefs and identity are backed up on every save automatically.
-        // This method is for explicit full backup if needed.
-        ESP_LOGI(TAG, "backupToSD: prefs and channels backed up");
+    // Force a full write-out of every persisted blob from NVS to the SD
+    // card. Useful for a manual "Backup now" UI button — every individual
+    // save path already writes through to SD, but this catches anything
+    // that may have failed an SD write earlier (card not mounted, write
+    // error, etc.). Returns the number of blobs successfully written.
+    int backupToSD() {
+        if (!p4_sdcard_is_mounted()) {
+            ESP_LOGW(TAG, "backupToSD: SD not mounted");
+            return 0;
+        }
+        ensureSDDirectories();
+        int written = 0;
+
+        // Identity. Read the NVS blob and write it to the SD path.
+        {
+            nvs_handle_t handle;
+            if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+                size_t len = 0;
+                if (nvs_get_blob(handle, "identity", NULL, &len) == ESP_OK && len > 0) {
+                    uint8_t* buf = (uint8_t*)malloc(len);
+                    if (buf && nvs_get_blob(handle, "identity", buf, &len) == ESP_OK) {
+                        FILE* f = fopen(SD_IDENTITY_PATH, "wb");
+                        if (f) {
+                            fwrite(buf, 1, len, f);
+                            fclose(f);
+                            written++;
+                        }
+                    }
+                    if (buf) free(buf);
+                }
+                nvs_close(handle);
+            }
+        }
+
+        // Generic blob copier: read from NVS, write to the given SD path.
+        // Used for prefs, channels and contacts which all live as opaque
+        // blobs under NVS_NAMESPACE.
+        auto copy_blob = [&](const char* nvs_key, const char* sd_path) {
+            nvs_handle_t handle;
+            if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
+            size_t len = 0;
+            esp_err_t err = nvs_get_blob(handle, nvs_key, NULL, &len);
+            if (err == ESP_OK && len > 0) {
+                uint8_t* buf = (uint8_t*)malloc(len);
+                if (buf && nvs_get_blob(handle, nvs_key, buf, &len) == ESP_OK) {
+                    FILE* f = fopen(sd_path, "wb");
+                    if (f) {
+                        fwrite(buf, 1, len, f);
+                        fclose(f);
+                        written++;
+                    }
+                }
+                if (buf) free(buf);
+            }
+            nvs_close(handle);
+        };
+        copy_blob("prefs",    SD_PREFS_PATH);
+        copy_blob("channels", SD_CHANNELS_PATH);
+        copy_blob("contacts", SD_CONTACTS_PATH);
+
+        ESP_LOGI(TAG, "backupToSD: %d blobs written", written);
+        return written;
     }
 
     // Ensure all Meck SD directories exist. Idempotent — safe to call on
@@ -631,6 +743,42 @@ public:
                                         nvs_commit(wh);
                                         nvs_close(wh);
                                         printf("P4DataStore: channels restored from SD\n");
+                                        restored = true;
+                                    }
+                                }
+                                free(buf);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if NVS has contacts. Same pattern: if NVS lacks them but
+        // SD has a backup, blit the SD blob into NVS and let loadContacts
+        // pick it up via the normal path on next call.
+        {
+            nvs_handle_t handle;
+            if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+                size_t len = 0;
+                esp_err_t err = nvs_get_blob(handle, "contacts", NULL, &len);
+                nvs_close(handle);
+                if (err != ESP_OK || len == 0) {
+                    if (p4_sdcard_file_exists(SD_CONTACTS_PATH)) {
+                        size_t fsize = p4_sdcard_file_size(SD_CONTACTS_PATH);
+                        if (fsize > 0) {
+                            uint8_t* buf = (uint8_t*)malloc(fsize);
+                            if (buf) {
+                                FILE* f = fopen(SD_CONTACTS_PATH, "rb");
+                                if (f) {
+                                    fread(buf, 1, fsize, f);
+                                    fclose(f);
+                                    nvs_handle_t wh;
+                                    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &wh) == ESP_OK) {
+                                        nvs_set_blob(wh, "contacts", buf, fsize);
+                                        nvs_commit(wh);
+                                        nvs_close(wh);
+                                        printf("P4DataStore: contacts restored from SD\n");
                                         restored = true;
                                     }
                                 }

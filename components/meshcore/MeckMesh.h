@@ -25,6 +25,7 @@
 #include "esp_heap_caps.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/base64.h"
+#include <strings.h>   // strcasecmp for case-insensitive name match in migrateChannelSecrets
 
 // Forward decl for the deferred SD-save queue, defined in meck_app.cpp.
 // Allows ring-write call sites in this header to enqueue without including
@@ -199,6 +200,12 @@ public:
             setupDefaultChannels();
             saveChannels();  // persist defaults so they load next time
         }
+
+        // Self-healing migration for any channel records carrying the old
+        // hash-of-name secret for Public (which broke decryption against the
+        // canonical network secret). Runs every boot, no-op if already
+        // correct, no NVS schema bump so custom channels survive.
+        migrateChannelSecrets();
 
         // Load contacts from NVS
         loadContactsFromStore();
@@ -555,6 +562,62 @@ public:
 
     const char* getNodeName() const { return _prefs ? _prefs->node_name : "NONAME"; }
     P4NodePrefs* getNodePrefs() { return _prefs; }
+
+    // ---- Contact flag mutation ----
+    //
+    // BaseChatMesh::addContact() appends a new slot — it does NOT upsert by
+    // pubkey. To mutate an existing contact we must removeContact() first,
+    // then addContact() the modified copy. The contact ends up at the tail
+    // of the table (entries after it shift down by one); for our use case
+    // (favourite toggle) the change in row order is acceptable.
+    //
+    // Pair with scheduleLazyContactSave so the change makes it to NVS within
+    // ~3 s.
+    bool setContactFlags(int idx, uint8_t new_flags) {
+        ContactInfo ci;
+        if (!getContactByIdx(idx, ci)) return false;
+        if (ci.flags == new_flags) return true;          // no-op
+        ci.flags = new_flags;
+
+        if (!removeContact(ci)) {
+            printf("Meck: setContactFlags removeContact failed for '%s'\n",
+                   ci.name);
+            return false;
+        }
+        if (!addContact(ci)) {
+            // Should be impossible — we just freed a slot. But if it does
+            // happen the contact is now lost from the table; warn loudly.
+            printf("Meck: setContactFlags addContact failed for '%s' "
+                   "(contact lost!)\n", ci.name);
+            return false;
+        }
+
+        scheduleLazyContactSave();
+        printf("Meck: contact '%s' flags = 0x%02X\n", ci.name, new_flags);
+        return true;
+    }
+
+    // Convenience: flip bit 0 (favourite) for a contact by table index.
+    bool toggleContactFavourite(int idx) {
+        ContactInfo ci;
+        if (!getContactByIdx(idx, ci)) return false;
+        return setContactFlags(idx, ci.flags ^ 0x01);
+    }
+
+    // Delete a contact from the in-memory table by index. Persists via the
+    // lazy-save queue. Useful for clearing duplicates that were created by
+    // earlier (broken) toggleContactFavourite paths.
+    bool deleteContactByIdx(int idx) {
+        ContactInfo ci;
+        if (!getContactByIdx(idx, ci)) return false;
+        if (!removeContact(ci)) {
+            printf("Meck: deleteContactByIdx failed for '%s'\n", ci.name);
+            return false;
+        }
+        scheduleLazyContactSave();
+        printf("Meck: deleted contact '%s'\n", ci.name);
+        return true;
+    }
     P4DataStore* getDataStore() { return _store; }
 
     // ---- Thread-safe accessors for LVGL UI ----
@@ -721,24 +784,30 @@ protected:
                        uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override {
         BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
 
-       // Clock sync: first valid sync wins, then we trust our own clock.
-        // Window is +/- 6 months from release time (update at release).
-        // 1730419200 = 1 Nov 2025 00:00 UTC
-        // 1762041600 = 1 Nov 2026 00:00 UTC
+        // Clock sync: first valid sync wins, then we trust our own clock.
+        // Window is deliberately wide so we don't reject the entire mesh
+        // because of a missed annual constant bump. Real-world clock drift
+        // / mis-set time on a peer is the main thing this catches.
+        //
+        // 1730419200 = 1 Nov 2025 00:00 UTC  (floor)
+        // 1956528000 = 1 Jan 2032 00:00 UTC  (ceiling — covers ~5 years of
+        //   forward drift; bump again well before 2031).
         const uint32_t MIN_VALID = 1730419200U;
-        const uint32_t MAX_VALID = 1762041600U;
+        const uint32_t MAX_VALID = 1956528000U;
         const uint32_t SYNC_THRESHOLD = 1750000000U;  // matches isClockSynced()
         uint32_t our_time = _rtc_ref.getCurrentTime();
         bool synced = our_time >= SYNC_THRESHOLD;
         if (timestamp < MIN_VALID || timestamp >= MAX_VALID) {
-            // Rogue or stale advert. Log once per session to avoid spam.
-            static bool warned_outofrange = false;
-            if (!warned_outofrange) {
-                printf("Meck: clock sync rejected, timestamp out of valid range (advert=%lu, valid=%lu..%lu)\n",
-                       (unsigned long)timestamp,
-                       (unsigned long)MIN_VALID, (unsigned long)MAX_VALID);
-                warned_outofrange = true;
-            }
+            // Rogue, stale, or peer-clock-misconfigured advert. Print every
+            // time so peer clock issues are visible — this sometimes catches
+            // a phone whose date is set wrong, or a companion firmware bug
+            // computing the wrong epoch. Include both sides for diagnosis.
+            int32_t skew = (int32_t)((int64_t)timestamp - (int64_t)our_time);
+            printf("Meck: advert ts out of range — advert=%lu our=%lu "
+                   "skew=%+ld s, valid=%lu..%lu\n",
+                   (unsigned long)timestamp, (unsigned long)our_time,
+                   (long)skew,
+                   (unsigned long)MIN_VALID, (unsigned long)MAX_VALID);
         } else if (!synced) {
             _rtc_ref.setCurrentTime(timestamp);
             printf("Meck: clock synced to %lu (was %lu)\n",
@@ -904,20 +973,73 @@ private:
 
     // ---- Default channels (used on first boot only) ----
 
+    // Canonical fixed secret for the network-wide Public channel. Used by
+    // every MeshCore-compatible node — DO NOT derive it from the channel
+    // name. Hashing "#public" or "public" produces a unique-to-this-device
+    // secret that no peer can decrypt.
+    static const uint8_t* publicChannelSecret() {
+        static const uint8_t PUBLIC_SECRET[16] = {
+            0x8b, 0x33, 0x87, 0xe9, 0xc5, 0xcd, 0xea, 0x6a,
+            0xc9, 0xe5, 0xed, 0xba, 0xa1, 0x15, 0xcd, 0x72,
+        };
+        return PUBLIC_SECRET;
+    }
+
     void setupDefaultChannels() {
         printf("Meck: no stored channels — creating defaults\n");
 
-        const char* defaults[] = { "#public", "#test", "#sydney" };
-        for (int i = 0; i < 3; i++) {
+        // Slot 0: Public — literal canonical secret, NOT a hash.
+        {
             ChannelDetails ch;
             memset(&ch, 0, sizeof(ch));
-            strncpy(ch.name, defaults[i], sizeof(ch.name) - 1);
+            strncpy(ch.name, "Public", sizeof(ch.name) - 1);
+            memcpy(ch.channel.secret, publicChannelSecret(), 16);
+            setChannel(0, ch);
+        }
+
+        // Slots 1+: hashtag channels — first 16 bytes of SHA-256(name) is
+        // the secret, with the leading '#' included. Matches addHashChannel()
+        // and the rest of the AU mesh.
+        const char* hashed_defaults[] = { "#test", "#sydney" };
+        const int n_hashed = (int)(sizeof(hashed_defaults) / sizeof(hashed_defaults[0]));
+        for (int i = 0; i < n_hashed; i++) {
+            ChannelDetails ch;
+            memset(&ch, 0, sizeof(ch));
+            strncpy(ch.name, hashed_defaults[i], sizeof(ch.name) - 1);
 
             uint8_t hash[32];
-            mesh::Utils::sha256(hash, 32, (const uint8_t*)defaults[i], strlen(defaults[i]));
+            mesh::Utils::sha256(hash, 32,
+                (const uint8_t*)hashed_defaults[i], strlen(hashed_defaults[i]));
             memcpy(ch.channel.secret, hash, 16);
 
-            setChannel(i, ch);
+            setChannel(i + 1, ch);
         }
+    }
+
+    // One-shot self-healing migration. Call from begin() after loadChannels()
+    // so existing devices with the old (broken) Public secret get fixed in
+    // place without losing custom channels like #ivy. Idempotent — safe to
+    // run every boot.
+    void migrateChannelSecrets() {
+        bool dirty = false;
+        for (uint8_t i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            ChannelDetails ch;
+            if (!getChannel(i, ch) || ch.name[0] == '\0') continue;
+
+            // Match "public" or "#public", case-insensitive — covers both
+            // legacy hashed-name layout and the new literal-secret one.
+            if (strcasecmp(ch.name, "public")  == 0 ||
+                strcasecmp(ch.name, "#public") == 0) {
+                if (memcmp(ch.channel.secret, publicChannelSecret(), 16) != 0) {
+                    memcpy(ch.channel.secret, publicChannelSecret(), 16);
+                    memset(ch.channel.secret + 16, 0, 16);  // 128-bit mode
+                    setChannel(i, ch);
+                    printf("Meck: migrated Public channel secret at slot %d "
+                           "(name='%s')\n", i, ch.name);
+                    dirty = true;
+                }
+            }
+        }
+        if (dirty) saveChannels();
     }
 };

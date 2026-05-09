@@ -62,6 +62,24 @@ extern _lock_t lvgl_api_lock;
 #define MECK_FIRMWARE_NAME    "Meck P4"
 #define MECK_FIRMWARE_VERSION "0.1"
 
+// Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
+// upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
+// (overwrite-oldest) is independent of the per-type bits.
+#define AUTO_ADD_OVERWRITE_OLDEST (1 << 0)   // 0x01
+#define AUTO_ADD_CHAT             (1 << 1)   // 0x02
+#define AUTO_ADD_REPEATER         (1 << 2)   // 0x04
+#define AUTO_ADD_ROOM_SERVER      (1 << 3)   // 0x08
+#define AUTO_ADD_SENSOR           (1 << 4)   // 0x10
+#define AUTO_ADD_ALL_TYPES        (AUTO_ADD_CHAT | AUTO_ADD_REPEATER | \
+                                   AUTO_ADD_ROOM_SERVER | AUTO_ADD_SENSOR)
+
+// Contact-mode picker values. Maps to (manual_add_contacts, autoadd_config)
+// pairs — see settings_contacts_apply_mode() / settings_contacts_get_mode().
+#define CONTACT_MODE_AUTO_ALL 0   // every type, auto-added
+#define CONTACT_MODE_CUSTOM   1   // per-type bits in autoadd_config
+#define CONTACT_MODE_MANUAL   2   // no auto-add at all
+#define CONTACT_MODE_COUNT    3
+
 // ============================================================================
 // Radio preset table (17 community presets)
 // ============================================================================
@@ -98,6 +116,18 @@ static const RadioPreset RADIO_PRESETS[] = {
 
 static const uint8_t TX_POWER_OPTIONS[] = { 10, 14, 17, 20, 22 };
 #define NUM_TX_POWER_OPTIONS 5
+
+// Screen brightness levels — eight-step ladder spanning the full visible
+// range. Lowest level (32) is dim but readable in a dark room; highest
+// (255) is full HBM. Cycle order matches the array order.
+static const uint8_t BRIGHTNESS_OPTIONS[] = { 32, 64, 96, 128, 160, 192, 224, 255 };
+#define NUM_BRIGHTNESS_OPTIONS 8
+
+// Auto screen-off timeouts in minutes. 0 means "never". User cycles
+// forward through the ladder; matches the convention of every other
+// "tap to cycle" setting on this device.
+static const uint8_t SCREEN_OFF_OPTIONS[] = { 0, 1, 2, 5, 10, 30 };
+#define NUM_SCREEN_OFF_OPTIONS 6
 
 // Channel + sender colour cycle. Used by:
 //   - channel picker bubble borders / text
@@ -174,6 +204,8 @@ static lv_obj_t *lbl_set_txpower   = NULL;
 static lv_obj_t *lbl_set_utc       = NULL;
 static lv_obj_t *lbl_set_pathhash  = NULL;
 static lv_obj_t *lbl_set_homecolor = NULL;
+static lv_obj_t *lbl_set_brightness  = NULL;
+static lv_obj_t *lbl_set_screen_off  = NULL;
 static lv_obj_t *lbl_set_identity  = NULL;
 static lv_obj_t *obj_name_edit_panel = NULL;
 static lv_obj_t *ta_settings_name    = NULL;
@@ -203,9 +235,34 @@ static uint8_t  g_active_channel        = 0;
 // Contacts
 static lv_obj_t *scr_contacts            = NULL;
 static lv_obj_t *obj_contacts_scroll     = NULL;
+static lv_obj_t *obj_contacts_filter_bar = NULL;  // chip row above the list
 static lv_obj_t *scr_contact_detail      = NULL;
 static lv_obj_t *lbl_contact_detail_body = NULL;
 static int g_selected_contact_idx        = -1;
+
+// Contact list filter. Persists across navigations to the contacts screen
+// so the user lands back where they were. Mirrors upstream Meck's enum.
+typedef enum {
+    CONTACT_FILTER_ALL = 0,
+    CONTACT_FILTER_CHAT,
+    CONTACT_FILTER_REPEATER,
+    CONTACT_FILTER_ROOM,
+    CONTACT_FILTER_SENSOR,
+    CONTACT_FILTER_FAV,
+    CONTACT_FILTER_COUNT
+} ContactFilter;
+
+static ContactFilter g_contact_filter = CONTACT_FILTER_ALL;
+
+// Contacts → auto-add submenu under Settings
+static lv_obj_t *scr_settings_contacts        = NULL;
+static lv_obj_t *lbl_set_contact_mode         = NULL;
+static lv_obj_t *lbl_set_autoadd_chat         = NULL;
+static lv_obj_t *lbl_set_autoadd_repeater     = NULL;
+static lv_obj_t *lbl_set_autoadd_room         = NULL;
+static lv_obj_t *lbl_set_autoadd_sensor       = NULL;
+static lv_obj_t *lbl_set_autoadd_overwrite    = NULL;
+static lv_obj_t *lbl_set_backup_status        = NULL;
 
 // ============================================================================
 // Forward declarations
@@ -241,6 +298,28 @@ static void on_kb_event(lv_event_t *e);
 
 static void on_contact_tap(lv_event_t *e);
 static void on_contact_fav_toggle(lv_event_t *e);
+static void on_contact_long_press(lv_event_t *e);
+static void on_contact_delete(lv_event_t *e);
+static void on_contacts_screen_gesture(lv_event_t *e);
+static void on_filter_chip_tap(lv_event_t *e);
+
+// Settings → Contacts sub-screen
+static void create_settings_contacts_screen();
+static void goto_settings_contacts(lv_event_t *e);
+static void goto_settings_from_contacts(lv_event_t *e);
+static void settings_contacts_update_labels();
+static int  settings_contacts_get_mode();
+static void settings_contacts_apply_mode(int mode);
+static void on_settings_contact_mode_tap(lv_event_t *e);
+static void on_settings_autoadd_chat_tap(lv_event_t *e);
+static void on_settings_autoadd_repeater_tap(lv_event_t *e);
+static void on_settings_autoadd_room_tap(lv_event_t *e);
+static void on_settings_autoadd_sensor_tap(lv_event_t *e);
+static void on_settings_autoadd_overwrite_tap(lv_event_t *e);
+static void on_settings_backup_to_sd_tap(lv_event_t *e);
+static void on_settings_brightness_tap(lv_event_t *e);
+static void on_settings_screen_off_tap(lv_event_t *e);
+static void on_gps_tile_long_press(lv_event_t *e);
 
 static void on_ch_delete(lv_event_t *e);
 static void on_ch_add_tap(lv_event_t *e);
@@ -341,6 +420,19 @@ static lv_obj_t* create_back_button(lv_obj_t *parent) {
 
     lv_obj_add_event_cb(btn, goto_home, LV_EVENT_CLICKED, NULL);
     return btn;
+}
+
+// Lock a top-level screen container so it cannot pan or show a scrollbar.
+// Every screen we build does its actual scrolling via inner widgets
+// (settings list, message scroll, contact list, filter chip bar). Leaving
+// the outer screen container scrollable means edge-taps near the keyboard
+// or list boundaries are interpreted as pan gestures and slide the entire
+// screen sideways — confusing and easy to trigger accidentally. Call this
+// right after each scr_X = lv_obj_create(NULL).
+static void lock_screen_scroll(lv_obj_t *scr) {
+    if (!scr) return;
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 }
 
 static lv_obj_t* create_tile_button(lv_obj_t *parent, const char *label,
@@ -477,6 +569,22 @@ static void settings_update_labels() {
             default:               hcs = "?";     break;
         }
         lv_label_set_text(lbl_set_homecolor, hcs);
+    }
+    if (lbl_set_brightness) {
+        uint8_t b = prefs->screen_brightness ? prefs->screen_brightness : 200;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", (int)((unsigned)b * 100 / 255));
+        lv_label_set_text(lbl_set_brightness, buf);
+    }
+    if (lbl_set_screen_off) {
+        char buf[16];
+        if (prefs->screen_off_minutes == 0) {
+            snprintf(buf, sizeof(buf), "Never");
+        } else {
+            snprintf(buf, sizeof(buf), "%u min",
+                     (unsigned)prefs->screen_off_minutes);
+        }
+        lv_label_set_text(lbl_set_screen_off, buf);
     }
 }
 
@@ -1033,23 +1141,72 @@ static void on_contact_tap(lv_event_t *e) {
 static void on_contact_fav_toggle(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!mesh || g_selected_contact_idx < 0) return;
+    if (!mesh->toggleContactFavourite(g_selected_contact_idx)) return;
+
+    // Re-read the authoritative state from the contact table so the panel
+    // reflects what's actually persisted, not a local mutation.
     ContactInfo ci;
     if (!mesh->getContactByIdx(g_selected_contact_idx, ci)) return;
 
-    ci.flags ^= 0x01;
-    // BaseChatMesh doesn't expose setContactFlags yet, so this toggle is UI-only
-    // until persistence path is added.
-    printf("Contacts: toggled favourite for '%s' -> 0x%02X\n", ci.name, ci.flags);
-
-    // Refresh detail view by passing through the same idx
-    // Re-render using same logic as on_contact_tap
     char buf[512];
     snprintf(buf, sizeof(buf),
         "Name:     %s\n\n"
         "Type:     %d\n"
-        "Flags:    0x%02X %s\n\n(toggle is UI-only until persistence wired)",
+        "Flags:    0x%02X %s",
         ci.name, ci.type, ci.flags, (ci.flags & 0x01) ? "[FAV]" : "");
     if (lbl_contact_detail_body) lv_label_set_text(lbl_contact_detail_body, buf);
+}
+
+// Long-press a row in the contacts list to toggle its favourite bit
+// without going through the detail screen. Same persistence path as the
+// detail-screen button — both call into mesh->toggleContactFavourite().
+static void on_contact_long_press(lv_event_t *e) {
+    intptr_t idx = (intptr_t)lv_event_get_user_data(e);
+    Meck* mesh = meck_get_instance();
+    if (!mesh || idx < 0) return;
+    if (mesh->toggleContactFavourite((int)idx)) {
+        // Rebuild the list so the row picks up the new colour/icon. If the
+        // current filter is FAV, an unfavourited contact disappears from
+        // view; that's the desired behaviour.
+        refresh_contacts_list();
+    }
+}
+
+// Long-press the red trash button on the contact detail screen to delete
+// the currently-selected contact. Click is intentionally NOT bound — only
+// long-press fires this — so a stray tap doesn't lose the row.
+static void on_contact_delete(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh || g_selected_contact_idx < 0) return;
+    if (mesh->deleteContactByIdx(g_selected_contact_idx)) {
+        g_selected_contact_idx = -1;
+        refresh_contacts_list();
+        if (scr_contacts) lv_screen_load(scr_contacts);
+    }
+}
+
+// Swipe left/right on the contacts screen cycles the type filter. Matches
+// the home-screen swipe convention and gives a fast way to flip between,
+// say, Repeaters and Chat without reaching for the chip bar.
+static void on_contacts_screen_gesture(lv_event_t *e) {
+    if (lv_event_get_code(e) != LV_EVENT_GESTURE) return;
+    lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
+    int dir;
+    if      (d == LV_DIR_LEFT)  dir = +1;
+    else if (d == LV_DIR_RIGHT) dir = -1;
+    else                        return;            // ignore vertical
+    int n = (int)CONTACT_FILTER_COUNT;
+    g_contact_filter = (ContactFilter)(((int)g_contact_filter + dir + n) % n);
+    refresh_contacts_list();
+}
+
+// Tap a chip in the filter bar to jump directly to that filter. The chip's
+// user_data carries the ContactFilter value as an intptr_t.
+static void on_filter_chip_tap(lv_event_t *e) {
+    intptr_t f = (intptr_t)lv_event_get_user_data(e);
+    if (f < 0 || f >= CONTACT_FILTER_COUNT) return;
+    g_contact_filter = (ContactFilter)f;
+    refresh_contacts_list();
 }
 
 static void goto_contacts_from_detail(lv_event_t *e) {
@@ -1319,6 +1476,13 @@ static void create_page_gps(lv_obj_t *page) {
     lv_label_set_long_mode(lbl_gps_detail, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_gps_detail, SCREEN_WIDTH - 40);
     lv_obj_align(lbl_gps_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
+
+    // Long-press anywhere on the tile toggles the GPS power gate. We
+    // attach to the page (not just the label) so the entire tile area
+    // is a hit target — easier than aiming for the label itself.
+    lv_obj_add_flag(page, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(page, on_gps_tile_long_press,
+                        LV_EVENT_LONG_PRESSED, NULL);
 }
 
 // ============================================================================
@@ -1361,11 +1525,395 @@ static void create_page_shutdown(lv_obj_t *page) {
 }
 
 // ============================================================================
+// Settings → Contacts sub-screen
+// ----------------------------------------------------------------------------
+// Surfaces the auto-add config that already lives on P4NodePrefs:
+//   manual_add_contacts (bit 0): 0 = auto-add new contacts, 1 = manual only
+//   autoadd_config: bit-mask of which adv types to accept (chat/repeater/
+//                   room/sensor) plus an "overwrite oldest non-fav" bit
+//
+// MeckMesh::shouldAutoAddContactType() already reads these on every advert,
+// so changes apply immediately to incoming contacts. No mesh patch needed.
+// ============================================================================
+
+static int settings_contacts_get_mode() {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return CONTACT_MODE_AUTO_ALL;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return CONTACT_MODE_AUTO_ALL;
+
+    if ((prefs->manual_add_contacts & 1) == 0) return CONTACT_MODE_AUTO_ALL;
+    if ((prefs->autoadd_config & AUTO_ADD_ALL_TYPES) != 0) return CONTACT_MODE_CUSTOM;
+    return CONTACT_MODE_MANUAL;
+}
+
+static const char* settings_contacts_mode_label(int mode) {
+    switch (mode) {
+        case CONTACT_MODE_AUTO_ALL: return "Auto All";
+        case CONTACT_MODE_CUSTOM:   return "Custom";
+        case CONTACT_MODE_MANUAL:   return "Manual Only";
+        default:                    return "?";
+    }
+}
+
+static void settings_contacts_apply_mode(int mode) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    switch (mode) {
+        case CONTACT_MODE_AUTO_ALL:
+            prefs->manual_add_contacts &= ~1;          // bit 0 clear → auto
+            // Leave per-type bits as they were; in this mode they're ignored
+            // by isAutoAddEnabled() but we keep them around for round-tripping
+            // to Custom without losing the user's last selection.
+            break;
+        case CONTACT_MODE_CUSTOM:
+            prefs->manual_add_contacts |= 1;
+            // If no per-type bits are set, default to all-on so the user
+            // sees something useful immediately after entering Custom.
+            if ((prefs->autoadd_config & AUTO_ADD_ALL_TYPES) == 0) {
+                prefs->autoadd_config |= AUTO_ADD_ALL_TYPES;
+            }
+            break;
+        case CONTACT_MODE_MANUAL:
+            prefs->manual_add_contacts |= 1;
+            prefs->autoadd_config &= ~AUTO_ADD_ALL_TYPES;
+            // Preserve AUTO_ADD_OVERWRITE_OLDEST since it's an orthogonal
+            // policy.
+            break;
+    }
+    mesh->getDataStore()->savePrefs(*prefs);
+    printf("Contacts: mode=%s manual=0x%02X autoadd=0x%02X\n",
+           settings_contacts_mode_label(mode),
+           prefs->manual_add_contacts, prefs->autoadd_config);
+}
+
+static void settings_contacts_update_labels() {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    if (lbl_set_contact_mode) {
+        lv_label_set_text(lbl_set_contact_mode,
+            settings_contacts_mode_label(settings_contacts_get_mode()));
+    }
+
+    // Per-type rows: show "On" / "Off" derived from autoadd_config bits.
+    auto on_off = [](bool b) { return b ? "On" : "Off"; };
+    if (lbl_set_autoadd_chat) {
+        lv_label_set_text(lbl_set_autoadd_chat,
+            on_off((prefs->autoadd_config & AUTO_ADD_CHAT) != 0));
+    }
+    if (lbl_set_autoadd_repeater) {
+        lv_label_set_text(lbl_set_autoadd_repeater,
+            on_off((prefs->autoadd_config & AUTO_ADD_REPEATER) != 0));
+    }
+    if (lbl_set_autoadd_room) {
+        lv_label_set_text(lbl_set_autoadd_room,
+            on_off((prefs->autoadd_config & AUTO_ADD_ROOM_SERVER) != 0));
+    }
+    if (lbl_set_autoadd_sensor) {
+        lv_label_set_text(lbl_set_autoadd_sensor,
+            on_off((prefs->autoadd_config & AUTO_ADD_SENSOR) != 0));
+    }
+    if (lbl_set_autoadd_overwrite) {
+        lv_label_set_text(lbl_set_autoadd_overwrite,
+            on_off((prefs->autoadd_config & AUTO_ADD_OVERWRITE_OLDEST) != 0));
+    }
+}
+
+static void on_settings_contact_mode_tap(lv_event_t *e) {
+    int next = (settings_contacts_get_mode() + 1) % CONTACT_MODE_COUNT;
+    settings_contacts_apply_mode(next);
+    settings_contacts_update_labels();
+}
+
+// Per-type toggle handlers — flip a bit, save prefs, refresh labels.
+// In Auto All / Manual modes the per-type bits are ignored by the auto-add
+// gating logic, but we still let the user touch them so switching back to
+// Custom retains their selection.
+static void on_settings_autoadd_bit_toggle(uint8_t bit, const char* label) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    prefs->autoadd_config ^= bit;
+    mesh->getDataStore()->savePrefs(*prefs);
+    printf("Contacts: %s %s (autoadd=0x%02X)\n",
+           label,
+           (prefs->autoadd_config & bit) ? "ON" : "OFF",
+           prefs->autoadd_config);
+    settings_contacts_update_labels();
+}
+
+static void on_settings_autoadd_chat_tap(lv_event_t *e) {
+    on_settings_autoadd_bit_toggle(AUTO_ADD_CHAT, "Chat");
+}
+static void on_settings_autoadd_repeater_tap(lv_event_t *e) {
+    on_settings_autoadd_bit_toggle(AUTO_ADD_REPEATER, "Repeater");
+}
+static void on_settings_autoadd_room_tap(lv_event_t *e) {
+    on_settings_autoadd_bit_toggle(AUTO_ADD_ROOM_SERVER, "Room Server");
+}
+static void on_settings_autoadd_sensor_tap(lv_event_t *e) {
+    on_settings_autoadd_bit_toggle(AUTO_ADD_SENSOR, "Sensor");
+}
+static void on_settings_autoadd_overwrite_tap(lv_event_t *e) {
+    on_settings_autoadd_bit_toggle(AUTO_ADD_OVERWRITE_OLDEST, "Overwrite oldest");
+}
+
+// Manual SD backup handler. Calls the datastore force-write path which
+// re-emits every NVS blob (identity, prefs, channels, contacts) to the SD
+// card. Updates the row's value label with the result so the user gets
+// immediate feedback without a popup.
+static void on_settings_backup_to_sd_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4DataStore* ds = mesh->getDataStore();
+    if (!ds) return;
+
+    int written = ds->backupToSD();
+    char buf[24];
+    if (written > 0) {
+        snprintf(buf, sizeof(buf), "OK (%d)", written);
+    } else {
+        // Either no SD card mounted or every write failed. The datastore
+        // already logs which case it was, so the UI just shows generic
+        // "Failed" — checking serial gives the detail.
+        snprintf(buf, sizeof(buf), "Failed");
+    }
+    if (lbl_set_backup_status) {
+        lv_label_set_text(lbl_set_backup_status, buf);
+        lv_obj_set_style_text_color(lbl_set_backup_status,
+            written > 0 ? lv_palette_main(LV_PALETTE_GREEN)
+                        : lv_palette_main(LV_PALETTE_RED), 0);
+    }
+    printf("Settings: backup to SD -> %s\n", buf);
+}
+
+// Snap the saved brightness to the nearest value in the BRIGHTNESS_OPTIONS
+// ladder. Used by the cycle handler to find the user's current step even
+// when the stored value (e.g. on a fresh boot or after migration) doesn't
+// land exactly on a step boundary.
+static int brightness_step_for(uint8_t value) {
+    int best = 0;
+    int best_diff = 1024;
+    for (int i = 0; i < NUM_BRIGHTNESS_OPTIONS; i++) {
+        int diff = (int)BRIGHTNESS_OPTIONS[i] - (int)value;
+        if (diff < 0) diff = -diff;
+        if (diff < best_diff) { best_diff = diff; best = i; }
+    }
+    return best;
+}
+
+static void on_settings_brightness_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    uint8_t cur = prefs->screen_brightness ? prefs->screen_brightness : 200;
+    int step = brightness_step_for(cur);
+    step = (step + 1) % NUM_BRIGHTNESS_OPTIONS;
+    uint8_t next = BRIGHTNESS_OPTIONS[step];
+
+    prefs->screen_brightness = next;
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    // Apply immediately. The hardware fades smoothly via the AMOLED
+    // brightness register, so the user sees the change as they tap.
+    meck_screen_set_brightness(next);
+
+    if (lbl_set_brightness) {
+        char buf[16];
+        // Display as a percentage so it reads naturally — 32/255 → 13%,
+        // 255/255 → 100%. Avoids exposing the raw register value.
+        snprintf(buf, sizeof(buf), "%d%%", (int)((unsigned)next * 100 / 255));
+        lv_label_set_text(lbl_set_brightness, buf);
+    }
+    printf("Settings: brightness = %u (%d%%)\n",
+           (unsigned)next, (int)((unsigned)next * 100 / 255));
+}
+
+static void on_settings_screen_off_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    int cur = -1;
+    for (int i = 0; i < NUM_SCREEN_OFF_OPTIONS; i++) {
+        if (SCREEN_OFF_OPTIONS[i] == prefs->screen_off_minutes) { cur = i; break; }
+    }
+    cur = (cur + 1) % NUM_SCREEN_OFF_OPTIONS;
+    prefs->screen_off_minutes = SCREEN_OFF_OPTIONS[cur];
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    if (lbl_set_screen_off) {
+        char buf[40];
+        if (prefs->screen_off_minutes == 0) {
+            snprintf(buf, sizeof(buf), "Never");
+        } else {
+            snprintf(buf, sizeof(buf), "%u min",
+                     (unsigned)prefs->screen_off_minutes);
+        }
+        lv_label_set_text(lbl_set_screen_off, buf);
+    }
+    printf("Settings: screen off = %u min\n",
+           (unsigned)prefs->screen_off_minutes);
+}
+
+// Long-press anywhere on the GPS tile toggles the L76K module between
+// active and standby. Persisted via prefs->gps_enabled so the choice
+// survives reboot — useful for indoor / battery-saving scenarios.
+static void on_gps_tile_long_press(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    bool was_on = meck_gps_is_enabled();
+    bool now_on = !was_on;
+    meck_gps_set_enabled(now_on);
+    // Encoding: 1 = on, 2 = off. Reserves 0 as "fresh prefs / use default".
+    prefs->gps_enabled = now_on ? 1 : 2;
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    // Immediate UI feedback. The 500ms refresh tick will overwrite this,
+    // but that gives a smooth crossfade rather than a stale label.
+    if (lbl_gps_detail) {
+        lv_label_set_text(lbl_gps_detail,
+            now_on ? "GPS: enabling..."
+                   : "GPS: OFF\nLong-press to enable");
+    }
+    printf("GPS: %s via long-press\n", now_on ? "ENABLED" : "DISABLED");
+}
+
+// 1 Hz idle watcher. Fades the screen to 0 once LVGL reports inactivity
+// past the configured threshold; restores the user's brightness on the
+// next touch event (any touch resets lv_disp_get_inactive_time).
+static void screen_idle_timer_cb(lv_timer_t *t) {
+    (void)t;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs || prefs->screen_off_minutes == 0) {
+        // Auto-off disabled — make sure the screen is at the user's
+        // chosen brightness in case the timer was disabled mid-fade.
+        static bool restored_once = false;
+        if (!restored_once) {
+            uint8_t b = prefs && prefs->screen_brightness
+                ? prefs->screen_brightness : 200;
+            meck_screen_set_brightness(b);
+            restored_once = true;
+        }
+        return;
+    }
+
+    // Track our own dimmed state rather than reading back from the panel,
+    // so the cost of the timer is constant and we don't over-write the
+    // brightness register on every tick.
+    static bool dimmed = false;
+    uint32_t threshold_ms = (uint32_t)prefs->screen_off_minutes * 60u * 1000u;
+    uint32_t inactive_ms = lv_display_get_inactive_time(NULL);
+
+    if (!dimmed && inactive_ms >= threshold_ms) {
+        meck_screen_set_brightness(0);
+        dimmed = true;
+        printf("Screen: auto-off after %u min idle\n",
+               (unsigned)prefs->screen_off_minutes);
+    } else if (dimmed && inactive_ms < threshold_ms) {
+        uint8_t b = prefs->screen_brightness ? prefs->screen_brightness : 200;
+        meck_screen_set_brightness(b);
+        dimmed = false;
+        printf("Screen: woke (brightness=%u)\n", (unsigned)b);
+    }
+}
+
+// Back button on the sub-screen returns to main settings, not home.
+static void goto_settings_from_contacts(lv_event_t *e) {
+    settings_update_labels();
+    if (scr_settings) lv_screen_load(scr_settings);
+}
+
+static void goto_settings_contacts(lv_event_t *e) {
+    settings_contacts_update_labels();
+    if (scr_settings_contacts) lv_screen_load(scr_settings_contacts);
+}
+
+static void create_settings_contacts_screen() {
+    scr_settings_contacts = lv_obj_create(NULL);
+    lock_screen_scroll(scr_settings_contacts);
+    lv_obj_set_style_bg_color(scr_settings_contacts, lv_color_black(), 0);
+
+    // Custom back button → main Settings (not home).
+    lv_obj_t *btn_back = lv_button_create(scr_settings_contacts);
+    lv_obj_set_size(btn_back, 80, 40);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(bl, &lv_font_montserrat_16, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, goto_settings_from_contacts,
+                        LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_settings_contacts);
+    lv_label_set_text(title, "Contacts");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
+
+    lv_obj_t *scroll = lv_obj_create(scr_settings_contacts);
+    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 60);
+    lv_obj_set_pos(scroll, 0, 60);
+    lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 10, 0);
+    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+
+    int y = 5;
+
+    // Mode picker — taps cycle Auto All → Custom → Manual Only → Auto All...
+    create_settings_row(scroll, "Mode (tap to cycle)",
+        &lbl_set_contact_mode, on_settings_contact_mode_tap, y);
+    y += 65;
+
+    // Per-type auto-add toggles. These only take effect in Custom mode but
+    // remain editable in any mode so the selection is preserved.
+    create_settings_row(scroll, "Auto-add Chat",
+        &lbl_set_autoadd_chat, on_settings_autoadd_chat_tap, y);
+    y += 65;
+    create_settings_row(scroll, "Auto-add Repeater",
+        &lbl_set_autoadd_repeater, on_settings_autoadd_repeater_tap, y);
+    y += 65;
+    create_settings_row(scroll, "Auto-add Room Server",
+        &lbl_set_autoadd_room, on_settings_autoadd_room_tap, y);
+    y += 65;
+    create_settings_row(scroll, "Auto-add Sensor",
+        &lbl_set_autoadd_sensor, on_settings_autoadd_sensor_tap, y);
+    y += 65;
+
+    // Overwrite policy — orthogonal to mode. When the contact table is full,
+    // controls whether new contacts displace the oldest non-favourited row
+    // or are simply dropped.
+    create_settings_row(scroll, "Overwrite oldest when full",
+        &lbl_set_autoadd_overwrite, on_settings_autoadd_overwrite_tap, y);
+    y += 65;
+}
+
+// ============================================================================
 // Settings screen
 // ============================================================================
 
 static void create_settings_screen() {
     scr_settings = lv_obj_create(NULL);
+    lock_screen_scroll(scr_settings);
     lv_obj_set_style_bg_color(scr_settings, lv_color_black(), 0);
 
     create_back_button(scr_settings);
@@ -1403,6 +1951,47 @@ static void create_settings_screen() {
         on_settings_homecolor_input, y);
     lv_obj_add_event_cb(home_color_row, on_settings_homecolor_input,
                         LV_EVENT_GESTURE, NULL);
+    y += 65;
+
+    // Contacts navigation row → opens the Contacts sub-screen with auto-add
+    // controls. Uses a chevron in the value slot so it reads as a folder
+    // entry rather than a cycle/toggle.
+    lv_obj_t *contacts_value_lbl = NULL;
+    create_settings_row(scroll, "Contacts",
+        &contacts_value_lbl, goto_settings_contacts, y);
+    if (contacts_value_lbl) {
+        lv_label_set_text(contacts_value_lbl, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(contacts_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
+    // Backup to SD — manual force-write of every NVS blob to the SD card.
+    // Safety net in case an automatic SD write was missed (card unmounted,
+    // write error, etc.). Tap shows a transient OK / FAIL count.
+    lv_obj_t *backup_value_lbl = NULL;
+    create_settings_row(scroll, "Backup to SD",
+        &backup_value_lbl, on_settings_backup_to_sd_tap, y);
+    if (backup_value_lbl) {
+        lv_label_set_text(backup_value_lbl, "Tap");
+        lv_obj_set_style_text_color(backup_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    lbl_set_backup_status = backup_value_lbl;
+    y += 65;
+
+    // Screen brightness — eight-step ladder, displayed as percentage. Tap
+    // cycles forward; the change applies live so the user sees the screen
+    // dim/brighten as they tap.
+    create_settings_row(scroll, "Brightness (tap to cycle)",
+        &lbl_set_brightness, on_settings_brightness_tap, y);
+    y += 65;
+
+    // Auto screen-off — six-step ladder (Never / 1 / 2 / 5 / 10 / 30 min).
+    // The 1 Hz screen_idle_timer_cb dims to 0 once inactive_ms exceeds the
+    // threshold; any touch wakes the screen back to the chosen brightness.
+    create_settings_row(scroll, "Auto Off (tap to cycle)",
+        &lbl_set_screen_off, on_settings_screen_off_tap, y);
     y += 65;
 
     lv_obj_t *id_row = lv_obj_create(scroll);
@@ -1474,6 +2063,10 @@ static void create_settings_screen() {
     lv_obj_set_style_bg_opa(obj_name_edit_panel, LV_OPA_90, 0);
     lv_obj_set_style_border_width(obj_name_edit_panel, 0, 0);
     lv_obj_add_flag(obj_name_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    // Lock the panel down — no scrolling, no scrollbars. Otherwise edge
+    // taps near the keyboard's left/right corners pan the whole screen.
+    lv_obj_clear_flag(obj_name_edit_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_name_edit_panel, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *edit_title = lv_label_create(obj_name_edit_panel);
     lv_label_set_text(edit_title, "Edit Node Name");
@@ -1507,6 +2100,7 @@ static void create_settings_screen() {
 
 static void create_radio_picker_screen() {
     scr_radio_picker = lv_obj_create(NULL);
+    lock_screen_scroll(scr_radio_picker);
     lv_obj_set_style_bg_color(scr_radio_picker, lv_color_black(), 0);
 
     lv_obj_t *btn_back = lv_button_create(scr_radio_picker);
@@ -1638,6 +2232,7 @@ static void refresh_channel_picker() {
 
 static void create_channel_picker_screen() {
     scr_channel_picker = lv_obj_create(NULL);
+    lock_screen_scroll(scr_channel_picker);
     lv_obj_set_style_bg_color(scr_channel_picker, lv_color_black(), 0);
 
     create_back_button(scr_channel_picker);
@@ -1704,6 +2299,7 @@ static void create_channel_picker_screen() {
 
 static void create_messages_screen() {
     scr_messages = lv_obj_create(NULL);
+    lock_screen_scroll(scr_messages);
     lv_obj_set_style_bg_color(scr_messages, lv_color_black(), 0);
 
     // Back -> channel picker (NOT home)
@@ -1810,6 +2406,7 @@ static void load_channel_view(uint8_t ch_idx) {
 
 static void create_contacts_screen() {
     scr_contacts = lv_obj_create(NULL);
+    lock_screen_scroll(scr_contacts);
     lv_obj_set_style_bg_color(scr_contacts, lv_color_black(), 0);
 
     create_back_button(scr_contacts);
@@ -1820,22 +2417,127 @@ static void create_contacts_screen() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
 
+    // ---- Filter chip bar ----
+    // Horizontal flex row of chip buttons. The "active" chip gets a bright
+    // cyan border so the current filter is obvious at a glance. Selecting
+    // a chip is also reachable by swiping the screen left/right (see
+    // on_contacts_screen_gesture). Chips are filled in refresh_contacts_list
+    // so the active highlight stays in sync with the underlying state.
+    obj_contacts_filter_bar = lv_obj_create(scr_contacts);
+    lv_obj_set_size(obj_contacts_filter_bar, SCREEN_WIDTH - 20, 50);
+    lv_obj_set_pos(obj_contacts_filter_bar, 10, 60);
+    lv_obj_set_style_bg_color(obj_contacts_filter_bar, lv_color_black(), 0);
+    lv_obj_set_style_border_width(obj_contacts_filter_bar, 0, 0);
+    lv_obj_set_style_pad_all(obj_contacts_filter_bar, 0, 0);
+    lv_obj_set_layout(obj_contacts_filter_bar, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(obj_contacts_filter_bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(obj_contacts_filter_bar,
+        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(obj_contacts_filter_bar, 6, 0);
+    lv_obj_set_scroll_dir(obj_contacts_filter_bar, LV_DIR_HOR);
+
     obj_contacts_scroll = lv_obj_create(scr_contacts);
-    lv_obj_set_size(obj_contacts_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 70);
-    lv_obj_set_pos(obj_contacts_scroll, 10, 60);
+    lv_obj_set_size(obj_contacts_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 130);
+    lv_obj_set_pos(obj_contacts_scroll, 10, 120);
     lv_obj_set_style_bg_color(obj_contacts_scroll, lv_color_make(10, 10, 15), 0);
     lv_obj_set_style_border_width(obj_contacts_scroll, 0, 0);
     lv_obj_set_style_radius(obj_contacts_scroll, 8, 0);
     lv_obj_set_style_pad_all(obj_contacts_scroll, 5, 0);
     lv_obj_set_scroll_dir(obj_contacts_scroll, LV_DIR_VER);
     lv_obj_set_flex_flow(obj_contacts_scroll, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(obj_contacts_scroll, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+    lv_obj_set_flex_align(obj_contacts_scroll,
+        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+
+    // Swipe left/right anywhere on the screen cycles filters.
+    lv_obj_add_event_cb(scr_contacts, on_contacts_screen_gesture,
+                        LV_EVENT_GESTURE, NULL);
+}
+
+// Local helpers — keep ADV_TYPE_* opaque since the upstream enum's name
+// isn't always in scope. Numeric values match BaseChatMesh / MeshCore.
+static const char* contact_type_badge(uint8_t adv_type) {
+    switch (adv_type) {
+        case 1: return "C";    // ADV_TYPE_CHAT
+        case 2: return "R";    // ADV_TYPE_REPEATER
+        case 3: return "RS";   // ADV_TYPE_ROOM
+        case 4: return "S";    // ADV_TYPE_SENSOR
+        default: return "?";
+    }
+}
+
+static lv_color_t contact_type_color(uint8_t adv_type) {
+    switch (adv_type) {
+        case 1: return lv_palette_main(LV_PALETTE_CYAN);
+        case 2: return lv_palette_main(LV_PALETTE_ORANGE);
+        case 3: return lv_palette_main(LV_PALETTE_PURPLE);
+        case 4: return lv_palette_main(LV_PALETTE_LIGHT_GREEN);
+        default: return lv_palette_main(LV_PALETTE_GREY);
+    }
+}
+
+static const char* contact_filter_label(ContactFilter f) {
+    switch (f) {
+        case CONTACT_FILTER_ALL:      return "All";
+        case CONTACT_FILTER_CHAT:     return "Chat";
+        case CONTACT_FILTER_REPEATER: return "Rptr";
+        case CONTACT_FILTER_ROOM:     return "Room";
+        case CONTACT_FILTER_SENSOR:   return "Sens";
+        case CONTACT_FILTER_FAV:      return "Fav";
+        default:                      return "?";
+    }
+}
+
+static bool contact_matches_filter(const ContactInfo& ci, ContactFilter f) {
+    switch (f) {
+        case CONTACT_FILTER_ALL:      return true;
+        case CONTACT_FILTER_CHAT:     return ci.type == 1;
+        case CONTACT_FILTER_REPEATER: return ci.type == 2;
+        case CONTACT_FILTER_ROOM:     return ci.type == 3;
+        case CONTACT_FILTER_SENSOR:   return ci.type == 4;
+        case CONTACT_FILTER_FAV:      return (ci.flags & 0x01) != 0;
+        default: return true;
+    }
 }
 
 static void refresh_contacts_list() {
     Meck* mesh = meck_get_instance();
     if (!obj_contacts_scroll || !mesh) return;
 
+    // ---- Rebuild filter chips ----
+    if (obj_contacts_filter_bar) {
+        uint32_t bar_cnt = lv_obj_get_child_count(obj_contacts_filter_bar);
+        for (int i = (int)bar_cnt - 1; i >= 0; i--) {
+            lv_obj_delete(lv_obj_get_child(obj_contacts_filter_bar, i));
+        }
+        for (int f = 0; f < (int)CONTACT_FILTER_COUNT; f++) {
+            lv_obj_t *chip = lv_button_create(obj_contacts_filter_bar);
+            lv_obj_set_size(chip, LV_SIZE_CONTENT, 36);
+            lv_obj_set_style_radius(chip, 18, 0);
+            lv_obj_set_style_bg_color(chip, lv_color_make(25, 25, 35), 0);
+            lv_obj_set_style_border_width(chip, 2, 0);
+            // Active filter gets a bright cyan border so the selection is
+            // unambiguous; inactive chips fade to a neutral grey.
+            bool active = (f == (int)g_contact_filter);
+            lv_obj_set_style_border_color(chip,
+                active ? lv_palette_main(LV_PALETTE_CYAN)
+                       : lv_color_make(60, 60, 70), 0);
+            lv_obj_set_style_pad_left(chip, 12, 0);
+            lv_obj_set_style_pad_right(chip, 12, 0);
+            lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_event_cb(chip, on_filter_chip_tap,
+                                LV_EVENT_CLICKED, (void*)(intptr_t)f);
+
+            lv_obj_t *lbl = lv_label_create(chip);
+            lv_label_set_text(lbl, contact_filter_label((ContactFilter)f));
+            lv_obj_set_style_text_color(lbl,
+                active ? lv_color_white()
+                       : lv_palette_main(LV_PALETTE_GREY), 0);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+            lv_obj_center(lbl);
+        }
+    }
+
+    // ---- Rebuild contact rows ----
     uint32_t child_cnt = lv_obj_get_child_count(obj_contacts_scroll);
     for (int i = (int)child_cnt - 1; i >= 0; i--) {
         lv_obj_delete(lv_obj_get_child(obj_contacts_scroll, i));
@@ -1850,29 +2552,62 @@ static void refresh_contacts_list() {
         return;
     }
 
-    for (int i = 0; i < n && i < 50; i++) {
+    int shown = 0;
+    for (int i = 0; i < n && shown < 200; i++) {
         ContactInfo ci;
         if (!mesh->getContactByIdx(i, ci)) continue;
+        if (!contact_matches_filter(ci, g_contact_filter)) continue;
+        shown++;
 
         lv_obj_t *row = lv_button_create(obj_contacts_scroll);
-        lv_obj_set_size(row, SCREEN_WIDTH - 40, 55);
+        lv_obj_set_size(row, SCREEN_WIDTH - 40, 60);
         lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
         lv_obj_set_style_radius(row, 8, 0);
         lv_obj_set_style_border_width(row, 1, 0);
         lv_obj_set_style_border_color(row,
             (ci.flags & 0x01) ? lv_palette_main(LV_PALETTE_YELLOW)
                               : lv_color_make(50, 50, 60), 0);
-        lv_obj_add_event_cb(row, on_contact_tap, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        // Tap → detail screen, long-press → toggle favourite in place.
+        lv_obj_add_event_cb(row, on_contact_tap,
+                            LV_EVENT_CLICKED,    (void*)(intptr_t)i);
+        lv_obj_add_event_cb(row, on_contact_long_press,
+                            LV_EVENT_LONG_PRESSED, (void*)(intptr_t)i);
 
+        // Star icon (yellow if favourited, dim grey otherwise).
+        lv_obj_t *star = lv_label_create(row);
+        lv_label_set_text(star, (ci.flags & 0x01) ? "*" : " ");
+        lv_obj_set_style_text_color(star,
+            (ci.flags & 0x01) ? lv_palette_main(LV_PALETTE_YELLOW)
+                              : lv_color_make(70, 70, 80), 0);
+        lv_obj_set_style_text_font(star, &lv_font_montserrat_22, 0);
+        lv_obj_align(star, LV_ALIGN_LEFT_MID, 8, 0);
+
+        // Name.
         lv_obj_t *lbl = lv_label_create(row);
-        char name_buf[48];
-        snprintf(name_buf, sizeof(name_buf), "%s%s",
-                 (ci.flags & 0x01) ? "* " : "", ci.name);
-        lv_label_set_text(lbl, name_buf);
+        lv_label_set_text(lbl, ci.name);
         lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
-        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 28, 0);
 
+        // Type badge — small coloured pill on the right with the C/R/RS/S
+        // letter so the contact list reads at a glance even when filtered
+        // to "All".
+        lv_obj_t *type_chip = lv_obj_create(row);
+        lv_obj_set_size(type_chip, 38, 24);
+        lv_obj_align(type_chip, LV_ALIGN_RIGHT_MID, -54, 0);
+        lv_obj_set_style_radius(type_chip, 12, 0);
+        lv_obj_set_style_border_width(type_chip, 0, 0);
+        lv_obj_set_style_pad_all(type_chip, 0, 0);
+        lv_obj_set_style_bg_color(type_chip, contact_type_color(ci.type), 0);
+        lv_obj_clear_flag(type_chip, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(type_chip, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *type_lbl = lv_label_create(type_chip);
+        lv_label_set_text(type_lbl, contact_type_badge(ci.type));
+        lv_obj_set_style_text_color(type_lbl, lv_color_black(), 0);
+        lv_obj_set_style_text_font(type_lbl, &lv_font_montserrat_14, 0);
+        lv_obj_center(type_lbl);
+
+        // Pub-key prefix on the far right.
         lv_obj_t *pk = lv_label_create(row);
         char pk_buf[16];
         snprintf(pk_buf, sizeof(pk_buf), "%02X%02X",
@@ -1882,6 +2617,18 @@ static void refresh_contacts_list() {
         lv_obj_set_style_text_font(pk, &lv_font_montserrat_14, 0);
         lv_obj_align(pk, LV_ALIGN_RIGHT_MID, -10, 0);
     }
+
+    // If a filter ate the entire list, surface a hint so the empty screen
+    // doesn't look like a bug.
+    if (shown == 0) {
+        lv_obj_t *empty = lv_label_create(obj_contacts_scroll);
+        char buf[80];
+        snprintf(buf, sizeof(buf), "No %s contacts.\nSwipe to change filter.",
+                 contact_filter_label(g_contact_filter));
+        lv_label_set_text(empty, buf);
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        lv_obj_set_style_text_font(empty, &lv_font_montserrat_16, 0);
+    }
 }
 
 // ============================================================================
@@ -1890,6 +2637,7 @@ static void refresh_contacts_list() {
 
 static void create_contact_detail_screen() {
     scr_contact_detail = lv_obj_create(NULL);
+    lock_screen_scroll(scr_contact_detail);
     lv_obj_set_style_bg_color(scr_contact_detail, lv_color_black(), 0);
 
     // Back -> contacts list (NOT home)
@@ -1922,6 +2670,21 @@ static void create_contact_detail_screen() {
     lv_obj_set_style_text_font(fav_lbl, &lv_font_montserrat_16, 0);
     lv_obj_center(fav_lbl);
     lv_obj_add_event_cb(btn_fav, on_contact_fav_toggle, LV_EVENT_CLICKED, NULL);
+
+    // Delete button — long-press only, so a stray tap doesn't lose a
+    // contact. Useful for cleaning up duplicates or contacts whose owners
+    // have rotated keys.
+    lv_obj_t *btn_del = lv_button_create(scr_contact_detail);
+    lv_obj_set_size(btn_del, 100, 40);
+    lv_obj_align(btn_del, LV_ALIGN_TOP_RIGHT, -120, 10);
+    lv_obj_set_style_bg_color(btn_del, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_radius(btn_del, 8, 0);
+    lv_obj_t *del_lbl = lv_label_create(btn_del);
+    lv_label_set_text(del_lbl, LV_SYMBOL_TRASH " Hold");
+    lv_obj_set_style_text_color(del_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(del_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_center(del_lbl);
+    lv_obj_add_event_cb(btn_del, on_contact_delete, LV_EVENT_LONG_PRESSED, NULL);
 
     lv_obj_t *scroll = lv_obj_create(scr_contact_detail);
     lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 70);
@@ -2126,6 +2889,12 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // smoothed with a running average over 4 samples (~2 sec window) so
     // the displayed rate doesn't jitter.
     if (lbl_gps_detail) {
+        // Fast path: GPS gated off by user. Show a clear disabled state
+        // so a stale snapshot doesn't read like "L76K acquiring forever".
+        if (!meck_gps_is_enabled()) {
+            lv_label_set_text(lbl_gps_detail,
+                "GPS: OFF\nLong-press to enable");
+        } else {
         MeckGpsSnapshot snap;
         meck_gps_get_snapshot(&snap);
 
@@ -2251,6 +3020,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                 time_str, rtc_str, sent_str);
             lv_label_set_text(lbl_gps_detail, buf);
         }
+        }   // end of `if (meck_gps_is_enabled())` else branch
     }
 }
 
@@ -2260,6 +3030,13 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 
 extern "C" void meck_ui_init() {
     printf("MeckUI: building home screen\n");
+
+    // Silence the LEDC fade-install error spam. cpp_bus_driver re-installs
+    // the LEDC fade ISR on every set_rm69a10_brightness call; ESP-IDF
+    // returns ESP_ERR_INVALID_STATE which the driver ignores (the actual
+    // brightness write goes via panel register 0x51, not LEDC). Logging
+    // the error each tap is just noise.
+    esp_log_level_set("ledc", ESP_LOG_NONE);
 
     _lock_acquire(&lvgl_api_lock);
 
@@ -2287,6 +3064,7 @@ extern "C" void meck_ui_init() {
     create_page_shutdown(t_shutdown);
 
     create_settings_screen();
+    create_settings_contacts_screen();
     create_radio_picker_screen();
     create_channel_picker_screen();
     create_messages_screen();
@@ -2294,6 +3072,32 @@ extern "C" void meck_ui_init() {
     create_contact_detail_screen();
 
     lv_timer_create(ui_update_timer_cb, 500, NULL);
+
+    // Apply user's saved brightness now that prefs and the panel are both
+    // up. Sentinel value 0 means "not set" — fall back to 200 so the screen
+    // doesn't go black on first boot of an upgraded device.
+    {
+        Meck* mesh = meck_get_instance();
+        if (mesh) {
+            P4NodePrefs* prefs = mesh->getNodePrefs();
+            if (prefs) {
+                uint8_t b = prefs->screen_brightness
+                    ? prefs->screen_brightness : 200;
+                meck_screen_set_brightness(b);
+
+                // Apply saved GPS gate. 0 = unset (default on), 1 = on,
+                // 2 = off. Avoids surprising users whose existing prefs
+                // have reserved[] = 0.
+                if (prefs->gps_enabled == 2) {
+                    meck_gps_set_enabled(false);
+                }
+            }
+        }
+    }
+    // 1 Hz idle watcher for auto screen-off. The timer is always running
+    // — the handler short-circuits when screen_off_minutes is 0, so the
+    // cost is negligible.
+    lv_timer_create(screen_idle_timer_cb, 1000, NULL);
 
     _lock_release(&lvgl_api_lock);
 
