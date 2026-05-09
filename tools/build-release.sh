@@ -114,13 +114,19 @@ echo "==> Merging into ${OUTPUT_BIN}"
 echo "    flash_mode=${FLASH_MODE} flash_freq=${FLASH_FREQ} flash_size=${FLASH_SIZE}"
 echo "    pairs: ${PAIRS}"
 
+# flash_project_args lists files relative to the build/ directory, not
+# the project root. esptool resolves them as given, so we run merge_bin
+# with build/ as the cwd. The output path is made absolute first since
+# we're about to change directory away from where "release/" lives.
+ABS_OUTPUT_BIN="$PROJECT_ROOT/$OUTPUT_BIN"
+
 # shellcheck disable=SC2086  # PAIRS is intentionally word-split
-esptool.py --chip esp32p4 merge_bin \
-    -o "$OUTPUT_BIN" \
+( cd build && esptool.py --chip esp32p4 merge_bin \
+    -o "$ABS_OUTPUT_BIN" \
     --flash_mode "$FLASH_MODE" \
     --flash_freq "$FLASH_FREQ" \
     --flash_size "$FLASH_SIZE" \
-    $PAIRS
+    $PAIRS )
 
 # ---- Sanity checks -----------------------------------------------------------
 echo "==> Sanity checks"
