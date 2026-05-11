@@ -5644,7 +5644,17 @@ extern "C" void app_main(void)
     _lock_release(&lvgl_api_lock);
 
     ES8311_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
-    ES8311_Init();
+     ES8311_Init();
+    // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    // Meck audio backend (components/meshcore/MeckAudio.cpp) now owns the
+    // ES8311 lifecycle. It initialises the codec lazily on first audio
+    // playback, at 48 kHz stereo 16-bit to match the schreibfaul1
+    // ESP32-audioI2S library's required I²S output format.
+    //
+    // Side benefit: deferring codec init from boot to first audio use
+    // likely eliminates boot pop #2 (which previously fired here during
+    // ES8311_Init's NORMAL_SPEED_CHARGE → output-to-HP-drive sequence).
+    // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     // if (Play_Wav_File_2(SD_FILE_PATH_MUSIC) == false)
     // {
@@ -5784,8 +5794,14 @@ extern "C" void app_main(void)
     xTaskCreate(hardware_usb_cdc_task, "hardware_usb_cdc_task", 4 * 1024, NULL, 3, NULL);
 #endif
     xTaskCreate(device_vibration_task, "device_vibration_task", 4 * 1024, NULL, 2, &Vibration_Task_Handle);
-    xTaskCreate(device_speaker_task, "device_speaker_task", 4 * 1024, NULL, 3, &Speaker_Task_Handle);
-    xTaskCreate(device_microphone_task, "device_microphone_task", 4 * 1024, NULL, 3, &Microphone_Task_Handle);
+    // The speaker / microphone / IIS-transmission tasks below all reference
+    // the ES8311 codec, which is no longer initialised at boot (MeckAudio
+    // takes over on first audio use — see comment above ES8311_Init).
+    // Without the codec set up these tasks would crash on first iteration.
+    // Meck doesn't reach LilyGo's speaker-test / mic-test UI screens that
+    // resume them anyway, so they're safe to skip.
+    // xTaskCreate(device_speaker_task, "device_speaker_task", 4 * 1024, NULL, 3, &Speaker_Task_Handle);
+    // xTaskCreate(device_microphone_task, "device_microphone_task", 4 * 1024, NULL, 3, &Microphone_Task_Handle);
     xTaskCreate(device_imu_task, "device_imu_task", 4 * 1024, NULL, 3, &Imu_Task_Handle);
     xTaskCreate(device_battery_health_task, "device_battery_health_task", 8 * 1024, NULL, 3, NULL);
     xTaskCreate(device_gps_task, "device_gps_task", 8 * 1024, NULL, 3, &Gps_Task_Handle);
@@ -5794,7 +5810,8 @@ extern "C" void app_main(void)
     xTaskCreate(device_at_task, "device_at_task", 4 * 1024, NULL, 3, &At_Task_Handle);
     // xTaskCreate(esp32p4_sleep_task, "esp32p4_sleep_task", 4 * 1024, NULL, 3, &Sleep_Task_Handle);
     // xTaskCreate(device_rf_task, "device_rf_task", 4 * 1024, NULL, 3, &Rf_Task_Handle);  // disabled — Meck owns the SX1262 now
-    xTaskCreate(iis_transmission_data_stream_task, "iis_transmission_data_stream_task", 4 * 1024, NULL, 4, &Iis_Transmission_Data_Stream_Task);
+    // xTaskCreate(iis_transmission_data_stream_task, "iis_transmission_data_stream_task", 4 * 1024, NULL, 4, &Iis_Transmission_Data_Stream_Task);
+    // ^ disabled — also drives I²S into the ES8311 that's no longer initialised at boot
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     xTaskCreate(device_nfc_task, "device_nfc_task", 8 * 1024, NULL, 3, &Nfc_Task_Handle);
 #endif

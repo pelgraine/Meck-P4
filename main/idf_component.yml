@@ -21,3 +21,14 @@ dependencies:
     version: "^1.0.0"
     matches:
       - if: "$CONFIG{ENABLE_USB_DISPLAY} == True"
+
+  # Audio backend (Meck).
+  # chmorgan/esp-audio-player pulls in chmorgan/esp-libhelix-mp3
+  # transitively for MP3 decoding. Pinned to ^1.0.0 (latest v1.0.x);
+  # v1.1.x switched to a mixer/streams API that's overkill for a
+  # single-stream player.
+  chmorgan/esp-audio-player:
+    version: "~1.0.0"
+
+  # ES8311 codec register driver — used by components/meshcore/meck_es8311.c
+  # to configure the codec at runtime.

@@ -37,6 +37,9 @@ idf_component_register(
         "meck_globals.cpp"
         "meck_app.cpp"
         "MeckUI.cpp"
+        "MeckAudio.cpp"
+        "MeckAudioUI.cpp"
+        "es8311.cpp" 
     INCLUDE_DIRS
         "."
         "meshcore_src"
@@ -55,6 +58,8 @@ idf_component_register(
         freertos
         vfs
         fatfs
+        chmorgan__esp-audio-player
+        driver
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
@@ -65,6 +70,7 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=format=
     -Wno-error=sign-compare
     -Wno-error=narrowing
+    -Wno-error=format-truncation
 )
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC

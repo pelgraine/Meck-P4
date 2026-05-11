@@ -18,6 +18,7 @@
 #include "target.h"
 #include "t_display_p4_config.h"
 #include "esp_random.h"
+#include "driver/gpio.h"
 #include <stdio.h>
 
 // LilyGo's main.cpp defines `auto SX1262 = std::make_unique<...>(...)` at
@@ -179,6 +180,38 @@ extern "C" void meck_set_antenna_default() {
         XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
         printf("meck_set_antenna_default: VCTL=HIGH (antenna A)\n");
     }
+}
+
+// ============================================================================
+// Boot button (ESP32-P4 strapping pin, direct GPIO)
+// ----------------------------------------------------------------------------
+// PIN_BOOT_BTN (GPIO 35) is the BOOT-0 strapping pin used to enter download
+// mode at reset. The LilyGo board ties it to an external pull-up; the physical
+// button shorts it to GND. So at runtime: level 1 = released, level 0 = pressed.
+//
+// We configure it as plain input with no internal pulls (the external pull-up
+// is already there, and adding an internal pull-down would fight it). No
+// interrupt — the screen-idle timer polls at 250 ms while dimmed, which is
+// plenty responsive for a wake button and avoids ISR plumbing.
+// ============================================================================
+extern "C" void meck_boot_button_init() {
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask = 1ULL << PIN_BOOT_BTN;
+    cfg.mode         = GPIO_MODE_INPUT;
+    cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    cfg.intr_type    = GPIO_INTR_DISABLE;
+    esp_err_t err = gpio_config(&cfg);
+    if (err == ESP_OK) {
+        printf("meck_boot_button_init: GPIO %d configured as input (active LOW)\n",
+               (int)PIN_BOOT_BTN);
+    } else {
+        printf("meck_boot_button_init: gpio_config failed: %s\n", esp_err_to_name(err));
+    }
+}
+
+extern "C" bool meck_boot_button_pressed() {
+    return gpio_get_level((gpio_num_t)PIN_BOOT_BTN) == 0;
 }
 
 // ============================================================================

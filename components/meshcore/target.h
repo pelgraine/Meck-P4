@@ -52,6 +52,19 @@ extern "C" void meck_apply_pending_save();
 // Should be called once at boot during meck_radio_attach.
 extern "C" void meck_set_antenna_default();
 
+// ---- Boot button (ESP32-P4 strapping pin, direct GPIO) ----
+//
+// PIN_BOOT_BTN (GPIO 35) doubles as the BOOT-0 strapping pin used by the
+// bootloader to enter download mode. It has an external pull-up on the
+// LilyGo board; the physical button shorts it to GND when pressed. So:
+// pressed == level 0, released == level 1.
+//
+// Init configures the pin as plain input with no internal pull resistors
+// (the external pull-up is sufficient and we don't want to fight it).
+// Safe to call once at boot from the LVGL task.
+extern "C" void meck_boot_button_init();
+extern "C" bool meck_boot_button_pressed();
+
 // ---- Battery readout (BQ27220 fuel gauge owned by main.cpp) ----
 //
 // Voltage is always trustworthy. SoC% from BQ27220 depends on cell

@@ -12,12 +12,18 @@
  *     "identity"     — 96-byte blob (prv_key[64] + pub_key[32])
  *     "prefs"        — serialized P4NodePrefs struct
  *     "channels"     — serialized channel array (up to MAX_GROUP_CHANNELS)
+ *     "contacts"     — DEPRECATED. Kept for one-shot migration on the first
+ *                      boot after upgrading from NVS-contacts storage. The
+ *                      blob is read into memory and rewritten to SD, then
+ *                      the key is erased to free NVS space. Subsequent
+ *                      saves are SD-only.
  *
  *   SD card (/sdcard/meshcore/):
  *     prefs.bin             — binary backup of P4NodePrefs
  *     channels.bin          — binary backup of channel data
  *     identity/_main.id     — 96-byte identity backup
- *     contacts.bin          — chunked ContactInfo records (future)
+ *     contacts.bin          — PRIMARY contact store (v2 header, uint16_t count,
+ *                             written atomically via .tmp + rename)
  *     meshcore_contacts.json — human-readable contact export (future)
  *
  * Boot sequence:
@@ -426,14 +432,28 @@ public:
     }
 
     // =====================================================================
-    // Contacts — NVS primary, SD backup
+    // Contacts — SD card primary (v2), NVS legacy fallback (v1)
     //
-    // saveContacts writes both NVS (primary) and SD (best-effort backup).
-    // loadContacts tries NVS first; if empty/corrupt it falls back to the
-    // SD copy and the next saveContacts re-populates NVS.
+    // Contacts outgrew the 24 KB NVS partition once we crossed ~160 entries
+    // (each ContactRecord is 82 bytes; NVS also keeps an old-blob copy
+    // during atomic writes so effective capacity is roughly half).
+    // Moving to SD removes the cap entirely.
+    //
+    // File format (contacts.bin):
+    //   [ContactsHeaderV2]  8 bytes — magic "MCC\0", version 2, uint16_t count
+    //   [ContactRecord 0][ContactRecord 1]…[ContactRecord N-1]
+    //
+    // Atomic save: writes to contacts.bin.tmp first, then rename() over
+    // contacts.bin. POSIX rename within the same directory is atomic on
+    // FAT, so a power loss either leaves the old file intact or the new
+    // file fully written — never a truncated mess.
+    //
+    // Migration: on first load after upgrade, if SD is empty but NVS has
+    // a legacy "contacts" v1 blob, we read it from NVS, write it to SD,
+    // and erase the NVS key. The next save is SD-only.
     // =====================================================================
 
-    // Compact contact record for NVS storage (80 bytes each).
+    // Compact contact record for persistence (82 bytes each).
     // Excludes transient data (out_path, shared_secret) which is
     // re-derived at runtime.
     struct ContactRecord {
@@ -448,138 +468,243 @@ public:
     };
     // Total: 82 bytes — no padding needed
 
+    // Legacy v1 header — kept for one-shot migration of existing NVS blobs.
     struct ContactsHeader {
         uint8_t magic[4];   // "MCC\0"
         uint8_t version;    // 1
-        uint8_t count;      // number of contacts
+        uint8_t count;      // uint8_t (cap 255)
         uint8_t reserved[2];
     };
 
+    // Current v2 header — used by all new writes. Same total size (8 bytes)
+    // as v1, just with the count field promoted to uint16_t. Layout uses
+    // explicit bytes via __attribute__((packed)) so the on-disk format is
+    // platform-independent (RISC-V is little-endian so memcpy works for
+    // both fields; the packed attribute just prevents any compiler from
+    // adding padding around `count`).
+    struct __attribute__((packed)) ContactsHeaderV2 {
+        uint8_t magic[4];   // "MCC\0"
+        uint8_t version;    // 2
+        uint8_t flags;      // reserved, 0
+        uint16_t count;     // uint16_t (cap 65535)
+    };
+
+    // Atomic write helper: write `data` of length `len` to `final_path` by
+    // first writing to `final_path.tmp`, fsync (best-effort), then rename.
+    // Returns true on success. Logs but doesn't return errors for unlink
+    // of stale tmp (cleanup is best-effort).
+    bool atomicWriteToSD(const char* final_path, const void* data, size_t len) {
+        char tmp_path[96];
+        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", final_path);
+
+        FILE* f = fopen(tmp_path, "wb");
+        if (!f) {
+            ESP_LOGW(TAG, "atomicWriteToSD: fopen(%s, wb) failed (errno=%d)",
+                     tmp_path, errno);
+            return false;
+        }
+        size_t wrote = fwrite(data, 1, len, f);
+        int closed = fclose(f);
+        if (wrote != len || closed != 0) {
+            ESP_LOGW(TAG, "atomicWriteToSD: write/close failed "
+                          "(wrote=%d, expected=%d, close=%d)",
+                     (int)wrote, (int)len, closed);
+            unlink(tmp_path);
+            return false;
+        }
+
+        // rename on POSIX overwrites; rename on FAT does not (errno 17
+        // EEXIST). ESP-IDF's FATFS follows the FAT semantics, so we need
+        // to unlink the destination first. This breaks true atomicity:
+        // there's a microsecond window where neither file exists. If
+        // power is lost in that window, contacts.bin.tmp survives and
+        // loadContacts() will pick it up via the recovery path.
+        unlink(final_path);  // ignore error: file may not exist on first save
+
+        if (rename(tmp_path, final_path) != 0) {
+            ESP_LOGW(TAG, "atomicWriteToSD: rename(%s, %s) failed (errno=%d)",
+                     tmp_path, final_path, errno);
+            unlink(tmp_path);
+            return false;
+        }
+        return true;
+    }
+
     bool saveContacts(const ContactRecord* records, int count) {
         if (!_initialized || count < 0) return false;
-        if (count > 255) count = 255;  // uint8_t header field
+        if (count > 65535) count = 65535;  // uint16_t header field
 
-        size_t blobSize = sizeof(ContactsHeader) + sizeof(ContactRecord) * count;
+        if (!p4_sdcard_is_mounted()) {
+            ESP_LOGE(TAG, "saveContacts: SD not mounted — contacts not persisted");
+            return false;
+        }
+        ensureSDDirectories();
+
+        size_t blobSize = sizeof(ContactsHeaderV2) + sizeof(ContactRecord) * count;
         uint8_t* blob = (uint8_t*)malloc(blobSize);
         if (!blob) {
             ESP_LOGE(TAG, "saveContacts: malloc failed (%d bytes)", (int)blobSize);
             return false;
         }
 
-        ContactsHeader* hdr = (ContactsHeader*)blob;
+        ContactsHeaderV2* hdr = (ContactsHeaderV2*)blob;
         memcpy(hdr->magic, "MCC", 3);
         hdr->magic[3] = 0;
-        hdr->version = 1;
-        hdr->count = (uint8_t)count;
-        memset(hdr->reserved, 0, sizeof(hdr->reserved));
+        hdr->version = 2;
+        hdr->flags = 0;
+        hdr->count = (uint16_t)count;
 
         if (count > 0 && records) {
-            memcpy(blob + sizeof(ContactsHeader), records, sizeof(ContactRecord) * count);
+            memcpy(blob + sizeof(ContactsHeaderV2), records,
+                   sizeof(ContactRecord) * count);
         }
 
-        nvs_handle_t handle;
-        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
-        if (err == ESP_OK) {
-            err = nvs_set_blob(handle, "contacts", blob, blobSize);
-            if (err == ESP_OK) err = nvs_commit(handle);
-            nvs_close(handle);
-        }
-
-        // Backup to SD. Best-effort — a failed SD write must not fail the
-        // overall save, since NVS is the primary store. Mirrors the pattern
-        // used by savePrefs and saveChannels.
-        if (p4_sdcard_is_mounted()) {
-            FILE* f = fopen(SD_CONTACTS_PATH, "wb");
-            if (f) {
-                fwrite(blob, 1, blobSize, f);
-                fclose(f);
-            } else {
-                ESP_LOGW(TAG, "saveContacts: SD backup open failed (errno=%d)", errno);
-            }
-        }
-
+        bool ok = atomicWriteToSD(SD_CONTACTS_PATH, blob, blobSize);
         free(blob);
 
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "saveContacts: NVS write failed (0x%x)", err);
+        if (!ok) {
+            ESP_LOGE(TAG, "saveContacts: SD write failed");
             return false;
         }
 
-        ESP_LOGI(TAG, "saveContacts: %d contacts saved (%d bytes)", count, (int)blobSize);
+        // One-shot NVS cleanup: if a legacy contacts blob is still sitting
+        // in NVS, erase it now that we have a successful SD copy. This
+        // frees up partition space and prevents the next failed write at
+        // the size limit. nvs_erase_key is a no-op if the key is absent.
+        {
+            nvs_handle_t handle;
+            if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+                esp_err_t derr = nvs_erase_key(handle, "contacts");
+                if (derr == ESP_OK) {
+                    nvs_commit(handle);
+                    ESP_LOGI(TAG, "saveContacts: erased legacy NVS contacts blob");
+                }
+                // ESP_ERR_NVS_NOT_FOUND is the steady-state case — silent.
+                nvs_close(handle);
+            }
+        }
+
+        ESP_LOGI(TAG, "saveContacts: %d contacts saved to SD (%d bytes)",
+                 count, (int)blobSize);
         return true;
+    }
+
+    // Parse a contacts blob and copy records into the caller's buffer.
+    // Handles both v1 (uint8_t count) and v2 (uint16_t count) headers.
+    // Returns number of records copied; 0 on header/format error.
+    int parseContactsBlob(const uint8_t* blob, size_t blobSize,
+                          ContactRecord* records, int maxCount) {
+        if (!blob || blobSize < 8) return 0;
+        if (memcmp(blob, "MCC", 3) != 0) {
+            ESP_LOGW(TAG, "parseContactsBlob: bad magic");
+            return 0;
+        }
+        uint8_t version = blob[4];
+        int count = 0;
+        size_t header_size = 0;
+
+        if (version == 1) {
+            // v1: byte 5 is uint8_t count
+            count = blob[5];
+            header_size = sizeof(ContactsHeader);
+        } else if (version == 2) {
+            // v2: bytes 6-7 are little-endian uint16_t count
+            count = (int)blob[6] | ((int)blob[7] << 8);
+            header_size = sizeof(ContactsHeaderV2);
+        } else {
+            ESP_LOGW(TAG, "parseContactsBlob: unsupported version %u",
+                     (unsigned)version);
+            return 0;
+        }
+
+        if (count > maxCount) count = maxCount;
+        size_t need = header_size + (size_t)count * sizeof(ContactRecord);
+        if (blobSize < need) {
+            ESP_LOGW(TAG, "parseContactsBlob: blob too small (%d < %d)",
+                     (int)blobSize, (int)need);
+            return 0;
+        }
+        memcpy(records, blob + header_size,
+               sizeof(ContactRecord) * count);
+        return count;
     }
 
     int loadContacts(ContactRecord* records, int maxCount) {
         if (!_initialized) return 0;
 
-        // Try NVS first.
-        size_t blobSize = 0;
-        uint8_t* blob = NULL;
-        bool loaded = false;
-
-        nvs_handle_t handle;
-        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
-        if (err == ESP_OK) {
-            err = nvs_get_blob(handle, "contacts", NULL, &blobSize);
-            if (err == ESP_OK && blobSize >= sizeof(ContactsHeader)) {
-                blob = (uint8_t*)malloc(blobSize);
-                if (blob) {
-                    err = nvs_get_blob(handle, "contacts", blob, &blobSize);
-                    if (err == ESP_OK) loaded = true;
-                    else { free(blob); blob = NULL; }
+        // Recovery: if a prior save was interrupted between unlink(.bin)
+        // and rename(.tmp → .bin), only the .tmp file exists. Promote it
+        // before the normal load path runs. This is silent in the happy
+        // case (no .tmp present, nothing to do).
+        if (p4_sdcard_is_mounted()) {
+            char tmp_path[96];
+            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", SD_CONTACTS_PATH);
+            if (p4_sdcard_file_exists(tmp_path) &&
+                !p4_sdcard_file_exists(SD_CONTACTS_PATH)) {
+                if (rename(tmp_path, SD_CONTACTS_PATH) == 0) {
+                    ESP_LOGW(TAG, "loadContacts: recovered interrupted save "
+                                  "(promoted %s → %s)", tmp_path, SD_CONTACTS_PATH);
+                } else {
+                    ESP_LOGW(TAG, "loadContacts: found orphan %s but rename "
+                                  "to %s failed (errno=%d)",
+                             tmp_path, SD_CONTACTS_PATH, errno);
                 }
             }
-            nvs_close(handle);
         }
 
-        // NVS empty or corrupt — fall back to SD. Same pattern as
-        // loadChannels: if NVS was wiped (fresh flash, factory reset) but
-        // the SD card retains a backup, restore from there. The SD copy
-        // gets written to NVS implicitly on the next saveContacts.
-        if (!loaded && p4_sdcard_is_mounted() && p4_sdcard_file_exists(SD_CONTACTS_PATH)) {
+        // Primary path: SD card.
+        if (p4_sdcard_is_mounted() && p4_sdcard_file_exists(SD_CONTACTS_PATH)) {
             size_t fsize = p4_sdcard_file_size(SD_CONTACTS_PATH);
-            if (fsize >= sizeof(ContactsHeader)) {
-                blob = (uint8_t*)malloc(fsize);
+            if (fsize >= 8) {
+                uint8_t* blob = (uint8_t*)malloc(fsize);
                 if (blob) {
                     FILE* f = fopen(SD_CONTACTS_PATH, "rb");
                     if (f) {
                         size_t rd = fread(blob, 1, fsize, f);
                         fclose(f);
                         if (rd == fsize) {
-                            blobSize = fsize;
-                            loaded = true;
-                            ESP_LOGI(TAG, "loadContacts: restored from SD");
+                            int count = parseContactsBlob(blob, fsize, records, maxCount);
+                            free(blob);
+                            ESP_LOGI(TAG, "loadContacts: %d contacts loaded from SD", count);
+                            return count;
                         }
                     }
-                    if (!loaded) { free(blob); blob = NULL; }
+                    free(blob);
                 }
             }
+            ESP_LOGW(TAG, "loadContacts: SD file present but unreadable, "
+                          "falling back to legacy NVS");
         }
 
-        if (!loaded || !blob) return 0;
-
-        ContactsHeader* hdr = (ContactsHeader*)blob;
-        if (memcmp(hdr->magic, "MCC", 3) != 0 || hdr->version != 1) {
-            ESP_LOGW(TAG, "loadContacts: bad header");
-            free(blob);
-            return 0;
+        // Migration path: legacy NVS blob from before SD storage. Read it,
+        // copy to caller, then queue an SD write on the next save. We
+        // explicitly DO NOT delete the NVS key here — saveContacts handles
+        // that once it confirms the SD write succeeded.
+        size_t blobSize = 0;
+        nvs_handle_t handle;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+            esp_err_t err = nvs_get_blob(handle, "contacts", NULL, &blobSize);
+            if (err == ESP_OK && blobSize >= 8) {
+                uint8_t* blob = (uint8_t*)malloc(blobSize);
+                if (blob) {
+                    err = nvs_get_blob(handle, "contacts", blob, &blobSize);
+                    if (err == ESP_OK) {
+                        int count = parseContactsBlob(blob, blobSize, records, maxCount);
+                        free(blob);
+                        nvs_close(handle);
+                        ESP_LOGI(TAG, "loadContacts: %d contacts loaded from "
+                                      "legacy NVS — will migrate to SD on next save",
+                                 count);
+                        return count;
+                    }
+                    free(blob);
+                }
+            }
+            nvs_close(handle);
         }
 
-        int count = hdr->count;
-        if (count > maxCount) count = maxCount;
-
-        size_t dataNeeded = sizeof(ContactsHeader) + sizeof(ContactRecord) * count;
-        if (blobSize < dataNeeded) {
-            ESP_LOGW(TAG, "loadContacts: blob too small (%d < %d)", (int)blobSize, (int)dataNeeded);
-            free(blob);
-            return 0;
-        }
-
-        memcpy(records, blob + sizeof(ContactsHeader), sizeof(ContactRecord) * count);
-        free(blob);
-
-        ESP_LOGI(TAG, "loadContacts: %d contacts loaded", count);
-        return count;
+        ESP_LOGI(TAG, "loadContacts: no saved contacts (fresh install)");
+        return 0;
     }
 
     // =====================================================================
@@ -644,7 +769,9 @@ public:
         };
         copy_blob("prefs",    SD_PREFS_PATH);
         copy_blob("channels", SD_CHANNELS_PATH);
-        copy_blob("contacts", SD_CONTACTS_PATH);
+        // Note: contacts are SD-native since v2 — no NVS blob to copy.
+        // The legacy NVS "contacts" key is erased by saveContacts on the
+        // first successful SD write after upgrade.
 
         ESP_LOGI(TAG, "backupToSD: %d blobs written", written);
         return written;

@@ -37,6 +37,7 @@
 #include "target.h"
 #include "MeckMesh.h"
 #include "MeckDataStore.h"
+#include "MeckAudioUI.h"
 
 #include <sys/lock.h>
 #include "lvgl.h"
@@ -60,7 +61,7 @@ extern _lock_t lvgl_api_lock;
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.1"
+#define MECK_FIRMWARE_VERSION "0.2"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -336,7 +337,10 @@ static void cb_todo_notes(lv_event_t* e)    { printf("MeckUI: Notes tile clicked
 static void cb_todo_discover(lv_event_t* e) { printf("MeckUI: Discover tile clicked (TODO)\n"); }
 static void cb_todo_trace(lv_event_t* e)    { printf("MeckUI: Trace tile clicked (TODO)\n"); }
 static void cb_todo_maps(lv_event_t* e)     { printf("MeckUI: Maps tile clicked (TODO)\n"); }
-static void cb_todo_audio(lv_event_t* e)    { printf("MeckUI: Audio tile clicked (TODO)\n"); }
+static void goto_audio_browser(lv_event_t* e) {
+    (void)e;
+    meck_audio_ui_show_browser();
+}
 static void cb_todo_web(lv_event_t* e)      { printf("MeckUI: Web tile clicked (TODO)\n"); }
 
 // ============================================================================
@@ -429,7 +433,11 @@ static lv_obj_t* create_back_button(lv_obj_t *parent) {
 // or list boundaries are interpreted as pan gestures and slide the entire
 // screen sideways — confusing and easy to trigger accidentally. Call this
 // right after each scr_X = lv_obj_create(NULL).
-static void lock_screen_scroll(lv_obj_t *scr) {
+//
+// Linkage note: kept non-static so MeckAudioUI.cpp can reuse it through
+// an extern "C" forward declaration. Same convention as Meck's other
+// cross-translation-unit helpers.
+extern "C" void lock_screen_scroll(lv_obj_t *scr) {
     if (!scr) return;
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
@@ -512,6 +520,83 @@ static lv_obj_t* create_settings_row(lv_obj_t *parent, const char *label,
     lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -5, 0);
 
     return btn;
+}
+
+// Standardised sizing + layout for every Meck virtual keyboard. The
+// default LVGL keymap dedicates ~6% of row width to each letter and 4-5%
+// to function keys (ABC, backspace, enter, keyboard icon, etc) which on
+// our screen translates to fat grey keys squeezing the letters. The
+// custom ctrl_maps below shrink the function keys and widen the letters
+// so they're closer to a phone-keyboard ratio. Row 4's icon buttons get
+// shrunk hard so the space bar gets most of the row's width and the row
+// stops looking empty.
+//
+// Anything positioned relative to the keyboard top (textarea, send
+// button, message scroll height) reads MECK_KB_HEIGHT so layout stays
+// consistent if the value changes later.
+#define MECK_KB_HEIGHT 560
+
+// Width-factor layout — each entry is a LVGL button-matrix ctrl flag OR'd
+// with the cell's width factor (relative to other cells in the same row).
+// Lower-case map. Layout differs from LVGL's default:
+//   row 1: letters + backspace          (1# moved down)
+//   row 2: 1# + letters + enter         (ABC moved down)
+//   row 4: [kbd] [<] ABC [space] [>] [✓]   (ABC inserted, space shrunk)
+// Mode-switch behaviour for "1#" and "ABC"/"abc" keys is by label match
+// in LVGL's default event handler, so position doesn't break anything.
+static const char *meck_kb_map_lc[] = {
+    "q","w","e","r","t","y","u","i","o","p",        LV_SYMBOL_BACKSPACE,  "\n",
+    "1#", "a","s","d","f","g","h","j","k","l",      LV_SYMBOL_NEW_LINE,   "\n",
+    "_","-","z","x","c","v","b","n","m",".",",", ":",                     "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "ABC", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
+// Casts to keep g++ happy: lv_buttonmatrix_ctrl_t is a strongly-typed
+// enum in C++, so OR'ing with an int width factor yields int (which
+// can't implicitly convert back to the enum). MKB = width-only cell,
+// MKB_NR = width-with-no-repeat-flag.
+#define MKB(w)    ((lv_buttonmatrix_ctrl_t)(w))
+#define MKB_NR(w) ((lv_buttonmatrix_ctrl_t)(LV_BUTTONMATRIX_CTRL_NO_REPEAT | (w)))
+
+// Width factors. Letters at 7 in rows 1-2; 1# and backspace at 8 (~15%
+// wider than letters per request). Row 4: ABC at 5 sits between
+// letters-equivalent and a phone-style mode-switch key; space dropped
+// from factor 12 to 8 so it's ~38% of the row instead of ~60%.
+static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_lc[] = {
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(8),
+    MKB_NR(8), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(7),
+    MKB_NR(3), MKB(3), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(3), MKB(3), MKB(3),
+    MKB_NR(2), MKB(2), MKB_NR(5), MKB(8), MKB(2), MKB_NR(2)
+};
+
+// Upper-case map: same structure as lowercase with capital letters and
+// "abc" instead of "ABC" as the case-toggle button.
+static const char *meck_kb_map_uc[] = {
+    "Q","W","E","R","T","Y","U","I","O","P",        LV_SYMBOL_BACKSPACE,  "\n",
+    "1#", "A","S","D","F","G","H","J","K","L",      LV_SYMBOL_NEW_LINE,   "\n",
+    "_","-","Z","X","C","V","B","N","M",".",",", ":",                     "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
+static void meck_style_keyboard(lv_obj_t *kb) {
+    if (!kb) return;
+    lv_obj_set_size(kb, SCREEN_WIDTH, MECK_KB_HEIGHT);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_text_font(kb, &lv_font_montserrat_24, LV_PART_ITEMS);
+    // Tighter row pad than before — extra height was redistributing into
+    // gaps, not key area. 5 px is enough visual separation; the rest of
+    // the height goes to the keys themselves.
+    lv_obj_set_style_pad_row(kb, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(kb, 4, LV_PART_MAIN);
+
+    // Apply custom width factors. The same ctrl_map works for both case
+    // modes since the structure is identical.
+    lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_LOWER,
+                        meck_kb_map_lc, meck_kb_ctrl_lc);
+    lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_UPPER,
+                        meck_kb_map_uc, meck_kb_ctrl_lc);
 }
 
 // ============================================================================
@@ -1073,9 +1158,13 @@ static void on_compose_focused(lv_event_t *e) {
     if (kb_compose) {
         lv_keyboard_set_textarea(kb_compose, ta_compose);
         lv_obj_remove_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
-        if (obj_msg_scroll) lv_obj_set_height(obj_msg_scroll, SCREEN_HEIGHT - 410);
-        if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 10, -295);
-        if (btn_send)   lv_obj_align(btn_send,   LV_ALIGN_BOTTOM_RIGHT, -10, -295);
+        // Layout shifts to make room for the keyboard. Offsets follow
+        // MECK_KB_HEIGHT so this stays in sync if the keyboard size
+        // changes. 130 = top header + textarea + padding above scroll;
+        // 15 = gap between keyboard top and textarea bottom.
+        if (obj_msg_scroll) lv_obj_set_height(obj_msg_scroll, SCREEN_HEIGHT - (130 + MECK_KB_HEIGHT));
+        if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 10, -(15 + MECK_KB_HEIGHT));
+        if (btn_send)   lv_obj_align(btn_send,   LV_ALIGN_BOTTOM_RIGHT, -10, -(15 + MECK_KB_HEIGHT));
     }
 }
 
@@ -1356,7 +1445,7 @@ static void create_page_home(lv_obj_t *page) {
     create_tile_button(page, LV_SYMBOL_GPS      "\nDiscover", cb_todo_discover,    1, 2);
     create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
     create_tile_button(page, LV_SYMBOL_IMAGE    "\nMaps",     cb_todo_maps,        1, 3);
-    create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    cb_todo_audio,       0, 4);
+    create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    goto_audio_browser,  0, 4);
     create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_todo_web,         1, 4);
 
     lv_obj_t *hint = lv_label_create(page);
@@ -1792,44 +1881,73 @@ static void on_gps_tile_long_press(lv_event_t *e) {
     printf("GPS: %s via long-press\n", now_on ? "ENABLED" : "DISABLED");
 }
 
-// 1 Hz idle watcher. Fades the screen to 0 once LVGL reports inactivity
-// past the configured threshold; restores the user's brightness on the
-// next touch event (any touch resets lv_disp_get_inactive_time).
+// 4 Hz idle watcher. Sleep trigger: once LVGL reports inactivity past the
+// configured threshold, fade brightness to 0. Wake trigger: any input
+// activity. LVGL maintains its own inactive-time counter that gets reset
+// whenever any registered indev (touch, keypad) reports a press, so we
+// just watch that counter going small to detect a wake. The boot button
+// is also polled here as a secondary wake source — useful if the screen
+// blanks and a quick button press is more deliberate than a stray touch.
+//
+// We do NOT disable the indevs during dim. An earlier iteration of this
+// timer did, to avoid pocket-touch wakes, but that made every wake feel
+// awkward because boot-button-only meant fishing the device out and
+// finding a hardware button. Touch wake is the v0.1 behaviour and is
+// what users expect.
+//
+// Timer period is 250 ms so the wake feels snappy. The body is cheap
+// (one comparison against a counter) so the higher rate doesn't matter.
 static void screen_idle_timer_cb(lv_timer_t *t) {
     (void)t;
     Meck* mesh = meck_get_instance();
     if (!mesh) return;
     P4NodePrefs* prefs = mesh->getNodePrefs();
-    if (!prefs || prefs->screen_off_minutes == 0) {
-        // Auto-off disabled — make sure the screen is at the user's
-        // chosen brightness in case the timer was disabled mid-fade.
-        static bool restored_once = false;
-        if (!restored_once) {
-            uint8_t b = prefs && prefs->screen_brightness
-                ? prefs->screen_brightness : 200;
-            meck_screen_set_brightness(b);
-            restored_once = true;
-        }
-        return;
-    }
 
     // Track our own dimmed state rather than reading back from the panel,
     // so the cost of the timer is constant and we don't over-write the
     // brightness register on every tick.
     static bool dimmed = false;
+
+    // Auto-off disabled — make sure the screen is at the user's chosen
+    // brightness in case the user toggled the setting off mid-fade.
+    if (!prefs || prefs->screen_off_minutes == 0) {
+        if (dimmed) {
+            uint8_t b = (prefs && prefs->screen_brightness)
+                ? prefs->screen_brightness : 200;
+            meck_screen_set_brightness(b);
+            lv_display_trigger_activity(NULL);
+            dimmed = false;
+            printf("Screen: auto-off disabled mid-dim, restored brightness=%u\n",
+                   (unsigned)b);
+        }
+        return;
+    }
+
     uint32_t threshold_ms = (uint32_t)prefs->screen_off_minutes * 60u * 1000u;
     uint32_t inactive_ms = lv_display_get_inactive_time(NULL);
 
-    if (!dimmed && inactive_ms >= threshold_ms) {
-        meck_screen_set_brightness(0);
-        dimmed = true;
-        printf("Screen: auto-off after %u min idle\n",
-               (unsigned)prefs->screen_off_minutes);
-    } else if (dimmed && inactive_ms < threshold_ms) {
-        uint8_t b = prefs->screen_brightness ? prefs->screen_brightness : 200;
-        meck_screen_set_brightness(b);
-        dimmed = false;
-        printf("Screen: woke (brightness=%u)\n", (unsigned)b);
+    if (!dimmed) {
+        // Sleep path: inactivity-based.
+        if (inactive_ms >= threshold_ms) {
+            meck_screen_set_brightness(0);
+            dimmed = true;
+            printf("Screen: auto-off after %u min idle\n",
+                   (unsigned)prefs->screen_off_minutes);
+        }
+    } else {
+        // Wake path: any indev activity will have reset LVGL's inactive
+        // counter; if that's reset we wake. Boot button is checked too
+        // as a deliberate secondary wake source.
+        bool indev_active = (inactive_ms < threshold_ms);
+        bool button       = meck_boot_button_pressed();
+        if (indev_active || button) {
+            uint8_t b = prefs->screen_brightness ? prefs->screen_brightness : 200;
+            meck_screen_set_brightness(b);
+            lv_display_trigger_activity(NULL);
+            dimmed = false;
+            printf("Screen: woke via %s (brightness=%u)\n",
+                   button ? "boot button" : "touch", (unsigned)b);
+        }
     }
 }
 
@@ -1988,8 +2106,10 @@ static void create_settings_screen() {
     y += 65;
 
     // Auto screen-off — six-step ladder (Never / 1 / 2 / 5 / 10 / 30 min).
-    // The 1 Hz screen_idle_timer_cb dims to 0 once inactive_ms exceeds the
-    // threshold; any touch wakes the screen back to the chosen brightness.
+    // The 4 Hz screen_idle_timer_cb dims to 0 once inactive_ms exceeds the
+    // threshold; only a boot-button press wakes the screen back to the
+    // chosen brightness. Touch is suppressed while dimmed so a pocket
+    // touch can't accidentally wake the device.
     create_settings_row(scroll, "Auto Off (tap to cycle)",
         &lbl_set_screen_off, on_settings_screen_off_tap, y);
     y += 65;
@@ -2085,8 +2205,7 @@ static void create_settings_screen() {
     lv_obj_set_style_border_color(ta_settings_name, lv_palette_main(LV_PALETTE_CYAN), 0);
 
     kb_settings = lv_keyboard_create(obj_name_edit_panel);
-    lv_obj_set_size(kb_settings, SCREEN_WIDTH, 280);
-    lv_obj_align(kb_settings, LV_ALIGN_BOTTOM_MID, 0, 0);
+    meck_style_keyboard(kb_settings);
     lv_keyboard_set_textarea(kb_settings, ta_settings_name);
     lv_obj_add_event_cb(kb_settings, on_settings_kb_event, LV_EVENT_READY,  NULL);
     lv_obj_add_event_cb(kb_settings, on_settings_kb_event, LV_EVENT_CANCEL, NULL);
@@ -2286,8 +2405,7 @@ static void create_channel_picker_screen() {
     lv_obj_set_style_border_color(ta_ch_add, lv_palette_main(LV_PALETTE_GREEN), 0);
 
     kb_ch_add = lv_keyboard_create(obj_ch_add_panel);
-    lv_obj_set_size(kb_ch_add, SCREEN_WIDTH, 280);
-    lv_obj_align(kb_ch_add, LV_ALIGN_BOTTOM_MID, 0, 0);
+    meck_style_keyboard(kb_ch_add);
     lv_keyboard_set_textarea(kb_ch_add, ta_ch_add);
     lv_obj_add_event_cb(kb_ch_add, on_ch_add_kb_event, LV_EVENT_READY,  NULL);
     lv_obj_add_event_cb(kb_ch_add, on_ch_add_kb_event, LV_EVENT_CANCEL, NULL);
@@ -2363,8 +2481,7 @@ static void create_messages_screen() {
     lv_obj_add_event_cb(btn_send, on_send_clicked, LV_EVENT_CLICKED, NULL);
 
     kb_compose = lv_keyboard_create(scr_messages);
-    lv_obj_set_size(kb_compose, SCREEN_WIDTH, 280);
-    lv_obj_align(kb_compose, LV_ALIGN_BOTTOM_MID, 0, 0);
+    meck_style_keyboard(kb_compose);
     lv_keyboard_set_textarea(kb_compose, ta_compose);
     lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(kb_compose, on_kb_event, LV_EVENT_READY,  NULL);
@@ -3070,6 +3187,7 @@ extern "C" void meck_ui_init() {
     create_messages_screen();
     create_contacts_screen();
     create_contact_detail_screen();
+    meck_audio_ui_init();
 
     lv_timer_create(ui_update_timer_cb, 500, NULL);
 
@@ -3094,10 +3212,13 @@ extern "C" void meck_ui_init() {
             }
         }
     }
-    // 1 Hz idle watcher for auto screen-off. The timer is always running
+    // 4 Hz idle watcher for auto screen-off. The timer is always running
     // — the handler short-circuits when screen_off_minutes is 0, so the
-    // cost is negligible.
-    lv_timer_create(screen_idle_timer_cb, 1000, NULL);
+    // cost is negligible. 250 ms period is short enough that pressing the
+    // boot button to wake feels instant; the body is just a register read
+    // and a couple of compares so the higher rate doesn't matter.
+    meck_boot_button_init();
+    lv_timer_create(screen_idle_timer_cb, 250, NULL);
 
     _lock_release(&lvgl_api_lock);
 
@@ -3113,4 +3234,22 @@ extern "C" void meck_ui_show_home() {
     lv_screen_load(scr_home);
     _lock_release(&lvgl_api_lock);
     printf("MeckUI: home screen loaded\n");
+}
+
+/* Same as meck_ui_show_home() but does NOT acquire lvgl_api_lock. For
+ * callers that are already running inside the LVGL task (event handlers,
+ * timers, async callbacks) — the LVGL task already holds the lock for the
+ * full duration of its iteration, so re-acquiring deadlocks silently.
+ *
+ * Use meck_ui_show_home() from non-LVGL threads (boot, BLE callbacks,
+ * radio task, etc.). Use meck_ui_load_home_screen() from inside LVGL
+ * event handlers — this matches how goto_settings_from_contacts and
+ * the other inter-screen handlers in this file work. */
+extern "C" void meck_ui_load_home_screen() {
+    if (!scr_home) {
+        printf("MeckUI: home screen not initialized, call meck_ui_init() first\n");
+        return;
+    }
+    lv_screen_load(scr_home);
+    printf("MeckUI: home screen loaded (unlocked)\n");
 }
