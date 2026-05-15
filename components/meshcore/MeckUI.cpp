@@ -61,7 +61,7 @@ extern _lock_t lvgl_api_lock;
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3"
+#define MECK_FIRMWARE_VERSION "0.2"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -536,21 +536,22 @@ static lv_obj_t* create_settings_row(lv_obj_t *parent, const char *label,
 // consistent if the value changes later.
 #define MECK_KB_HEIGHT 560
 
-// Width-factor layout — each entry is a LVGL button-matrix ctrl flag OR'd
-// with the cell's width factor (relative to other cells in the same row).
-// Lower-case map. Layout differs from LVGL's default:
-//   row 1: letters + backspace          (1# moved down)
-//   row 2: 1# + letters + enter         (ABC moved down)
-//   row 4: [kbd] [<] ABC [space] [>] [✓]   (ABC inserted, space shrunk)
-// Mode-switch behaviour for "1#" and "ABC"/"abc" keys is by label match
-// in LVGL's default event handler, so position doesn't break anything.
-static const char *meck_kb_map_lc[] = {
-    "q","w","e","r","t","y","u","i","o","p",        LV_SYMBOL_BACKSPACE,  "\n",
-    "1#", "a","s","d","f","g","h","j","k","l",      LV_SYMBOL_NEW_LINE,   "\n",
-    "_","-","z","x","c","v","b","n","m",".",",", ":",                     "\n",
-    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "ABC", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
-    ""
-};
+// ----------------------------------------------------------------------------
+// CLICK_TRIG and the symbol-key fix
+// ----------------------------------------------------------------------------
+// LVGL 9's lv_keyboard sets LV_BUTTONMATRIX_CTRL_CLICK_TRIG on every function
+// button in its built-in maps (via LV_KEYBOARD_CTRL_BUTTON_FLAGS in
+// lv_keyboard.h). With CLICK_TRIG, VALUE_CHANGED fires on release; without it,
+// VALUE_CHANGED fires on press. lv_keyboard's default event handler runs
+// set_mode() on every VC, so the flag has to be consistent across every map
+// we set or the same physical tap can fire TWO VCs — one in the outgoing
+// mode's ctrl_map (press, no flag) and one in the incoming mode's ctrl_map
+// (release, with flag) — and the second VC reverts the mode immediately.
+//
+// We pick "no CLICK_TRIG anywhere": every Meck ctrl_map below uses MKB / MKB_NR
+// only, so VC fires on press uniformly. Single VC per tap → single mode
+// toggle → tapping "1#" switches to symbols on press and stays there.
+// ----------------------------------------------------------------------------
 
 // Casts to keep g++ happy: lv_buttonmatrix_ctrl_t is a strongly-typed
 // enum in C++, so OR'ing with an int width factor yields int (which
@@ -559,14 +560,37 @@ static const char *meck_kb_map_lc[] = {
 #define MKB(w)    ((lv_buttonmatrix_ctrl_t)(w))
 #define MKB_NR(w) ((lv_buttonmatrix_ctrl_t)(LV_BUTTONMATRIX_CTRL_NO_REPEAT | (w)))
 
+// Width-factor layout — each entry is a LVGL button-matrix ctrl flag OR'd
+// with the cell's width factor (relative to other cells in the same row).
+// Lower-case map. Layout differs from LVGL's default:
+//   row 1: letters + backspace          (1# moved down)
+//   row 2: 1# + letters + enter         (ABC moved down)
+//   row 3: '-' + letters + '.' + ','    ('_' and ':' live on the special
+//                                         map; '-', '.' and ',' widened from
+//                                         factor 3 to 5 — about 67% wider)
+//   row 4: [kbd] [<] ABC [space] [>] [✓]   (ABC inserted, space shrunk)
+// Mode-switch behaviour for "1#" and "ABC"/"abc" keys is by label match
+// in LVGL's default event handler, so position doesn't break anything.
+static const char *meck_kb_map_lc[] = {
+    "q","w","e","r","t","y","u","i","o","p",        LV_SYMBOL_BACKSPACE,  "\n",
+    "1#", "a","s","d","f","g","h","j","k","l",      LV_SYMBOL_NEW_LINE,   "\n",
+    "-","z","x","c","v","b","n","m",".",",",                              "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "ABC", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
 // Width factors. Letters at 7 in rows 1-2; 1# and backspace at 8 (~15%
-// wider than letters per request). Row 4: ABC at 5 sits between
-// letters-equivalent and a phone-style mode-switch key; space dropped
-// from factor 12 to 8 so it's ~38% of the row instead of ~60%.
+// wider than letters per request). Row 3: punctuation '-', '.', ',' at
+// factor 5 (~67% wider than the old factor 3) so they're easier to hit;
+// totals to 64 units across 10 cells, same as the old 12-cell row, so
+// letters in row 3 keep the same 10.9% width fraction. Row 4: ABC at 5
+// sits between letters-equivalent and a phone-style mode-switch key;
+// space dropped from factor 12 to 8 so it's ~38% of the row instead of
+// ~60%.
 static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_lc[] = {
     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(8),
     MKB_NR(8), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(7),
-    MKB_NR(3), MKB(3), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(3), MKB(3), MKB(3),
+    MKB_NR(5), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB(5),
     MKB_NR(2), MKB(2), MKB_NR(5), MKB(8), MKB(2), MKB_NR(2)
 };
 
@@ -575,9 +599,43 @@ static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_lc[] = {
 static const char *meck_kb_map_uc[] = {
     "Q","W","E","R","T","Y","U","I","O","P",        LV_SYMBOL_BACKSPACE,  "\n",
     "1#", "A","S","D","F","G","H","J","K","L",      LV_SYMBOL_NEW_LINE,   "\n",
-    "_","-","Z","X","C","V","B","N","M",".",",", ":",                     "\n",
+    "-","Z","X","C","V","B","N","M",".",",",                              "\n",
     LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
     ""
+};
+
+// Special / numbers map. Reached by tapping "1#" in either text mode.
+// Tapping "abc" in row 2 col 0 OR in row 4 returns to TEXT_LOWER (LVGL's
+// default handler dispatches both by label match).
+//   row 1: digits 0-9 + backspace
+//   row 2: abc + common chat symbols + enter
+//   row 3: punctuation incl. '_' and ':' (relocated from the alpha rows)
+//   row 4: same nav row as alpha for muscle-memory consistency
+//
+// IMPORTANT: ctrl_map below intentionally does NOT set CLICK_TRIG on any
+// cell. See the long comment near MECK_KB_HEIGHT above for why this matters
+// — mixing CLICK_TRIG across modes is what caused the brief-tap-reverts
+// bug on "1#" before this map existed.
+static const char *meck_kb_map_special[] = {
+    "1","2","3","4","5","6","7","8","9","0",            LV_SYMBOL_BACKSPACE,  "\n",
+    "abc","@","#","$","%","&","*","(",")","\"",         LV_SYMBOL_NEW_LINE,   "\n",
+    "_","-","=","+","/","!","?",":",";","'",",",".",                          "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
+// Special-map widths. Row totals match the alpha rows above so the keys
+// align horizontally across mode switches:
+//   row 1: 11 cells, total 78 (10 digits at 7 + backspace at 8)
+//   row 2: 11 cells, total 78 (abc at 8 + 9 syms at 7 + enter at 7)
+//   row 3: 12 cells, total 84 — symbols are touch-typed less than letters
+//                               so equal width at 7 is fine
+//   row 4: same as alpha
+static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_special[] = {
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(8),
+    MKB_NR(8), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(7),
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
+    MKB_NR(2), MKB(2), MKB_NR(5), MKB(8), MKB(2), MKB_NR(2)
 };
 
 static void meck_style_keyboard(lv_obj_t *kb) {
@@ -592,11 +650,15 @@ static void meck_style_keyboard(lv_obj_t *kb) {
     lv_obj_set_style_pad_column(kb, 4, LV_PART_MAIN);
 
     // Apply custom width factors. The same ctrl_map works for both case
-    // modes since the structure is identical.
+    // modes since the structure is identical. SPECIAL gets its own map +
+    // ctrl_map so CLICK_TRIG stays absent in every mode — see the long
+    // comment block above this function for why.
     lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_LOWER,
                         meck_kb_map_lc, meck_kb_ctrl_lc);
     lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_UPPER,
                         meck_kb_map_uc, meck_kb_ctrl_lc);
+    lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_SPECIAL,
+                        meck_kb_map_special, meck_kb_ctrl_special);
 }
 
 // ============================================================================
