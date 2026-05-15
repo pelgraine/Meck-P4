@@ -207,6 +207,8 @@ static lv_obj_t *lbl_set_pathhash  = NULL;
 static lv_obj_t *lbl_set_homecolor = NULL;
 static lv_obj_t *lbl_set_brightness  = NULL;
 static lv_obj_t *lbl_set_screen_off  = NULL;
+static lv_obj_t *lbl_set_kb_theme    = NULL;
+static lv_obj_t *lbl_set_kb_layout   = NULL;
 static lv_obj_t *lbl_set_identity  = NULL;
 static lv_obj_t *obj_name_edit_panel = NULL;
 static lv_obj_t *ta_settings_name    = NULL;
@@ -320,6 +322,8 @@ static void on_settings_autoadd_overwrite_tap(lv_event_t *e);
 static void on_settings_backup_to_sd_tap(lv_event_t *e);
 static void on_settings_brightness_tap(lv_event_t *e);
 static void on_settings_screen_off_tap(lv_event_t *e);
+static void on_settings_kb_theme_tap(lv_event_t *e);
+static void on_settings_kb_layout_tap(lv_event_t *e);
 static void on_gps_tile_long_press(lv_event_t *e);
 
 static void on_ch_delete(lv_event_t *e);
@@ -638,6 +642,76 @@ static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_special[] = {
     MKB_NR(2), MKB(2), MKB_NR(5), MKB(8), MKB(2), MKB_NR(2)
 };
 
+// ----------------------------------------------------------------------------
+// Alternate physical layouts: AZERTY (French) and QWERTZ (German).
+// ----------------------------------------------------------------------------
+// AZERTY differs from QWERTY structurally: A and Q swap, W and Z swap, M moves
+// from row 3 to row 2's end. Net effect: row 2 gains a letter (12 cells),
+// row 3 loses one (9 cells). Row 1 stays at 11 cells. So AZERTY needs its
+// own ctrl_map.
+//
+// QWERTZ differs from QWERTY by a single Y↔Z swap. Same shape everywhere, so
+// it shares meck_kb_ctrl_lc.
+//
+// Same CLICK_TRIG-free rule applies — see the long comment near MECK_KB_HEIGHT.
+// ----------------------------------------------------------------------------
+
+static const char *meck_kb_map_lc_azerty[] = {
+    "a","z","e","r","t","y","u","i","o","p",        LV_SYMBOL_BACKSPACE,  "\n",
+    "1#", "q","s","d","f","g","h","j","k","l","m",  LV_SYMBOL_NEW_LINE,   "\n",
+    "-","w","x","c","v","b","n",".",",",                                  "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "ABC", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
+static const char *meck_kb_map_uc_azerty[] = {
+    "A","Z","E","R","T","Y","U","I","O","P",        LV_SYMBOL_BACKSPACE,  "\n",
+    "1#", "Q","S","D","F","G","H","J","K","L","M",  LV_SYMBOL_NEW_LINE,   "\n",
+    "-","W","X","C","V","B","N",".",",",                                  "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
+// AZERTY width factors:
+//   row 1: same as QWERTY (10 letters at 7 + backspace at 8 = 78)
+//   row 2: 12 cells. 1#(8) + 10 letters at 7 + ENT(7) = 85.
+//   row 3: 9 cells. -(5) + 6 letters at 7 + .(5) + ,(5) = 57. Letters in
+//          row 3 end up wider than rows 1-2 since there are fewer of them;
+//          fine for AZERTY since row 3 letters (W X C V B N) get less use.
+//   row 4: same as QWERTY.
+static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_azerty[] = {
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(8),
+    MKB_NR(8), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(7),
+    MKB_NR(5), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB(5),
+    MKB_NR(2), MKB(2), MKB_NR(5), MKB(8), MKB(2), MKB_NR(2)
+};
+
+// QWERTZ: identical shape to QWERTY, only Y↔Z positions swap. Reuses
+// meck_kb_ctrl_lc as the ctrl_map.
+static const char *meck_kb_map_lc_qwertz[] = {
+    "q","w","e","r","t","z","u","i","o","p",        LV_SYMBOL_BACKSPACE,  "\n",
+    "1#", "a","s","d","f","g","h","j","k","l",      LV_SYMBOL_NEW_LINE,   "\n",
+    "-","y","x","c","v","b","n","m",".",",",                              "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "ABC", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
+static const char *meck_kb_map_uc_qwertz[] = {
+    "Q","W","E","R","T","Z","U","I","O","P",        LV_SYMBOL_BACKSPACE,  "\n",
+    "1#", "A","S","D","F","G","H","J","K","L",      LV_SYMBOL_NEW_LINE,   "\n",
+    "-","Y","X","C","V","B","N","M",".",",",                              "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
+// ----------------------------------------------------------------------------
+// Keyboard styling — picks layout from prefs->kb_layout and applies the
+// dark theme overrides if prefs->kb_dark_mode == 0 (the default).
+//
+// Idempotent: calling it again on an existing keyboard re-applies the maps
+// and theme. meck_kb_restyle_all() below uses that to live-update every
+// keyboard when the user toggles a Settings row.
+// ----------------------------------------------------------------------------
 static void meck_style_keyboard(lv_obj_t *kb) {
     if (!kb) return;
     lv_obj_set_size(kb, SCREEN_WIDTH, MECK_KB_HEIGHT);
@@ -649,16 +723,82 @@ static void meck_style_keyboard(lv_obj_t *kb) {
     lv_obj_set_style_pad_row(kb, 5, LV_PART_MAIN);
     lv_obj_set_style_pad_column(kb, 4, LV_PART_MAIN);
 
-    // Apply custom width factors. The same ctrl_map works for both case
-    // modes since the structure is identical. SPECIAL gets its own map +
-    // ctrl_map so CLICK_TRIG stays absent in every mode — see the long
-    // comment block above this function for why.
-    lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_LOWER,
-                        meck_kb_map_lc, meck_kb_ctrl_lc);
-    lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_UPPER,
-                        meck_kb_map_uc, meck_kb_ctrl_lc);
+    // Read prefs. If they aren't loaded yet (unlikely — meck_ui_init runs
+    // after meck_app_init — but be defensive), default to dark + QWERTY to
+    // match Meck's intended look.
+    uint8_t dark   = 1;
+    uint8_t layout = 0;
+    Meck* mesh = meck_get_instance();
+    if (mesh) {
+        P4NodePrefs* prefs = mesh->getNodePrefs();
+        if (prefs) {
+            dark   = (prefs->kb_dark_mode == 0) ? 1 : 0;  // 0 = dark
+            layout = prefs->kb_layout;
+        }
+    }
+
+    // Pick layout. QWERTZ shares QWERTY's ctrl_map (same cell shape).
+    const char **map_lc = meck_kb_map_lc;
+    const char **map_uc = meck_kb_map_uc;
+    const lv_buttonmatrix_ctrl_t *ctrl = meck_kb_ctrl_lc;
+    switch (layout) {
+        case 1:  // AZERTY
+            map_lc = meck_kb_map_lc_azerty;
+            map_uc = meck_kb_map_uc_azerty;
+            ctrl   = meck_kb_ctrl_azerty;
+            break;
+        case 2:  // QWERTZ
+            map_lc = meck_kb_map_lc_qwertz;
+            map_uc = meck_kb_map_uc_qwertz;
+            // ctrl stays as meck_kb_ctrl_lc — same shape as QWERTY.
+            break;
+        default: // 0 = QWERTY, also the fallback for any future value
+            break;
+    }
+
+    // SPECIAL gets its own map + ctrl_map so CLICK_TRIG stays absent in
+    // every mode — see the long comment block above the maps for why.
+    lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_LOWER, map_lc, ctrl);
+    lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_UPPER, map_uc, ctrl);
     lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_SPECIAL,
                         meck_kb_map_special, meck_kb_ctrl_special);
+
+    // Dark theme: matches the rest of the Meck UI (the panel/ID-row colour
+    // is also lv_color_make(15, 15, 20), so the keyboard blends in).
+    // Light theme: clear any previously-applied dark overrides so LVGL's
+    // built-in theme takes over again. lv_obj_remove_local_style_prop
+    // drops the inline property; without these calls a runtime light→dark
+    // toggle would leave dark colours stuck on the keyboard.
+    if (dark) {
+        lv_obj_set_style_bg_color(kb, lv_color_make(15, 15, 20), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(kb, lv_color_make(45, 45, 55),
+                                  LV_PART_ITEMS | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(kb, lv_color_make(80, 80, 95),
+                                  LV_PART_ITEMS | LV_STATE_PRESSED);
+        lv_obj_set_style_text_color(kb, lv_color_white(), LV_PART_ITEMS);
+        lv_obj_set_style_border_color(kb, lv_color_make(60, 60, 75),
+                                      LV_PART_ITEMS);
+        lv_obj_set_style_border_width(kb, 1, LV_PART_ITEMS);
+    } else {
+        lv_obj_remove_local_style_prop(kb, LV_STYLE_BG_COLOR, LV_PART_MAIN);
+        lv_obj_remove_local_style_prop(kb, LV_STYLE_BG_COLOR,
+                                       LV_PART_ITEMS | LV_STATE_DEFAULT);
+        lv_obj_remove_local_style_prop(kb, LV_STYLE_BG_COLOR,
+                                       LV_PART_ITEMS | LV_STATE_PRESSED);
+        lv_obj_remove_local_style_prop(kb, LV_STYLE_TEXT_COLOR, LV_PART_ITEMS);
+        lv_obj_remove_local_style_prop(kb, LV_STYLE_BORDER_COLOR, LV_PART_ITEMS);
+        lv_obj_remove_local_style_prop(kb, LV_STYLE_BORDER_WIDTH, LV_PART_ITEMS);
+    }
+}
+
+// Re-apply theme + layout to every active Meck keyboard. Called from the
+// Settings toggle handlers so the change is immediately visible the next
+// time the user opens any of them, without needing to navigate to the
+// compose flow first.
+static void meck_kb_restyle_all() {
+    if (kb_compose)  meck_style_keyboard(kb_compose);
+    if (kb_settings) meck_style_keyboard(kb_settings);
+    if (kb_ch_add)   meck_style_keyboard(kb_ch_add);
 }
 
 // ============================================================================
@@ -732,6 +872,20 @@ static void settings_update_labels() {
                      (unsigned)prefs->screen_off_minutes);
         }
         lv_label_set_text(lbl_set_screen_off, buf);
+    }
+    if (lbl_set_kb_theme) {
+        lv_label_set_text(lbl_set_kb_theme,
+            prefs->kb_dark_mode == 0 ? "Dark" : "Light");
+    }
+    if (lbl_set_kb_layout) {
+        const char* name;
+        switch (prefs->kb_layout) {
+            case 0:  name = "QWERTY"; break;
+            case 1:  name = "AZERTY"; break;
+            case 2:  name = "QWERTZ"; break;
+            default: name = "?";       break;
+        }
+        lv_label_set_text(lbl_set_kb_layout, name);
     }
 }
 
@@ -1917,6 +2071,50 @@ static void on_settings_screen_off_tap(lv_event_t *e) {
            (unsigned)prefs->screen_off_minutes);
 }
 
+// Keyboard theme toggle: 0 = dark (default), 1 = light. Two states only —
+// a single tap flips between them. Live-applies via meck_kb_restyle_all()
+// so the next keyboard the user opens (or any already-built one) shows the
+// new theme without reboot.
+static void on_settings_kb_theme_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->kb_dark_mode = (prefs->kb_dark_mode == 0) ? 1 : 0;
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    if (lbl_set_kb_theme) {
+        lv_label_set_text(lbl_set_kb_theme,
+            prefs->kb_dark_mode == 0 ? "Dark" : "Light");
+    }
+    meck_kb_restyle_all();
+    printf("Settings: kb theme = %s\n",
+           prefs->kb_dark_mode == 0 ? "Dark" : "Light");
+}
+
+// Keyboard layout cycle: 0 = QWERTY, 1 = AZERTY, 2 = QWERTZ. The label
+// shows the new layout; the underlying maps swap via meck_kb_restyle_all.
+static void on_settings_kb_layout_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->kb_layout = (uint8_t)((prefs->kb_layout + 1) % 3);
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    const char* name = "?";
+    switch (prefs->kb_layout) {
+        case 0: name = "QWERTY"; break;
+        case 1: name = "AZERTY"; break;
+        case 2: name = "QWERTZ"; break;
+    }
+    if (lbl_set_kb_layout) lv_label_set_text(lbl_set_kb_layout, name);
+    meck_kb_restyle_all();
+    printf("Settings: kb layout = %s\n", name);
+}
+
 // Long-press anywhere on the GPS tile toggles the L76K module between
 // active and standby. Persisted via prefs->gps_enabled so the choice
 // survives reboot — useful for indoor / battery-saving scenarios.
@@ -2174,6 +2372,20 @@ static void create_settings_screen() {
     // touch can't accidentally wake the device.
     create_settings_row(scroll, "Auto Off (tap to cycle)",
         &lbl_set_screen_off, on_settings_screen_off_tap, y);
+    y += 65;
+
+    // Keyboard theme — Dark / Light toggle. Default is Dark; matches the
+    // rest of the Meck UI. Applies live via meck_kb_restyle_all() so the
+    // next keyboard opened shows the chosen theme without a reboot.
+    create_settings_row(scroll, "Keyboard Theme (tap to cycle)",
+        &lbl_set_kb_theme, on_settings_kb_theme_tap, y);
+    y += 65;
+
+    // Keyboard layout — QWERTY / AZERTY / QWERTZ. Tap cycles; AZERTY uses
+    // the French M-on-row-2 arrangement, QWERTZ is QWERTY with Y↔Z. The
+    // symbols / numbers page (1#) is shared across all three layouts.
+    create_settings_row(scroll, "Keyboard Layout (tap to cycle)",
+        &lbl_set_kb_layout, on_settings_kb_layout_tap, y);
     y += 65;
 
     lv_obj_t *id_row = lv_obj_create(scroll);

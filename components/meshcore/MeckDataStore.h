@@ -98,7 +98,12 @@ struct P4NodePrefs {
     // GPS off" from "fresh prefs, never set" — useful if we ever change
     // the default. Existing NVS blobs read as 0 → default-on, no surprise.
     uint8_t gps_enabled;
-    uint8_t reserved[2];          // future fields, zero-initialized
+    // Keyboard preferences. Both fields default to 0, which is what
+    // existing NVS blobs read as (previously this was reserved[2]). So
+    // existing installs come up with Meck's dark keyboard theme + QWERTY
+    // layout on first boot after the upgrade, no migration step needed.
+    uint8_t kb_dark_mode;         // 0 = dark (default), 1 = light
+    uint8_t kb_layout;            // 0 = QWERTY (default), 1 = AZERTY, 2 = QWERTZ
 
     // Initialize with defaults from variant.h
     void setDefaults() {
@@ -118,7 +123,8 @@ struct P4NodePrefs {
         screen_brightness = 200;
         screen_off_minutes = 5;
         gps_enabled = 1;        // on by default
-        memset(reserved, 0, sizeof(reserved));
+        kb_dark_mode = 0;       // dark theme (matches the rest of Meck's UI)
+        kb_layout = 0;          // QWERTY
     }
 };
 
