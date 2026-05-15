@@ -40,6 +40,12 @@ idf_component_register(
         "MeckAudio.cpp"
         "MeckAudioUI.cpp"
         "es8311.cpp" 
+        "meck_montserrat_14.c"
+        "meck_montserrat_16.c"
+        "meck_montserrat_18.c"
+        "meck_montserrat_22.c"
+        "meck_montserrat_24.c"
+        "meck_montserrat_28.c"
     INCLUDE_DIRS
         "."
         "meshcore_src"
