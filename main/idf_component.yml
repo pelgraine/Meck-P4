@@ -27,8 +27,8 @@ dependencies:
   # transitively for MP3 decoding. Pinned to ^1.0.0 (latest v1.0.x);
   # v1.1.x switched to a mixer/streams API that's overkill for a
   # single-stream player.
-  chmorgan/esp-audio-player:
-    version: "~1.0.0"
+#   chmorgan/esp-audio-player:
+#     version: "~1.0.0"
 
   # ES8311 codec register driver — used by components/meshcore/meck_es8311.c
   # to configure the codec at runtime.
