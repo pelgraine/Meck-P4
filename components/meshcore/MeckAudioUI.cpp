@@ -41,7 +41,7 @@ static const char* BOOKS_PREFIX = "/sdcard/audio/audiobooks";
 static const size_t PATH_MAX_LEN = 256;
 static const int    ROW_H        = 90;   /* px, per file/folder row */
 static const int    ROW_PAD_X    = 12;
-static const int    HEADER_H     = 60;
+static const int    HEADER_H     = 90;
 static const int    BREADCRUMB_H = 50;
 
 enum LibraryMode {

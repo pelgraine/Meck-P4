@@ -433,7 +433,7 @@ static void apply_tile_colors() {
 
 static lv_obj_t* create_back_button(lv_obj_t *parent) {
     lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_set_size(btn, 80, 40);
+    lv_obj_set_size(btn, 100, 70);
     lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 10, 10);
     lv_obj_set_style_bg_color(btn, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_radius(btn, 8, 0);
@@ -441,7 +441,7 @@ static lv_obj_t* create_back_button(lv_obj_t *parent) {
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl, &meck_montserrat_16, 0);
+    lv_obj_set_style_text_font(lbl, &meck_montserrat_18, 0);
     lv_obj_center(lbl);
 
     lv_obj_add_event_cb(btn, goto_home, LV_EVENT_CLICKED, NULL);
@@ -1672,14 +1672,14 @@ static void on_send_clicked(lv_event_t *e) {
 // Recompute obj_msg_scroll's height from the current ta_compose height
 // and keyboard visibility. Called whenever either of those changes so the
 // message list always shrinks/grows to fill the available vertical space.
-// Constants: 60 px top y of obj_msg_scroll + 10 px bottom margin around
-// ta_compose + 10 px gap between scroll and textarea = 80 px reserved
-// outside of the textarea itself.
+// Constants: 90 px top y of obj_msg_scroll (matches the taller back-button
+// header) + 10 px bottom margin around ta_compose + 10 px gap between
+// scroll and textarea = 110 px reserved outside of the textarea itself.
 static void meck_relayout_compose(void) {
     if (!obj_msg_scroll || !ta_compose) return;
     int ta_h = lv_obj_get_height(ta_compose);
     bool kb_shown = kb_compose && !lv_obj_has_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
-    int reserved = 80 + ta_h;
+    int reserved = 110 + ta_h;
     if (kb_shown) reserved += MECK_KB_HEIGHT;
     lv_obj_set_height(obj_msg_scroll, SCREEN_HEIGHT - reserved);
 }
@@ -2551,14 +2551,14 @@ static void create_settings_contacts_screen() {
 
     // Custom back button → main Settings (not home).
     lv_obj_t *btn_back = lv_button_create(scr_settings_contacts);
-    lv_obj_set_size(btn_back, 80, 40);
+    lv_obj_set_size(btn_back, 100, 70);
     lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
     lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_radius(btn_back, 8, 0);
     lv_obj_t *bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &meck_montserrat_16, 0);
+    lv_obj_set_style_text_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, goto_settings_from_contacts,
                         LV_EVENT_CLICKED, NULL);
@@ -2567,11 +2567,11 @@ static void create_settings_contacts_screen() {
     lv_label_set_text(title, "Contacts");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
     lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *scroll = lv_obj_create(scr_settings_contacts);
-    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 60);
-    lv_obj_set_pos(scroll, 0, 60);
+    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
+    lv_obj_set_pos(scroll, 0, 90);
     lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
     lv_obj_set_style_pad_all(scroll, 10, 0);
@@ -2622,11 +2622,11 @@ static void create_settings_screen() {
     lv_label_set_text(title, "Settings");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
     lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *scroll = lv_obj_create(scr_settings);
-    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 60);
-    lv_obj_set_pos(scroll, 0, 60);
+    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
+    lv_obj_set_pos(scroll, 0, 90);
     lv_obj_set_style_bg_opa(scroll, 0, 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
     lv_obj_set_style_pad_all(scroll, 0, 0);
@@ -2821,14 +2821,14 @@ static void create_radio_picker_screen() {
     lv_obj_set_style_bg_color(scr_radio_picker, lv_color_black(), 0);
 
     lv_obj_t *btn_back = lv_button_create(scr_radio_picker);
-    lv_obj_set_size(btn_back, 80, 40);
+    lv_obj_set_size(btn_back, 100, 70);
     lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
     lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_radius(btn_back, 8, 0);
     lv_obj_t *bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &meck_montserrat_16, 0);
+    lv_obj_set_style_text_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, goto_settings, LV_EVENT_CLICKED, NULL);
 
@@ -2836,11 +2836,11 @@ static void create_radio_picker_screen() {
     lv_label_set_text(title, "Radio Preset");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
     lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *scroll = lv_obj_create(scr_radio_picker);
-    lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 70);
-    lv_obj_set_pos(scroll, 10, 60);
+    lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 100);
+    lv_obj_set_pos(scroll, 10, 90);
     lv_obj_set_style_bg_color(scroll, lv_color_make(10, 10, 15), 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
     lv_obj_set_style_radius(scroll, 8, 0);
@@ -2958,11 +2958,11 @@ static void create_channel_picker_screen() {
     lv_label_set_text(title, "Channels");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
     lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     obj_ch_picker_scroll = lv_obj_create(scr_channel_picker);
-    lv_obj_set_size(obj_ch_picker_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 60);
-    lv_obj_set_pos(obj_ch_picker_scroll, 20, 60);
+    lv_obj_set_size(obj_ch_picker_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
+    lv_obj_set_pos(obj_ch_picker_scroll, 20, 90);
     lv_obj_set_style_bg_opa(obj_ch_picker_scroll, 0, 0);
     lv_obj_set_style_border_width(obj_ch_picker_scroll, 0, 0);
     lv_obj_set_style_pad_all(obj_ch_picker_scroll, 0, 0);
@@ -3022,14 +3022,14 @@ static void create_messages_screen() {
 
     // Back -> channel picker (NOT home)
     lv_obj_t *btn_back = lv_button_create(scr_messages);
-    lv_obj_set_size(btn_back, 80, 40);
+    lv_obj_set_size(btn_back, 100, 70);
     lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
     lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_radius(btn_back, 8, 0);
     lv_obj_t *bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &meck_montserrat_16, 0);
+    lv_obj_set_style_text_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, goto_channel_picker, LV_EVENT_CLICKED, NULL);
 
@@ -3037,11 +3037,11 @@ static void create_messages_screen() {
     lv_label_set_text(lbl_msg_channel_name, "#public");
     lv_obj_set_style_text_color(lbl_msg_channel_name, lv_palette_main(LV_PALETTE_CYAN), 0);
     lv_obj_set_style_text_font(lbl_msg_channel_name, &meck_montserrat_22, 0);
-    lv_obj_align(lbl_msg_channel_name, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(lbl_msg_channel_name, LV_ALIGN_TOP_LEFT, 120, 30);
 
     obj_msg_scroll = lv_obj_create(scr_messages);
-    lv_obj_set_size(obj_msg_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 130);
-    lv_obj_set_pos(obj_msg_scroll, 10, 60);
+    lv_obj_set_size(obj_msg_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 160);
+    lv_obj_set_pos(obj_msg_scroll, 10, 90);
     lv_obj_set_style_bg_color(obj_msg_scroll, lv_color_make(10, 10, 15), 0);
     lv_obj_set_style_border_width(obj_msg_scroll, 0, 0);
     lv_obj_set_style_radius(obj_msg_scroll, 8, 0);
@@ -3162,7 +3162,7 @@ static void create_contacts_screen() {
     lv_label_set_text(title, "Contacts");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
     lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     // ---- Filter chip bar ----
     // Horizontal flex row of chip buttons. The "active" chip gets a bright
@@ -3172,7 +3172,7 @@ static void create_contacts_screen() {
     // so the active highlight stays in sync with the underlying state.
     obj_contacts_filter_bar = lv_obj_create(scr_contacts);
     lv_obj_set_size(obj_contacts_filter_bar, SCREEN_WIDTH - 20, 50);
-    lv_obj_set_pos(obj_contacts_filter_bar, 10, 60);
+    lv_obj_set_pos(obj_contacts_filter_bar, 10, 90);
     lv_obj_set_style_bg_color(obj_contacts_filter_bar, lv_color_black(), 0);
     lv_obj_set_style_border_width(obj_contacts_filter_bar, 0, 0);
     lv_obj_set_style_pad_all(obj_contacts_filter_bar, 0, 0);
@@ -3184,8 +3184,8 @@ static void create_contacts_screen() {
     lv_obj_set_scroll_dir(obj_contacts_filter_bar, LV_DIR_HOR);
 
     obj_contacts_scroll = lv_obj_create(scr_contacts);
-    lv_obj_set_size(obj_contacts_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 130);
-    lv_obj_set_pos(obj_contacts_scroll, 10, 120);
+    lv_obj_set_size(obj_contacts_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 160);
+    lv_obj_set_pos(obj_contacts_scroll, 10, 150);
     lv_obj_set_style_bg_color(obj_contacts_scroll, lv_color_make(10, 10, 15), 0);
     lv_obj_set_style_border_width(obj_contacts_scroll, 0, 0);
     lv_obj_set_style_radius(obj_contacts_scroll, 8, 0);
@@ -3389,14 +3389,14 @@ static void create_contact_detail_screen() {
 
     // Back -> contacts list (NOT home)
     lv_obj_t *btn_back = lv_button_create(scr_contact_detail);
-    lv_obj_set_size(btn_back, 80, 40);
+    lv_obj_set_size(btn_back, 100, 70);
     lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
     lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_radius(btn_back, 8, 0);
     lv_obj_t *bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &meck_montserrat_16, 0);
+    lv_obj_set_style_text_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, goto_contacts_from_detail, LV_EVENT_CLICKED, NULL);
 
@@ -3404,10 +3404,10 @@ static void create_contact_detail_screen() {
     lv_label_set_text(title, "Contact");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
     lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *btn_fav = lv_button_create(scr_contact_detail);
-    lv_obj_set_size(btn_fav, 100, 40);
+    lv_obj_set_size(btn_fav, 100, 70);
     lv_obj_align(btn_fav, LV_ALIGN_TOP_RIGHT, -10, 10);
     lv_obj_set_style_bg_color(btn_fav, lv_palette_main(LV_PALETTE_YELLOW), 0);
     lv_obj_set_style_radius(btn_fav, 8, 0);
@@ -3422,7 +3422,7 @@ static void create_contact_detail_screen() {
     // contact. Useful for cleaning up duplicates or contacts whose owners
     // have rotated keys.
     lv_obj_t *btn_del = lv_button_create(scr_contact_detail);
-    lv_obj_set_size(btn_del, 100, 40);
+    lv_obj_set_size(btn_del, 100, 70);
     lv_obj_align(btn_del, LV_ALIGN_TOP_RIGHT, -120, 10);
     lv_obj_set_style_bg_color(btn_del, lv_palette_main(LV_PALETTE_RED), 0);
     lv_obj_set_style_radius(btn_del, 8, 0);
@@ -3434,8 +3434,8 @@ static void create_contact_detail_screen() {
     lv_obj_add_event_cb(btn_del, on_contact_delete, LV_EVENT_LONG_PRESSED, NULL);
 
     lv_obj_t *scroll = lv_obj_create(scr_contact_detail);
-    lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 70);
-    lv_obj_set_pos(scroll, 10, 60);
+    lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 100);
+    lv_obj_set_pos(scroll, 10, 90);
     lv_obj_set_style_bg_color(scroll, lv_color_make(10, 10, 15), 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
     lv_obj_set_style_radius(scroll, 8, 0);
