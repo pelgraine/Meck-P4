@@ -5610,11 +5610,25 @@ extern "C" void app_main(void)
     }
 
     // 设置的电池容量会在没有电池插入的时候自动还原为默认值
-    // The T-Display P4 ships with a 2000 mAh cell. LilyGo's example
-    // and wiki both hardcode 1000 mAh, which scales every gauge
-    // reading (current, SOC, time-to-empty) by 0.5x. Setting the real
-    // capacity makes those readings match reality.
-    BQ27220->set_design_capacity(2000);
+    // Battery design capacity. Per LilyGo wiki FAQ 9.9 ("About
+    // inaccurate battery level display and inability to charge when
+    // powered off"), the T-Display P4 ships with a 1000 mAh cell and
+    // the wiki explicitly instructs setting design_capacity to 1000
+    // here, then running one full charge → natural discharge to
+    // power-off → recharge cycle so the BQ27220 learns its real FCC.
+    //
+    // A previous revision of this comment claimed the cell was 2000
+    // mAh and that LilyGo's 1000 was a conservative placeholder —
+    // that was wrong. With design_capacity set above the true cell
+    // capacity, the gauge's coulomb counter over-references and the
+    // displayed SoC % under-reads (device shows ~50% when the cell is
+    // actually flat). Direct readings (voltage, current) are
+    // unaffected, only derived values (SoC, FCC, time-to-empty).
+    //
+    // Per the leading Chinese comment: this value reverts to the
+    // factory default if the battery is ever disconnected, so it has
+    // to be reapplied on every boot.
+    BQ27220->set_design_capacity(1000);
     BQ27220->set_temperature_mode(Cpp_Bus_Driver::Bq27220xxxx::Temperature_Mode::EXTERNAL_NTC);
     BQ27220->set_sleep_current_threshold(50);
 

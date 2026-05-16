@@ -295,12 +295,59 @@ static_assert(sizeof(P4MsgFileRecord) == 320, "P4MsgFileRecord size must stay 32
 struct P4RecentHeard {
     char name[32];
     uint8_t pub_key_prefix[4];
+    // Full 32-byte Ed25519 public key. Required to build a ContactInfo
+    // capable of crypto (the shared-secret cache, encrypted DMs, etc.).
+    // pub_key_prefix is kept around for backward compatibility with
+    // existing UI sites that only render a 2-byte short ID; new code
+    // (Discover screen, contact-add-from-heard) reads pub_key instead.
+    uint8_t pub_key[32];
     float rssi;
     float snr;
     uint8_t path_len;
     uint32_t timestamp;
     uint8_t adv_type;
     bool valid;
+};
+
+// ---- Active Discovery ----
+//
+// Discovery is an active scan, not a passive list-of-cached-adverts. The
+// model (per MeshCore issue #1027 and the "enhanced zero-hop neighbour
+// discovery" roadmap item, marked done upstream):
+//
+//   1. We transmit a zero-hop self-advert.
+//   2. Repeaters / chat nodes within radio range that have zero-hop
+//      response enabled (set advert.interval > 0 on a repeater) reply
+//      with their own zero-hop advert.
+//   3. Any other adverts that happen to land in the scan window are
+//      also captured.
+//   4. After the window closes (P4_DISCOVERY_WINDOW_MS), the list
+//      freezes until the next manual scan.
+//
+// Stored separately from _recent[] so a scan doesn't perturb the
+// general heard-list, and so cached entries (carried over from
+// _recent[] at scan start) can be visually distinguished from
+// freshly-heard zero-hop responses:
+//   snr_x4 != 0  →  heard during this scan, snr reading is real
+//   snr_x4 == 0  →  pre-seeded from _recent[] cache, show hop count
+//
+// The DiscoveredNode shape is informed by the T-Deck Pro firmware's
+// DiscoveryScreen.h (uploaded reference) but flattened — our P4 LVGL
+// renderer reads fields directly rather than going via a ContactInfo
+// nested struct.
+
+#define P4_DISCOVERED_SIZE       32
+#define P4_DISCOVERY_WINDOW_MS   30000   // 30s scan window
+
+struct DiscoveredNode {
+    bool valid;
+    char name[32];
+    uint8_t pub_key[32];
+    uint8_t adv_type;        // 1=chat, 2=repeater, 3=room, 4=sensor
+    int8_t  snr_x4;          // SNR × 4. 0 = pre-seeded cache, not heard live.
+    uint8_t path_len;        // For cached/flood entries; 0 for zero-hop.
+    uint32_t heard_ms;       // millis() at most-recent capture in this scan
+    bool already_in_contacts;
 };
 
 // ============================================================
@@ -339,6 +386,13 @@ public:
         _recent_newest = -1;
         _recent_dirty = false;
         memset(_recent, 0, sizeof(_recent));
+
+        _discovered_count = 0;
+        _discovery_active = false;
+        _discovery_start_ms = 0;
+        _discovery_tag = 0;
+        _discovery_dirty = false;
+        memset(_discovered, 0, sizeof(_discovered));
 
         _advert_enabled = false;
         _next_advert_ms = 0;
@@ -434,6 +488,21 @@ public:
                     printf("Meck: sent advert as '%s'\n", _prefs->node_name);
                 }
                 _next_advert_ms = now + _advert_interval_ms;
+            }
+        }
+
+        // Active discovery auto-stop. We don't actually need to do
+        // anything on timeout — isDiscoveryActive() is computed from
+        // (now - _discovery_start_ms) so it'll start returning false
+        // automatically. We just flip the flag once and mark dirty so
+        // the UI redraws its header ("Scanning..." → "Scan done").
+        if (_discovery_active) {
+            unsigned long now = millis();
+            if (now - _discovery_start_ms >= P4_DISCOVERY_WINDOW_MS) {
+                _discovery_active = false;
+                _discovery_dirty = true;
+                printf("Meck: discovery window closed — %d nodes found\n",
+                       _discovered_count);
             }
         }
     }
@@ -896,6 +965,264 @@ public:
         return out;
     }
 
+    // =====================================================================
+    // Discover support (repeaters-only, mirroring Meck T-Deck Pro behaviour)
+    // ---------------------------------------------------------------------
+    // The Discover screen surfaces nearby repeaters from the same _recent[]
+    // ring the Last Heard list reads, filtered to ADV_TYPE_REPEATER. No
+    // separate "active scan" buffer is needed — adverts are received
+    // passively and the ring already de-dupes by pubkey on each
+    // onAdvertRecv. The screen's Rescan button calls sendDiscoveryProbe()
+    // below, which floods a self-advert; repeaters that hear it will
+    // typically not re-advert in response (MeshCore repeaters advert on
+    // their own schedule), but it announces our presence so subsequent
+    // peer-initiated traffic includes us as a known node, and it gives
+    // the user a clear "I did something" affordance.
+    // =====================================================================
+
+    // Returns only entries whose advert type is REPEATER (ADV_TYPE_REPEATER
+    // == 2). Sort order matches getRecentHeard: newest first via the
+    // _recent_newest cursor walk.
+    int getRecentRepeaters(P4RecentHeard* dest, int max_count) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        int out = 0;
+        for (int i = 0; i < P4_RECENT_HEARD_SIZE && out < max_count; i++) {
+            int idx = (_recent_newest - i + P4_RECENT_HEARD_SIZE) % P4_RECENT_HEARD_SIZE;
+            if (!_recent[idx].valid) continue;
+            if (_recent[idx].adv_type != 2 /* ADV_TYPE_REPEATER */) continue;
+            dest[out++] = _recent[idx];
+        }
+        xSemaphoreGive(_mutex);
+        return out;
+    }
+
+    // O(N) scan of the contact table looking for a matching pub_key.
+    // Used by the Discover screen to draw "[+]" against entries already
+    // in the local contact list. Returns true on first match.
+    //
+    // Compares the full 32-byte key, not the 4-byte prefix — the prefix
+    // can collide between unrelated nodes and would produce false "[+]"
+    // markers on the Discover screen.
+    bool hasContactWithPubKey(const uint8_t* pub_key) {
+        int n = getNumContacts();
+        for (int i = 0; i < n; i++) {
+            ContactInfo ci;
+            if (!getContactByIdx(i, ci)) continue;
+            if (memcmp(ci.id.pub_key, pub_key, PUB_KEY_SIZE) == 0) return true;
+        }
+        return false;
+    }
+
+    // Build a ContactInfo from a previously-heard advert snapshot and
+    // append it to the contact table. Returns true on success.
+    //
+    // Notes:
+    //  - shared_secret is left uncomputed (shared_secret_valid=false).
+    //    The first encrypted exchange will compute and cache it on
+    //    demand via the standard BaseChatMesh path.
+    //  - out_path_len is OUT_PATH_UNKNOWN so the first DM to the contact
+    //    will fall back to flood routing until a path return arrives.
+    //  - flags = 0 (no favourite). The user can toggle that later from
+    //    the contact detail screen.
+    //  - last_advert_timestamp is taken from the snapshot so the contact
+    //    appears at the appropriate position in "recently heard" sorts.
+    //  - addContact() is the appropriate API: it appends if a free slot
+    //    exists. Mirrors the same call path loadContactsFromStore uses.
+    bool addContactFromRecent(const P4RecentHeard& r) {
+        if (hasContactWithPubKey(r.pub_key)) return true;  // already in
+        ContactInfo ci;
+        memset(&ci, 0, sizeof(ci));
+        memcpy(ci.id.pub_key, r.pub_key, PUB_KEY_SIZE);
+        strncpy(ci.name, r.name, sizeof(ci.name) - 1);
+        ci.name[sizeof(ci.name) - 1] = '\0';
+        ci.type = r.adv_type;
+        ci.flags = 0;
+        ci.out_path_len = OUT_PATH_UNKNOWN;
+        ci.shared_secret_valid = false;
+        ci.gps_lat = 0;
+        ci.gps_lon = 0;
+        ci.lastmod = r.timestamp;
+        ci.last_advert_timestamp = r.timestamp;
+        ci.sync_since = 0;
+        if (!addContact(ci)) {
+            printf("Meck: addContactFromRecent: addContact failed "
+                   "(table full?) for '%s'\n", r.name);
+            return false;
+        }
+        scheduleLazyContactSave();
+        printf("Meck: added contact from heard advert '%s' [%02X%02X%02X%02X]\n",
+               ci.name, ci.id.pub_key[0], ci.id.pub_key[1],
+               ci.id.pub_key[2], ci.id.pub_key[3]);
+        return true;
+    }
+
+    // Same as addContactFromRecent but takes a DiscoveredNode (the
+    // active-scan equivalent of P4RecentHeard). DiscoveredNode doesn't
+    // carry a timestamp — we use the current RTC time for lastmod and
+    // last_advert_timestamp since we *just* heard the advert.
+    bool addContactFromDiscovered(const DiscoveredNode& d) {
+        if (hasContactWithPubKey(d.pub_key)) return true;
+        ContactInfo ci;
+        memset(&ci, 0, sizeof(ci));
+        memcpy(ci.id.pub_key, d.pub_key, PUB_KEY_SIZE);
+        strncpy(ci.name, d.name, sizeof(ci.name) - 1);
+        ci.name[sizeof(ci.name) - 1] = '\0';
+        ci.type = d.adv_type;
+        ci.flags = 0;
+        ci.out_path_len = OUT_PATH_UNKNOWN;
+        ci.shared_secret_valid = false;
+        ci.gps_lat = 0;
+        ci.gps_lon = 0;
+        uint32_t now_ts = _rtc_ref.getCurrentTime();
+        ci.lastmod = now_ts;
+        ci.last_advert_timestamp = now_ts;
+        ci.sync_since = 0;
+        if (!addContact(ci)) {
+            printf("Meck: addContactFromDiscovered: addContact failed "
+                   "(table full?) for '%s'\n", d.name);
+            return false;
+        }
+        scheduleLazyContactSave();
+        printf("Meck: added contact from discovery '%s' [%02X%02X%02X%02X]\n",
+               ci.name, ci.id.pub_key[0], ci.id.pub_key[1],
+               ci.id.pub_key[2], ci.id.pub_key[3]);
+        return true;
+    }
+
+    // ---- Active Discovery API ----
+    //
+    // startDiscovery() is the active scan. It:
+    //   1. Clears the _discovered[] ring.
+    //   2. Pre-seeds it with our cached _recent[] entries (marked snr_x4=0
+    //      so the UI shows them as hop-count cached rather than fresh).
+    //   3. Transmits a zero-hop self-advert (path_len=0, ROUTE_TYPE_DIRECT)
+    //      via sendDirect(adv, nullptr, 0) — this asks for replies from any
+    //      neighbour with zero-hop response enabled.
+    //   4. Sets _discovery_active for P4_DISCOVERY_WINDOW_MS; during that
+    //      window onAdvertRecv writes incoming adverts to _discovered[].
+    //
+    // Per the MeshCore wiki "set advert.interval {minutes}" CLI command,
+    // a repeater only sends a zero-hop response advert if its operator has
+    // set that interval > 0. Many repeaters default to 0 (Switzerland docs
+    // call out that explicitly). So a "no response" outcome is normal and
+    // doesn't necessarily mean nothing's there — operators have to opt in.
+    void startDiscovery() {
+        if (!_prefs) return;
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        memset(_discovered, 0, sizeof(_discovered));
+        _discovered_count = 0;
+
+        // Pre-seed from cached _recent[] — anything we've heard recently
+        // that hasn't aged out is a reasonable starting list while we
+        // wait for fresh responses. snr_x4=0 marks them as cache, not
+        // live captures, so the UI shows hop count rather than dB.
+        // Filtered to ADV_TYPE_REPEATER (2) since Discover is a
+        // repeater-finder — chat nodes, room servers, and sensors are
+        // captured by _recent[] for other UI surfaces but excluded here.
+        for (int i = 0; i < P4_RECENT_HEARD_SIZE && _discovered_count < P4_DISCOVERED_SIZE; i++) {
+            int idx = (_recent_newest - i + P4_RECENT_HEARD_SIZE) % P4_RECENT_HEARD_SIZE;
+            if (!_recent[idx].valid) continue;
+            if (_recent[idx].adv_type != 2 /* ADV_TYPE_REPEATER */) continue;
+            DiscoveredNode& d = _discovered[_discovered_count++];
+            d.valid = true;
+            strncpy(d.name, _recent[idx].name, sizeof(d.name) - 1);
+            d.name[sizeof(d.name) - 1] = '\0';
+            memcpy(d.pub_key, _recent[idx].pub_key, 32);
+            d.adv_type  = _recent[idx].adv_type;
+            d.snr_x4    = 0;  // cached, not live
+            d.path_len  = _recent[idx].path_len;
+            d.heard_ms  = 0;
+            d.already_in_contacts = hasContactWithPubKey(_recent[idx].pub_key);
+        }
+
+        _discovery_active = true;
+        _discovery_start_ms = millis();
+        _discovery_dirty = true;
+        xSemaphoreGive(_mutex);
+
+        // PAYLOAD_TYPE_CONTROL (0x0B) DISCOVER_REQ. Wire format
+        // (matches upstream Meck MyMesh.cpp:3539-3565 — the published
+        // DeepWiki bit numbering is misleading, the upstream source
+        // is canonical):
+        //
+        //   [0]: flags = 0x80
+        //         upper nibble 0x8 = DISCOVER_REQ subtype, lower
+        //         nibble = prefix_only flag (0 = full 32-byte pubkey
+        //         in response, 1 = 8-byte prefix only).
+        //   [1]: type_filter = (1 << ADV_TYPE_REPEATER) | (1 << ADV_TYPE_ROOM)
+        //         = (1 << 2) | (1 << 3) = 0x0C.
+        //         CRITICAL: the bit position is the literal ADV_TYPE_*
+        //         value (chat=1 → bit 1, repeater=2 → bit 2, room=3
+        //         → bit 3, sensor=4 → bit 4), NOT 0-indexed. This is
+        //         the same convention as our shouldAutoAddContactType
+        //         bits and as upstream's AUTO_ADD_REPEATER (1 << 2).
+        //         Setting type_filter=0x02 (bit 1) means "I want chat
+        //         nodes only", and a repeater receiving such a REQ
+        //         silently drops it.
+        //   [2..5]: tag (uint32 LE) — random per-scan correlation ID.
+        //           Upstream uses RNG range [1, 0xFFFFFFFF) so we
+        //           never emit tag=0.
+        //   [6..9]: since (uint32 LE) — zero. Marked optional in the
+        //           docs but upstream firmware sends it; older
+        //           repeaters may require the fixed 10-byte length.
+        _discovery_tag = (uint32_t)getRNG()->nextInt(1, 0x7FFFFFFF);
+        uint8_t ctl_payload[10];
+        ctl_payload[0] = 0x80;  // DISCOVER_REQ, prefix_only=0
+        ctl_payload[1] = (1u << 2) | (1u << 3);  // repeaters + rooms
+        memcpy(&ctl_payload[2], &_discovery_tag, 4);
+        uint32_t since = 0;
+        memcpy(&ctl_payload[6], &since, 4);
+
+        mesh::Packet* pkt = createControlData(ctl_payload, sizeof(ctl_payload));
+        if (pkt) {
+            sendZeroHop(pkt);
+            printf("Meck: discovery started — DISCOVER_REQ tag=%08X, "
+                   "type_filter=0x%02X (repeaters+rooms), "
+                   "%d cached pre-seeded, %d ms window\n",
+                   (unsigned)_discovery_tag, (unsigned)ctl_payload[1],
+                   _discovered_count, (int)P4_DISCOVERY_WINDOW_MS);
+        } else {
+            printf("Meck: discovery — createControlData failed, pool full?\n");
+        }
+    }
+
+    void stopDiscovery() {
+        if (_discovery_active) {
+            _discovery_active = false;
+            _discovery_dirty = true;
+        }
+    }
+
+    bool isDiscoveryActive() const {
+        if (!_discovery_active) return false;
+        // Belt-and-braces — loop() flips this off when the window
+        // expires, but UI consumers reading without waiting for loop()
+        // tick still get a correct answer.
+        return (millis() - _discovery_start_ms) < P4_DISCOVERY_WINDOW_MS;
+    }
+
+    int getDiscoveredCount() const { return _discovered_count; }
+
+    const DiscoveredNode& getDiscovered(int i) const {
+        // Caller must check getDiscoveredCount() first. Returning by ref
+        // to match the T-Deck pattern in DiscoveryScreen.h.
+        return _discovered[i];
+    }
+
+    // Returns true if the UI should redraw (any change since last poll).
+    // Resets the dirty flag.
+    bool consumeDiscoveryDirty() {
+        if (!_discovery_dirty) return false;
+        _discovery_dirty = false;
+        return true;
+    }
+
+    // Backwards-compat shim. Older call sites referenced sendDiscoveryProbe
+    // (a flood advert with no follow-up). Forward to the new active scan
+    // so existing UI buttons keep working — same semantic intent, better
+    // implementation.
+    void sendDiscoveryProbe() { startDiscovery(); }
+
     // Write back the on-disk file offset for a freshly-appended message
     // record. Called by the save-queue drain after appendChannelMessageRecord
     // returns the position where it placed the bytes. The expected_timestamp
@@ -1176,6 +1503,7 @@ protected:
         strncpy(r.name, name, sizeof(r.name) - 1);
         r.name[sizeof(r.name) - 1] = '\0';
         memcpy(r.pub_key_prefix, id.pub_key, 4);
+        memcpy(r.pub_key, id.pub_key, sizeof(r.pub_key));
         r.rssi = rssi;
         r.snr = snr;
         r.path_len = path_len;
@@ -1184,6 +1512,82 @@ protected:
         r.valid = true;
         if (_recent_count < P4_RECENT_HEARD_SIZE) _recent_count++;
         _recent_dirty = true;
+
+        // Secondary capture path: while a discovery scan is open, any
+        // flood advert from a repeater that happens to land in the
+        // window is also tracked. The PRIMARY discovery signal is
+        // DISCOVER_RESP control packets (see onControlDataRecv below);
+        // this branch is a fallback for older repeater firmware that
+        // doesn't yet implement zero-hop discovery responses but does
+        // periodically flood-advert. Filtered to ADV_TYPE_REPEATER (2)
+        // — Discover is for finding repeaters specifically. Other
+        // types still hit _recent[] above; they just don't appear in
+        // the Discover screen.
+        //
+        // snr_x4 is signed int8; clamp to that range. We dedup by
+        // full pub_key so a node that re-adverts mid-window updates
+        // in place rather than appearing twice — and so DISCOVER_RESP
+        // and advert capture for the same node converge on one entry
+        // (the more recent of the two wins on the SNR/name fields).
+        if (_discovery_active &&
+            (adv_type == 2 /* ADV_TYPE_REPEATER */ ||
+             adv_type == 3 /* ADV_TYPE_ROOM */)) {
+            int snr_clamped = (int)(snr * 4.0f);
+            if (snr_clamped > 127) snr_clamped = 127;
+            if (snr_clamped < -128) snr_clamped = -128;
+            // Sentinel: 0 means "cached, no live read". If a live read
+            // happens to round to 0, nudge by 1 so the UI still treats
+            // it as live data.
+            int8_t snr_x4 = (snr_clamped == 0) ? 1 : (int8_t)snr_clamped;
+
+            int slot = -1;
+            for (int i = 0; i < _discovered_count; i++) {
+                if (_discovered[i].valid &&
+                    memcmp(_discovered[i].pub_key, id.pub_key, 32) == 0) {
+                    slot = i;
+                    break;
+                }
+            }
+            if (slot < 0) {
+                if (_discovered_count < P4_DISCOVERED_SIZE) {
+                    slot = _discovered_count++;
+                } else {
+                    // Full — evict. Prefer a cached entry (heard_ms == 0)
+                    // if any exist, since those are stale; otherwise evict
+                    // the oldest live entry. P4_DISCOVERED_SIZE is 32 so
+                    // we should rarely hit this in practice.
+                    slot = 0;
+                    for (int i = 0; i < P4_DISCOVERED_SIZE; i++) {
+                        if (_discovered[i].heard_ms == 0) { slot = i; break; }
+                    }
+                    if (_discovered[slot].heard_ms != 0) {
+                        // No cached entries to evict — find the oldest live one.
+                        unsigned long oldest = _discovered[0].heard_ms;
+                        for (int i = 1; i < P4_DISCOVERED_SIZE; i++) {
+                            if (_discovered[i].heard_ms < oldest) {
+                                slot = i;
+                                oldest = _discovered[i].heard_ms;
+                            }
+                        }
+                    }
+                }
+            }
+
+            DiscoveredNode& d = _discovered[slot];
+            d.valid = true;
+            strncpy(d.name, name, sizeof(d.name) - 1);
+            d.name[sizeof(d.name) - 1] = '\0';
+            memcpy(d.pub_key, id.pub_key, 32);
+            d.adv_type  = adv_type;
+            d.snr_x4    = snr_x4;
+            // path_len here is 0xFF for non-flood (direct/zero-hop) in our
+            // capture above; normalise that to 0 so the UI can read it as
+            // "zero hops" cleanly.
+            d.path_len  = (path_len == 0xFF) ? 0 : path_len;
+            d.heard_ms  = millis();
+            d.already_in_contacts = hasContactWithPubKey(id.pub_key);
+            _discovery_dirty = true;
+        }
         xSemaphoreGive(_mutex);
     }
 
@@ -1203,6 +1607,166 @@ protected:
                             uint8_t* out_path, uint8_t out_path_len,
                             uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override {
         return true;
+    }
+
+    // PAYLOAD_TYPE_CONTROL (0x0B) handler. The base Mesh class delivers
+    // control packets here for application-level processing. We use it
+    // to catch DISCOVER_RESP replies to the DISCOVER_REQ we sent at
+    // startDiscovery(). Wire format per docs/payloads.md:
+    //
+    //   DISCOVER_RESP:
+    //     [0]: flags  — upper nibble 0x9 (subtype), lower nibble = node_type
+    //                   (1=chat, 2=repeater, 3=room, 4=sensor)
+    //     [1]: snr    — SNR × 4, signed byte (responder's measured SNR
+    //                   when receiving our DISCOVER_REQ)
+    //     [2..5]: tag (uint32 LE) — echoes our request tag
+    //     [6..]: pubkey — 8 bytes if our REQ had prefix_only=1, else 32
+    //
+    // We sent prefix_only=0, so we expect 32-byte pubkeys. We also
+    // filtered our REQ to type_filter=0x02 (repeaters only), so any
+    // well-behaved responder will be a repeater — we still sanity-check
+    // node_type==2 in case of a stale REQ ID collision.
+    //
+    // Note: name isn't carried in DISCOVER_RESP — the protocol only
+    // returns identity (pubkey) and signal info. If the responder is
+    // already a contact we use that name; otherwise we display the
+    // pubkey prefix and the user can tap Add to fetch a full identity
+    // later via the normal advert path.
+    void onControlDataRecv(mesh::Packet* pkt) override {
+        BaseChatMesh::onControlDataRecv(pkt);
+
+        if (!pkt) return;
+
+        // UNCONDITIONAL DIAGNOSTIC: log every control packet that arrives,
+        // before any subtype/tag/active filtering, so we can verify:
+        //   1. that the radio is hearing CONTROL packets at all on the
+        //      currently-configured channel
+        //   2. that our onControlDataRecv override is being called
+        //   3. the actual on-wire byte layout (any responder firmware
+        //      version skew, tag byte-order issues, etc., become visible)
+        //
+        // Once discovery is observed working, this block should be
+        // removed or gated behind a verbose-logging flag.
+        {
+            uint8_t flags = (pkt->payload_len > 0) ? pkt->payload[0] : 0;
+            uint8_t subtype = (flags >> 4) & 0x0F;
+            printf("Meck: onControlDataRecv pl_len=%u subtype=0x%X "
+                   "route=%s path_len=%u snr=%.1fdB raw=",
+                   (unsigned)pkt->payload_len, (unsigned)subtype,
+                   pkt->isRouteFlood() ? "flood" : "direct",
+                   (unsigned)pkt->path_len, pkt->getSNR());
+            int dump = pkt->payload_len < 32 ? pkt->payload_len : 32;
+            for (int i = 0; i < dump; i++) printf("%02X", pkt->payload[i]);
+            printf("\n");
+        }
+
+        if (pkt->payload_len < 6) return;
+        uint8_t flags = pkt->payload[0];
+        uint8_t subtype = (flags >> 4) & 0x0F;
+        if (subtype != 0x9) return;  // not DISCOVER_RESP
+
+        uint8_t node_type = flags & 0x0F;
+        int8_t  snr_x4    = (int8_t)pkt->payload[1];
+        uint32_t rsp_tag = 0;
+        memcpy(&rsp_tag, &pkt->payload[2], 4);
+
+        if (!_discovery_active) {
+            printf("Meck: DISCOVER_RESP arrived but discovery not active\n");
+            return;
+        }
+        if (rsp_tag != _discovery_tag) {
+            printf("Meck: DISCOVER_RESP tag mismatch — got %08X expected %08X\n",
+                   (unsigned)rsp_tag, (unsigned)_discovery_tag);
+            return;
+        }
+        if (node_type != 2 /* repeater */ && node_type != 3 /* room */) {
+            printf("Meck: DISCOVER_RESP node_type=%u (not repeater/room), skipping\n",
+                   (unsigned)node_type);
+            return;
+        }
+
+        // pubkey starts at offset 6; remaining bytes determine 8 vs 32.
+        uint16_t pk_len = pkt->payload_len - 6;
+        if (pk_len < 8) return;
+        uint8_t pubkey[32];
+        memset(pubkey, 0, sizeof(pubkey));
+        memcpy(pubkey, &pkt->payload[6], pk_len < 32 ? pk_len : 32);
+
+        // Look up name from existing contacts (DISCOVER_RESP doesn't
+        // carry it). If unknown, render a short pubkey prefix as the
+        // name placeholder.
+        char name[32] = "";
+        int n = getNumContacts();
+        for (int i = 0; i < n; i++) {
+            ContactInfo ci;
+            if (!getContactByIdx(i, ci)) continue;
+            if (memcmp(ci.id.pub_key, pubkey, pk_len < 32 ? pk_len : 32) == 0) {
+                strncpy(name, ci.name, sizeof(name) - 1);
+                name[sizeof(name) - 1] = '\0';
+                break;
+            }
+        }
+        if (!name[0]) {
+            const char* type_prefix = (node_type == 3) ? "Room" : "Rptr";
+            snprintf(name, sizeof(name), "%s %02X%02X%02X%02X",
+                     type_prefix,
+                     pubkey[0], pubkey[1], pubkey[2], pubkey[3]);
+        }
+
+        printf("Meck: DISCOVER_RESP from %02X%02X%02X%02X type=%u "
+               "snr=%.1fdB tag=%08X (name='%s')\n",
+               pubkey[0], pubkey[1], pubkey[2], pubkey[3],
+               (unsigned)node_type, snr_x4 / 4.0f,
+               (unsigned)rsp_tag, name);
+
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+
+        // Dedup by pubkey prefix (4 bytes is enough; we accept 8 or 32
+        // byte responses but prefixes are unique within radio range).
+        int slot = -1;
+        for (int i = 0; i < _discovered_count; i++) {
+            if (_discovered[i].valid &&
+                memcmp(_discovered[i].pub_key, pubkey, 4) == 0) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            if (_discovered_count < P4_DISCOVERED_SIZE) {
+                slot = _discovered_count++;
+            } else {
+                // Full — evict cached entry if any, else oldest live.
+                slot = 0;
+                for (int i = 0; i < P4_DISCOVERED_SIZE; i++) {
+                    if (_discovered[i].heard_ms == 0) { slot = i; break; }
+                }
+                if (_discovered[slot].heard_ms != 0) {
+                    unsigned long oldest = _discovered[0].heard_ms;
+                    for (int i = 1; i < P4_DISCOVERED_SIZE; i++) {
+                        if (_discovered[i].heard_ms < oldest) {
+                            slot = i;
+                            oldest = _discovered[i].heard_ms;
+                        }
+                    }
+                }
+            }
+        }
+
+        DiscoveredNode& d = _discovered[slot];
+        d.valid = true;
+        strncpy(d.name, name, sizeof(d.name) - 1);
+        d.name[sizeof(d.name) - 1] = '\0';
+        memcpy(d.pub_key, pubkey, 32);
+        d.adv_type  = node_type;
+        // Sentinel: 0 means "cached, no live read". If a live read
+        // happens to be exactly 0 SNR (rare), nudge by 1 so the UI
+        // still treats it as live data.
+        d.snr_x4    = (snr_x4 == 0) ? 1 : snr_x4;
+        d.path_len  = 0;  // zero-hop response by definition
+        d.heard_ms  = millis();
+        d.already_in_contacts = hasContactWithPubKey(pubkey);
+        _discovery_dirty = true;
+        xSemaphoreGive(_mutex);
     }
 
     // ---- Auto-add config (reads from prefs) ----
@@ -1258,6 +1822,21 @@ private:
     int _recent_count;
     int _recent_newest;
     volatile bool _recent_dirty;
+
+    // Active discovery ring + window state. _discovered[] is a flat
+    // array (not a circular ring like _recent[]); we just walk it and
+    // overwrite the oldest entry when full. _discovery_active flips
+    // false either when the window timer expires (loop()) or stopDiscovery()
+    // is called explicitly. _discovery_dirty lets the UI poll for "should
+    // I redraw?" rather than refresh on every loop tick. _discovery_tag
+    // is the per-scan random ID echoed back by responders so we can
+    // ignore stale replies from previous scans.
+    DiscoveredNode _discovered[P4_DISCOVERED_SIZE];
+    int _discovered_count;
+    bool _discovery_active;
+    unsigned long _discovery_start_ms;
+    uint32_t _discovery_tag;
+    volatile bool _discovery_dirty;
 
     bool _advert_enabled;
     unsigned long _next_advert_ms;

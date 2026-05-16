@@ -219,28 +219,43 @@ extern "C" bool meck_boot_button_pressed() {
 // ----------------------------------------------------------------------------
 // LilyGo's main.cpp constructs `auto BQ27220 = std::make_unique<...>(...)` at
 // file scope. We extern it here so the meshcore component can read battery
-// state. Voltage is always trustworthy; the chip's SoC% may drift if the
-// cell isn't characterised in the BQ27220's data flash (a known issue
-// across MeshCore P4 forks — see MeshOS issue #2192).
+// state.
 //
-// LilyGo's example firmware and wiki tell users to set Design Capacity to
-// 1000 mAh, which is wrong — the physical cell shipped on the T-Display P4
-// is 2000 mAh. Our main.cpp now writes 2000 at boot via
-// BQ27220->set_design_capacity(2000), so the chip's own current/SoC/time
-// readings should now scale correctly. We still treat full-charge mAh as
-// a fixed constant here to keep the UI's "Remaining mAh" consistent with
-// our voltage-curve-derived percentage, regardless of any drift in the
-// chip's learned full-charge value.
+// Cell capacity is 1000 mAh per LilyGo wiki FAQ 9.9 ("About inaccurate
+// battery level display and inability to charge when powered off"):
+//   https://wiki.lilygo.cc/get_started/en/Display/T-Display-P4/T-Display-P4.html
+// The wiki instructs setting design_capacity to 1000 in firmware, then
+// running one full charge → natural discharge to power-off → recharge
+// cycle so the BQ27220 learns its real Full Charge Capacity (FCC). After
+// that single calibration cycle, the gauge's internal coulomb counter is
+// referenced against the correct cell capacity.
+//
+// (A previous comment block here claimed the cell was 2000 mAh based on
+// an unverified third-party attribution. The wiki FAQ is the only source
+// we've actually verified against LilyGo's own documentation, and it
+// says 1000. Code now matches the wiki.)
+//
+// The BQ27220 has no hardware lock preventing FCC from learning a value
+// above design capacity unless the FCC_LIMIT bit is set in the CEDV
+// Gauging Configuration data-memory register. The Cpp_Bus_Driver wrapper
+// doesn't expose that register, so we defend at the software accessor
+// layer: meck_battery_full_charge_mah() caps at MECK_BATTERY_DESIGN_MAH,
+// and meck_battery_pct_from_chip() recomputes SoC against min(FCC, design)
+// rather than trusting the chip's get_status_of_charge() (which would be
+// computed against the chip's possibly-stale internal FCC). Voltage and
+// current readings are direct measurements and don't go through this
+// path; they stay trustworthy regardless of FCC state.
 // ============================================================================
 
 extern std::unique_ptr<Cpp_Bus_Driver::Bq27220xxxx> BQ27220;
 
-// Actual physical cell capacity. Confirmed via reports from a T-Display P4
-// owner (Tony Podlaski, December 2025) and consistent with LilyGo's own
-// 2000 mAh advertised spec. Used both in main.cpp's set_design_capacity
-// call (so the BQ27220's reported current/SoC scale correctly) and here
-// for "Remaining mAh" derivation in the UI.
-static const uint16_t MECK_BATTERY_CAP_MAH = 2000;
+// Physical cell capacity per LilyGo wiki FAQ 9.9. Used as the upper bound
+// for both the displayed FCC and the denominator in SoC calculations. The
+// chip's learned FCC may be lower than this (aged cells degrade downward
+// over their lifetime; that's normal and we honour it); it should not be
+// higher (cell can't physically hold more than its design capacity, so a
+// higher reading indicates stale or corrupted calibration state).
+static const uint16_t MECK_BATTERY_DESIGN_MAH = 1000;
 
 extern "C" bool meck_battery_available() {
     return (bool)BQ27220;
@@ -258,9 +273,25 @@ extern "C" int16_t meck_battery_current_ma() {
 
 extern "C" uint8_t meck_battery_pct_from_chip() {
     if (!BQ27220) return 0;
-    uint16_t soc = BQ27220->get_status_of_charge();
-    if (soc > 100) soc = 100;  // clamp; chip can momentarily report >100
-    return (uint8_t)soc;
+    // Recompute SoC ourselves rather than calling get_status_of_charge():
+    // the chip computes SoC against its internal FCC, which can be stale
+    // (still reflecting an earlier design_capacity value before the
+    // calibration cycle has completed). RM (remaining capacity) is a
+    // direct coulomb-counter measurement and is correct; clamping the
+    // denominator at min(FCC, design) yields an accurate percentage even
+    // when the chip's stored FCC is out of range.
+    uint16_t rm  = BQ27220->get_remaining_capacity();
+    uint16_t fcc = BQ27220->get_full_charge_capacity();
+    if (fcc == 0) {
+        // Gauge hasn't learned an FCC yet — fall back to design capacity.
+        fcc = MECK_BATTERY_DESIGN_MAH;
+    }
+    uint16_t denom = (fcc < MECK_BATTERY_DESIGN_MAH) ? fcc
+                                                     : MECK_BATTERY_DESIGN_MAH;
+    if (denom == 0) return 0;  // belt and braces
+    uint32_t pct = ((uint32_t)rm * 100) / denom;
+    if (pct > 100) pct = 100;  // possible if RM > clamped denom
+    return (uint8_t)pct;
 }
 
 extern "C" int8_t meck_battery_temp_c() {
@@ -286,20 +317,53 @@ extern "C" uint8_t meck_battery_pct_from_voltage(uint16_t mv);
 
 extern "C" uint16_t meck_battery_remaining_mah() {
     if (!BQ27220) return 0;
-    // Derive from voltage so this stays consistent with the displayed
-    // voltage curve % even when the chip's own SoC drifts.
-    uint16_t mv = BQ27220->get_voltage();
-    uint8_t pct = meck_battery_pct_from_voltage(mv);
-    return (uint16_t)(((uint32_t)MECK_BATTERY_CAP_MAH * pct) / 100);
+    // The chip's RM (remaining capacity, from the coulomb counter) is a
+    // direct measurement and is the authoritative source. We previously
+    // derived this from the voltage curve to sidestep chip-FCC drift; now
+    // that pct_from_chip clamps properly, we can return the real RM and
+    // get accurate readings under load (voltage sags by ~100-200mV at
+    // typical TX peaks, which would skew a voltage-curve-derived RM).
+    uint16_t rm = BQ27220->get_remaining_capacity();
+    // Defensive clamp — RM shouldn't exceed the cell's actual capacity,
+    // but if the gauge is mid-recalibration after a stale FCC it can
+    // briefly report values that don't make physical sense.
+    if (rm > MECK_BATTERY_DESIGN_MAH) rm = MECK_BATTERY_DESIGN_MAH;
+    return rm;
 }
 
 extern "C" uint16_t meck_battery_full_charge_mah() {
-    // Always report the actual cell capacity, not what the chip thinks.
-    return MECK_BATTERY_CAP_MAH;
+    if (!BQ27220) return MECK_BATTERY_DESIGN_MAH;
+    // Cap at design capacity. The chip's learned FCC can legitimately be
+    // below this (aged cells); it should not be above (would indicate
+    // stale or corrupted calibration state). Reporting min() means:
+    //   - fresh device or aged cell: report chip's learned value
+    //   - stale FCC > design: report design, prompting the recalibration
+    //     cycle described in LilyGo wiki FAQ 9.9
+    uint16_t fcc = BQ27220->get_full_charge_capacity();
+    if (fcc == 0)  return MECK_BATTERY_DESIGN_MAH;  // not yet learned
+    if (fcc > MECK_BATTERY_DESIGN_MAH) {
+        // Diagnostic — log once per boot so a stale FCC after firmware
+        // upgrade is visible without spamming the serial console. The
+        // static guard avoids repeating once the calibration cycle
+        // completes and FCC drops back into range.
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            printf("meck_battery: chip FCC=%u > design=%u, capping. "
+                   "Run the LilyGo wiki FAQ 9.9 recalibration cycle "
+                   "(full charge → discharge until power-off → full charge).\n",
+                   (unsigned)fcc, (unsigned)MECK_BATTERY_DESIGN_MAH);
+        }
+        return MECK_BATTERY_DESIGN_MAH;
+    }
+    return fcc;
 }
 
 extern "C" uint16_t meck_battery_time_to_empty_min() {
     if (!BQ27220) return 0;
+    // TTE is computed by the chip from RM and the rolling average
+    // discharge current. Both are direct measurements (no dependence on
+    // FCC), so TTE doesn't need the clamp.
     return BQ27220->get_time_to_empty();
 }
 

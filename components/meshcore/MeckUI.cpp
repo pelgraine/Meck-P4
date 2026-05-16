@@ -285,6 +285,11 @@ static lv_obj_t *lbl_set_autoadd_sensor       = NULL;
 static lv_obj_t *lbl_set_autoadd_overwrite    = NULL;
 static lv_obj_t *lbl_set_backup_status        = NULL;
 
+// Discover (repeaters-only, mirrors Meck T-Deck Pro's F-key Discover)
+static lv_obj_t *scr_discover         = NULL;
+static lv_obj_t *obj_discover_scroll  = NULL;
+static lv_obj_t *lbl_discover_status  = NULL;
+
 // ============================================================================
 // Forward declarations
 // ============================================================================
@@ -302,6 +307,9 @@ static void settings_update_labels();
 static void update_radio_detail_label();
 static void refresh_channel_picker();
 static void refresh_contacts_list();
+static void goto_discover(lv_event_t *e);
+static void refresh_discover_list();
+static void create_discover_screen();
 
 static void on_settings_name_tap(lv_event_t *e);
 static void on_settings_name_save(lv_event_t *e);
@@ -356,7 +364,14 @@ static void on_ch_add_kb_event(lv_event_t *e);
 
 static void cb_todo_reader(lv_event_t* e)   { printf("MeckUI: Reader tile clicked (TODO)\n"); }
 static void cb_todo_notes(lv_event_t* e)    { printf("MeckUI: Notes tile clicked (TODO)\n"); }
-static void cb_todo_discover(lv_event_t* e) { printf("MeckUI: Discover tile clicked (TODO)\n"); }
+static void cb_todo_discover(lv_event_t* e) {
+    // Wired to the Discover tile on the home grid. Mirrors Meck T-Deck
+    // Pro's F-key Discover: shows nearby repeaters from the same heard-
+    // adverts ring the Last Heard list reads, with an "Add" affordance
+    // per row and a Rescan button that floods a self-advert so other
+    // nodes can pick us up.
+    goto_discover(e);
+}
 static void cb_todo_trace(lv_event_t* e)    { printf("MeckUI: Trace tile clicked (TODO)\n"); }
 static void cb_todo_maps(lv_event_t* e)     { printf("MeckUI: Maps tile clicked (TODO)\n"); }
 static void goto_audio_browser(lv_event_t* e) {
@@ -3422,6 +3437,306 @@ static void refresh_contacts_list() {
 }
 
 // ============================================================================
+// Discover screen — nearby repeaters with per-row Add and a Rescan button
+// ----------------------------------------------------------------------------
+// Mirrors Meck T-Deck Pro's Discover (F-key) behaviour: this is a
+// REPEATERS-ONLY view. Adverts are received passively into the same
+// _recent[] ring the Last Heard list reads from; here we just filter
+// to ADV_TYPE_REPEATER and render. Each row gets either an "Add"
+// button (if the repeater isn't yet a contact) or a dim "Added" label
+// (if it is). The Rescan button floods a self-advert so we announce
+// ourselves, and refreshes the list from the latest ring state.
+// ============================================================================
+
+// Tap handler bound to each row's Add button. The user-data carries the
+// discovered_idx (matches getDiscovered() index at draw time). The Meck
+// instance also exposes addContactFromDiscovered so we don't have to
+// reach into ContactInfo plumbing here.
+static void on_discover_add_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+
+    int n = mesh->getDiscoveredCount();
+    if (idx < 0 || idx >= n) {
+        refresh_discover_list();  // ring shifted under us
+        return;
+    }
+    const DiscoveredNode& d = mesh->getDiscovered(idx);
+    if (!d.valid) {
+        refresh_discover_list();
+        return;
+    }
+    if (mesh->addContactFromDiscovered(d)) {
+        refresh_discover_list();  // [+] state now flips to "Added"
+    }
+}
+
+// Rescan: kick off a fresh active discovery scan. This both transmits a
+// zero-hop self-advert (eliciting zero-hop response adverts from any
+// neighbour with the feature enabled) AND opens a P4_DISCOVERY_WINDOW_MS
+// capture window during which incoming adverts are tracked separately
+// from the general _recent[] ring with their live SNR.
+static void on_discover_rescan_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    mesh->startDiscovery();
+    refresh_discover_list();
+}
+
+// LVGL timer that polls Meck::consumeDiscoveryDirty() ~3× per second
+// while the Discover screen is the active screen. Refreshes the list
+// only when something changed (new advert captured, or window closed).
+// Created in goto_discover, deleted when the screen unloads.
+static lv_timer_t *discover_poll_timer = NULL;
+
+static void discover_poll_cb(lv_timer_t *t) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    // If the user navigated away from the discover screen, kill the
+    // timer to stop wasting cycles.
+    if (lv_screen_active() != scr_discover) {
+        if (discover_poll_timer) {
+            lv_timer_delete(discover_poll_timer);
+            discover_poll_timer = NULL;
+        }
+        return;
+    }
+    if (mesh->consumeDiscoveryDirty()) {
+        refresh_discover_list();
+    }
+}
+
+static void create_discover_screen() {
+    scr_discover = lv_obj_create(NULL);
+    lock_screen_scroll(scr_discover);
+    lv_obj_set_style_bg_color(scr_discover, lv_color_black(), 0);
+
+    create_back_button(scr_discover);
+
+    lv_obj_t *title = lv_label_create(scr_discover);
+    lv_label_set_text(title, "Discover");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Status text under the title — "Scanning... N found" while active,
+    // "Scan done: N found" once the window closes. The polling timer
+    // (discover_poll_timer) updates this via refresh_discover_list when
+    // something changes.
+    lbl_discover_status = lv_label_create(scr_discover);
+    lv_label_set_text(lbl_discover_status, "");
+    lv_obj_set_style_text_color(lbl_discover_status,
+        lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_text_font(lbl_discover_status, &meck_montserrat_16, 0);
+    lv_obj_align(lbl_discover_status, LV_ALIGN_TOP_LEFT, 120, 65);
+
+    // Rescan button — top-right of the screen. Starts a fresh active
+    // scan (clears the captured list, transmits a zero-hop probe, opens
+    // the capture window again).
+    lv_obj_t *btn_rescan = lv_button_create(scr_discover);
+    lv_obj_set_size(btn_rescan, 140, 60);
+    lv_obj_align(btn_rescan, LV_ALIGN_TOP_RIGHT, -20, 30);
+    lv_obj_set_style_bg_color(btn_rescan, lv_color_make(40, 40, 60), 0);
+    lv_obj_set_style_radius(btn_rescan, 8, 0);
+    lv_obj_set_style_border_width(btn_rescan, 1, 0);
+    lv_obj_set_style_border_color(btn_rescan,
+        lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_add_event_cb(btn_rescan, on_discover_rescan_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *rescan_lbl = lv_label_create(btn_rescan);
+    lv_label_set_text(rescan_lbl, LV_SYMBOL_REFRESH " Rescan");
+    lv_obj_set_style_text_color(rescan_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(rescan_lbl, &meck_montserrat_18, 0);
+    lv_obj_center(rescan_lbl);
+
+    // Body: scrollable column of rows.
+    obj_discover_scroll = lv_obj_create(scr_discover);
+    lv_obj_set_size(obj_discover_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 160);
+    lv_obj_set_pos(obj_discover_scroll, 10, 150);
+    lv_obj_set_style_bg_color(obj_discover_scroll, lv_color_make(10, 10, 15), 0);
+    lv_obj_set_style_border_width(obj_discover_scroll, 0, 0);
+    lv_obj_set_style_radius(obj_discover_scroll, 8, 0);
+    lv_obj_set_style_pad_all(obj_discover_scroll, 5, 0);
+    lv_obj_set_scroll_dir(obj_discover_scroll, LV_DIR_VER);
+    lv_obj_set_flex_flow(obj_discover_scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(obj_discover_scroll,
+        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+}
+
+// Render the active-discovery result list. Each row shows:
+//   - Type letter (R/C/S/N) + name
+//   - Short pub_key prefix + (SNR in dB) OR (hop count) + "in contacts" marker
+//
+// Distinguishes live (heard during this scan, snr_x4 != 0) from cached
+// (pre-seeded from _recent[] at scan start, snr_x4 == 0):
+//   - Live entries:  "XXXXXXXX • +N.NdB" (SNR colour-graded)
+//   - Cached entries: "XXXXXXXX • N hops" (grey, indicates not fresh)
+static void refresh_discover_list() {
+    Meck* mesh = meck_get_instance();
+    if (!obj_discover_scroll || !mesh) return;
+
+    // Drop existing rows
+    uint32_t child_cnt = lv_obj_get_child_count(obj_discover_scroll);
+    for (int i = (int)child_cnt - 1; i >= 0; i--) {
+        lv_obj_delete(lv_obj_get_child(obj_discover_scroll, i));
+    }
+
+    int n = mesh->getDiscoveredCount();
+    bool active = mesh->isDiscoveryActive();
+
+    // Status line
+    if (lbl_discover_status) {
+        char buf[64];
+        if (active) {
+            snprintf(buf, sizeof(buf), "Scanning...  %d repeater%s found",
+                     n, n == 1 ? "" : "s");
+        } else if (n == 0) {
+            snprintf(buf, sizeof(buf),
+                     "No repeaters heard yet — tap Rescan");
+        } else {
+            snprintf(buf, sizeof(buf), "Scan done:  %d repeater%s found",
+                     n, n == 1 ? "" : "s");
+        }
+        lv_label_set_text(lbl_discover_status, buf);
+        lv_obj_set_style_text_color(lbl_discover_status,
+            active ? lv_palette_main(LV_PALETTE_CYAN)
+                   : lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(obj_discover_scroll);
+        if (active) {
+            lv_label_set_text(empty,
+                "Listening for zero-hop repeater\n"
+                "responses... Repeaters with\n"
+                "advert.interval > 0 should\n"
+                "reply within 30 seconds.");
+        } else {
+            lv_label_set_text(empty,
+                "Tap Rescan to send a zero-hop probe.\n"
+                "Nearby repeaters with response enabled\n"
+                "will reply with their own advert.");
+        }
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        lv_obj_set_style_text_font(empty, &meck_montserrat_16, 0);
+        return;
+    }
+
+    for (int i = 0; i < n; i++) {
+        const DiscoveredNode& d = mesh->getDiscovered(i);
+        if (!d.valid) continue;
+
+        lv_obj_t *row = lv_obj_create(obj_discover_scroll);
+        lv_obj_set_size(row, SCREEN_WIDTH - 40, 80);
+        lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(50, 50, 60), 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_all(row, 8, 0);
+
+        // Discover is repeater-only, so the per-row prefix is always 'R'.
+        // (No need for a type switch — that filter happens at capture
+        // time in MeckMesh.h's onAdvertRecv and startDiscovery.)
+        lv_obj_t *name = lv_label_create(row);
+        char namebuf[40];
+        snprintf(namebuf, sizeof(namebuf), "R %s",
+                 d.name[0] ? d.name : "?");
+        lv_label_set_text(name, namebuf);
+        lv_obj_set_style_text_color(name, lv_color_white(), 0);
+        lv_obj_set_style_text_font(name, &meck_montserrat_22, 0);
+        lv_obj_align(name, LV_ALIGN_TOP_LEFT, 0, 0);
+
+        // Meta line: short id, then either SNR (live) or hops (cached).
+        char meta[64];
+        if (d.snr_x4 != 0) {
+            float snr_db = d.snr_x4 / 4.0f;
+            snprintf(meta, sizeof(meta),
+                     "%02X%02X%02X%02X  •  %+.1fdB SNR  •  zero-hop",
+                     d.pub_key[0], d.pub_key[1], d.pub_key[2], d.pub_key[3],
+                     snr_db);
+        } else if (d.path_len == 0) {
+            snprintf(meta, sizeof(meta),
+                     "%02X%02X%02X%02X  •  cached  •  no signal data",
+                     d.pub_key[0], d.pub_key[1], d.pub_key[2], d.pub_key[3]);
+        } else {
+            snprintf(meta, sizeof(meta),
+                     "%02X%02X%02X%02X  •  cached  •  %d hop%s away",
+                     d.pub_key[0], d.pub_key[1], d.pub_key[2], d.pub_key[3],
+                     d.path_len, d.path_len == 1 ? "" : "s");
+        }
+
+        lv_obj_t *meta_lbl = lv_label_create(row);
+        lv_label_set_text(meta_lbl, meta);
+
+        // Live entries get SNR colour grading. Cached entries stay grey
+        // to signal "this is from before the scan; signal data is stale".
+        lv_color_t meta_col;
+        if (d.snr_x4 != 0) {
+            int snr_db = d.snr_x4 / 4;
+            meta_col = (snr_db >= 0)  ? lv_palette_main(LV_PALETTE_GREEN)
+                     : (snr_db > -5)  ? lv_palette_main(LV_PALETTE_YELLOW)
+                                      : lv_palette_main(LV_PALETTE_RED);
+        } else {
+            meta_col = lv_palette_main(LV_PALETTE_GREY);
+        }
+        lv_obj_set_style_text_color(meta_lbl, meta_col, 0);
+        lv_obj_set_style_text_font(meta_lbl, &meck_montserrat_14, 0);
+        lv_obj_align(meta_lbl, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+        // Right side: Add button OR Added badge.
+        if (d.already_in_contacts) {
+            lv_obj_t *added = lv_label_create(row);
+            lv_label_set_text(added, LV_SYMBOL_OK " Added");
+            lv_obj_set_style_text_color(added,
+                lv_palette_main(LV_PALETTE_GREY), 0);
+            lv_obj_set_style_text_font(added, &meck_montserrat_16, 0);
+            lv_obj_align(added, LV_ALIGN_RIGHT_MID, 0, 0);
+        } else {
+            lv_obj_t *add_btn = lv_button_create(row);
+            lv_obj_set_size(add_btn, 100, 50);
+            lv_obj_align(add_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+            lv_obj_set_style_bg_color(add_btn,
+                lv_palette_main(LV_PALETTE_CYAN), 0);
+            lv_obj_set_style_radius(add_btn, 8, 0);
+            lv_obj_set_style_border_width(add_btn, 0, 0);
+            lv_obj_add_event_cb(add_btn, on_discover_add_tap,
+                                LV_EVENT_CLICKED, (void*)(intptr_t)i);
+
+            lv_obj_t *add_lbl = lv_label_create(add_btn);
+            lv_label_set_text(add_lbl, LV_SYMBOL_PLUS " Add");
+            lv_obj_set_style_text_color(add_lbl, lv_color_black(), 0);
+            lv_obj_set_style_text_font(add_lbl, &meck_montserrat_18, 0);
+            lv_obj_center(add_lbl);
+        }
+    }
+}
+
+static void goto_discover(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (mesh) {
+        // Auto-start a scan when the screen opens. The user can manually
+        // re-trigger via Rescan if they want a fresh window. Skipping the
+        // auto-start when one is already running avoids stomping the
+        // in-flight window if the user just popped back from a sub-screen.
+        if (!mesh->isDiscoveryActive()) {
+            mesh->startDiscovery();
+        }
+    }
+    refresh_discover_list();
+    if (scr_discover) lv_screen_load(scr_discover);
+
+    // Poll for incoming adverts ~3× per second while the screen is up.
+    // Created here (not in create_discover_screen) so it only runs while
+    // the screen is actually visible.
+    if (!discover_poll_timer) {
+        discover_poll_timer = lv_timer_create(discover_poll_cb, 300, NULL);
+    }
+}
+
+// ============================================================================
 // Contact detail screen (lifted from old:1111-1166)
 // ============================================================================
 
@@ -3860,6 +4175,7 @@ extern "C" void meck_ui_init() {
     create_messages_screen();
     create_contacts_screen();
     create_contact_detail_screen();
+    create_discover_screen();
     meck_audio_ui_init();
 
     lv_timer_create(ui_update_timer_cb, 500, NULL);
