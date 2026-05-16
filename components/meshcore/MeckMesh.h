@@ -1112,29 +1112,6 @@ public:
         memset(_discovered, 0, sizeof(_discovered));
         _discovered_count = 0;
 
-        // Pre-seed from cached _recent[] — anything we've heard recently
-        // that hasn't aged out is a reasonable starting list while we
-        // wait for fresh responses. snr_x4=0 marks them as cache, not
-        // live captures, so the UI shows hop count rather than dB.
-        // Filtered to ADV_TYPE_REPEATER (2) since Discover is a
-        // repeater-finder — chat nodes, room servers, and sensors are
-        // captured by _recent[] for other UI surfaces but excluded here.
-        for (int i = 0; i < P4_RECENT_HEARD_SIZE && _discovered_count < P4_DISCOVERED_SIZE; i++) {
-            int idx = (_recent_newest - i + P4_RECENT_HEARD_SIZE) % P4_RECENT_HEARD_SIZE;
-            if (!_recent[idx].valid) continue;
-            if (_recent[idx].adv_type != 2 /* ADV_TYPE_REPEATER */) continue;
-            DiscoveredNode& d = _discovered[_discovered_count++];
-            d.valid = true;
-            strncpy(d.name, _recent[idx].name, sizeof(d.name) - 1);
-            d.name[sizeof(d.name) - 1] = '\0';
-            memcpy(d.pub_key, _recent[idx].pub_key, 32);
-            d.adv_type  = _recent[idx].adv_type;
-            d.snr_x4    = 0;  // cached, not live
-            d.path_len  = _recent[idx].path_len;
-            d.heard_ms  = 0;
-            d.already_in_contacts = hasContactWithPubKey(_recent[idx].pub_key);
-        }
-
         _discovery_active = true;
         _discovery_start_ms = millis();
         _discovery_dirty = true;
