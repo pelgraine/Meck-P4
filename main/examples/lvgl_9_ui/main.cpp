@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_ldo_regulator.h"
@@ -5239,9 +5240,142 @@ extern "C" {
     }
 }
 
+// =============================================================================
+// Meck diagnostic: FreeRTOS runtime stats dump
+// -----------------------------------------------------------------------------
+// Periodically prints task state, stack high-water marks, CPU time percentage,
+// and battery voltage/current. Used to find which tasks are burning CPU (and
+// therefore power) when the device looks idle, and to keep a serial time
+// series of battery readings even when the screen has auto-off'd. Output is
+// gated behind sdkconfig options:
+//   CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+//   CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+//   CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+// If any of these are disabled the calls compile out to no-ops and this task
+// just prints a one-line note then exits.
+//
+// Output format from vTaskList():
+//   Name          State  Priority  StackFree(words)  Num
+//   B = Blocked, R = Ready, X = Running, S = Suspended
+// Output format from vTaskGetRunTimeStats():
+//   Name          AbsoluteTime    %CPU
+// =============================================================================
+
+// Forward declarations for the battery readings (defined in target.cpp).
+// Declared locally rather than via target.h because target.h drags in
+// MeshCore headers that conflict with LilyGo's file-scope `auto SX1262`.
+extern "C" bool     meck_battery_available();
+extern "C" uint16_t meck_battery_voltage_mv();
+extern "C" int16_t  meck_battery_current_ma();
+extern "C" uint16_t meck_battery_remaining_mah();
+extern "C" uint8_t  meck_battery_pct_from_chip();
+
+#if (configUSE_TRACE_FACILITY == 1) && (configGENERATE_RUN_TIME_STATS == 1) && (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
+static void meck_stats_task(void *arg)
+{
+    // First dump is at +5s so initial boot-time bursts (LVGL setup, SD mount,
+    // NVS load) don't dominate the percentages. After that, every 10 seconds.
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    // Buffer sized for ~20 tasks at ~80 chars/line. We currently spawn fewer
+    // than that, so 2KB is plenty. Allocated on the heap (not stack) because
+    // this task itself only has 4KB.
+    char *buf = (char *)malloc(2048);
+    if (!buf) {
+        printf("meck_stats_task: malloc failed, exiting\n");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    uint32_t cycle = 0;
+    while (1) {
+        // Battery line first so it's easy to grep out of long captures.
+        // Negative current = discharge. mAh is remaining capacity per the
+        // BQ27220 (clamped to design capacity in target.cpp).
+        if (meck_battery_available()) {
+            printf("[stats #%u] BATT: %u mV, %d mA, %u mAh, %u%%\n",
+                   (unsigned)cycle,
+                   (unsigned)meck_battery_voltage_mv(),
+                   (int)meck_battery_current_ma(),
+                   (unsigned)meck_battery_remaining_mah(),
+                   (unsigned)meck_battery_pct_from_chip());
+        } else {
+            printf("[stats #%u] BATT: gauge unavailable\n", (unsigned)cycle);
+        }
+
+        printf("\n==== Meck task list ====\n");
+        printf("Name            State Prio StackFree Num\n");
+        vTaskList(buf);
+        printf("%s", buf);
+
+        printf("\n==== Meck runtime stats ====\n");
+        printf("Name            AbsTime         %%CPU\n");
+        vTaskGetRunTimeStats(buf);
+        printf("%s", buf);
+
+#if CONFIG_PM_ENABLE
+        printf("\n==== Meck PM locks ====\n");
+        // Lists every esp_pm lock currently held, by whom, and how long.
+        // Identifies what's preventing light sleep. Common holders:
+        //   ESP_PM_CPU_FREQ_MAX  — pinned to max CPU clock
+        //   ESP_PM_APB_FREQ_MAX  — pinned to max APB clock (peripherals)
+        //   ESP_PM_NO_LIGHT_SLEEP — explicitly blocks light sleep entirely
+        // Richer output if CONFIG_PM_PROFILING=y (adds hold/release stats).
+        esp_pm_dump_locks(stdout);
+#endif
+        printf("============================\n\n");
+
+        cycle++;
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+#else
+static void meck_stats_task(void *arg)
+{
+    printf("meck_stats_task: FreeRTOS trace/runtime-stats configs disabled, "
+           "stats unavailable. Set CONFIG_FREERTOS_USE_TRACE_FACILITY=y, "
+           "CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y, "
+           "CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y in sdkconfig.\n");
+    vTaskDelete(NULL);
+}
+#endif
+
 extern "C" void app_main(void)
 {
     printf("Ciallo\n");
+
+    // ---- Meck: dynamic frequency scaling ----
+    // CPU scales between max_freq_mhz and min_freq_mhz based on whether any
+    // task is requesting CPU time. When all tasks are blocked, the CPU clock
+    // drops to min_freq_mhz. light_sleep_enable=true: cores actually power
+    // down between idle ticks (tickless idle), recovering on next interrupt
+    // or scheduled wake. Drivers that need the CPU awake for I/O must hold
+    // a PM lock via esp_pm_lock_acquire / esp_pm_lock_release; ESP-IDF
+    // drivers do this correctly. Custom drivers without PM locks risk losing
+    // bytes if a transfer starts while the CPU is asleep. Watch for stutter
+    // in LVGL, dropped LoRa packets, or USB-CDC issues.
+    // Requires CONFIG_PM_ENABLE=y. If that's off the call returns ESP_ERR_NOT_SUPPORTED
+    // and we log + continue (no DFS but firmware still boots).
+#if CONFIG_PM_ENABLE
+    {
+        esp_pm_config_t pm_config = {
+            .max_freq_mhz = 360,
+            .min_freq_mhz = 40,
+            .light_sleep_enable = true,
+        };
+        esp_err_t pm_err = esp_pm_configure(&pm_config);
+        if (pm_err != ESP_OK) {
+            printf("Meck: esp_pm_configure FAILED: %s\n", esp_err_to_name(pm_err));
+        } else {
+            printf("Meck: DFS enabled (max=%d MHz, min=%d MHz, light_sleep=%d)\n",
+                   pm_config.max_freq_mhz, pm_config.min_freq_mhz,
+                   (int)pm_config.light_sleep_enable);
+        }
+    }
+#else
+    printf("Meck: CONFIG_PM_ENABLE not set, no DFS\n");
+#endif
+    // ---- end Meck DFS ----
 
 #if CONFIG_ENABLE_USB_DISPLAY == true
 #else
@@ -5289,8 +5423,17 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(200));
 
     XL9535->pin_mode(XL9535_ETHERNET_RST, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
-    XL9535->pin_write(XL9535_ETHERNET_RST, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
-    Ethernet_Init();
+    // Meck: hold IP101GRI ethernet PHY in reset. We don't use ethernet — never
+    // will on this firmware — and powering it up draws current for nothing.
+    // Driving the reset line LOW keeps the PHY chip in its lowest-power state.
+    // Was: XL9535->pin_write(XL9535_ETHERNET_RST, ...::Value::HIGH);
+    XL9535->pin_write(XL9535_ETHERNET_RST, Cpp_Bus_Driver::Xl95x5::Value::LOW);
+    // Meck: Ethernet_Init() skipped — it initialises esp_netif, the default
+    // event loop, the IP101GRI driver, attaches to LWIP, and registers ETH/IP
+    // event handlers. None of that is needed for Meck, and it spawns the tiT
+    // (LWIP) and emac_rx tasks plus keeps the PHY chip powered. No other code
+    // in main.cpp depends on esp_netif / event loop being initialised here.
+    // Ethernet_Init();
 
 #if defined CONFIG_SCREEN_TYPE_HI8561
     // 这个必须放在以太网后面
@@ -5658,7 +5801,9 @@ extern "C" void app_main(void)
     _lock_release(&lvgl_api_lock);
 
     ES8311_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
-     ES8311_Init();
+    // ES8311_Init();  // disabled — see comment block below. Leaving this call
+                      // active also pins the I2S driver's APB_FREQ_MAX PM lock
+                      // permanently, blocking DFS from clocking APB down.
     // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     // Meck audio backend (components/meshcore/MeckAudio.cpp) now owns the
     // ES8311 lifecycle. It initialises the codec lazily on first audio
@@ -5819,7 +5964,9 @@ extern "C" void app_main(void)
     xTaskCreate(device_imu_task, "device_imu_task", 4 * 1024, NULL, 3, &Imu_Task_Handle);
     xTaskCreate(device_battery_health_task, "device_battery_health_task", 8 * 1024, NULL, 3, NULL);
     xTaskCreate(device_gps_task, "device_gps_task", 8 * 1024, NULL, 3, &Gps_Task_Handle);
-    xTaskCreate(device_ethernet_task, "device_ethernet_task", 4 * 1024, NULL, 3, &Ethernet_Task_Handle);
+    // Meck: ethernet not used, skip the task. Pairs with Ethernet_Init() and
+    // ETHERNET_RST changes earlier in app_main.
+    // xTaskCreate(device_ethernet_task, "device_ethernet_task", 4 * 1024, NULL, 3, &Ethernet_Task_Handle);
     //     xTaskCreate(device_rtc_task, "device_rtc_task", 4 * 1024, NULL, 3, NULL);
     xTaskCreate(device_at_task, "device_at_task", 4 * 1024, NULL, 3, &At_Task_Handle);
     // xTaskCreate(esp32p4_sleep_task, "esp32p4_sleep_task", 4 * 1024, NULL, 3, &Sleep_Task_Handle);
@@ -5852,7 +5999,13 @@ extern "C" void app_main(void)
      //     System_Startup_Message_Init();  // disabled, Meck does not need LilyGo factory popups
     meck_ui_init();
     meck_ui_show_home();
-    
+
+    // Diagnostic — dumps task list + CPU% every 10s to serial. Low priority
+    // so it can never starve real work. Disable by commenting out this line
+    // (or set the configs in sdkconfig to off and the function compiles to
+    // a no-op stub).
+    xTaskCreate(meck_stats_task, "meck_stats_task", 4 * 1024, NULL, 1, NULL);
+
     // ---- end Meck ----
 
     //     while (1)
