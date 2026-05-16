@@ -17,9 +17,12 @@ with a `meshcore` ESP-IDF component added on top.
   * [Building from Source](#building-from-source)
 - [Home Screen](#home-screen)
 - [Touch Navigation](#touch-navigation)
+- [Virtual Keyboard](#virtual-keyboard)
 - [Channel Messages](#channel-messages)
 - [Channel Picker](#channel-picker)
 - [Contacts](#contacts)
+- [Discover](#discover)
+- [Audio Player](#audio-player)
 - [Settings](#settings)
 - [GPS](#gps)
 - [Battery](#battery)
@@ -42,7 +45,7 @@ init in `main/examples/lvgl_9_ui/main.cpp`.
 
 | Device | Display | Input | LoRa | Battery | GPS | RTC |
 | --- | --- | --- | --- | --- | --- | --- |
-| **T-Display P4** (TFT) | 4.05" punch-hole TFT LCD (1232×568) | GT911 capacitive touch + virtual keyboard | SX1262 | BQ27220 fuel gauge, 2000 mAh | L76K (UART1) | PCF8563 (initialised but not yet used) |
+| **T-Display P4** (TFT) | 4.05" punch-hole TFT LCD (1232×568) | GT911 capacitive touch + virtual keyboard | SX1262 | BQ27220 fuel gauge, 1000 mAh | L76K (UART1) | PCF8563 (initialised but not yet used) |
 
 The T-Display P4 uses the ESP32-P4 (RISC-V dual-core) with 16 MB flash and
 32 MB PSRAM. The onboard ESP32-C6 (WiFi 6 / BLE 5.3 coprocessor) is present
@@ -168,6 +171,60 @@ needed.
 
 ---
 
+## Virtual Keyboard
+
+Text entry (node name, message compose, channel name, channel secret) uses an on-screen virtual keyboard. The keyboard appears automatically when you tap a field that needs input, and dismisses on Send / Enter / Back.
+
+### Theme
+
+Two themes are available, switched from **Settings → KB Theme**:
+
+- **Dark** (default) — light keys on a dark background. Easier on the eyes at night and matches the rest of the Meck UI.
+- **Light** — dark keys on a light background, in case you prefer the higher contrast in bright daylight.
+
+The choice persists via NVS and applies live to every keyboard instance the moment you change it. No reboot needed.
+
+### Layout
+
+Three physical layouts are available, cycled from **Settings → KB Layout**:
+
+| Layout | Description |
+| --- | --- |
+| **QWERTY** (default) | Standard English layout |
+| **AZERTY** | French layout. A↔Q and W↔Z swap from QWERTY; M moves from row 3 (after L) to the right of row 2 (after L), giving row 2 ten cells and row 3 nine. |
+| **QWERTZ** | German layout. Y↔Z swap; same shape as QWERTY everywhere else. |
+
+The same physical layout is used for both upper and lower case, with Shift toggling between them. The layout choice persists via NVS.
+
+### Accents and diacritics
+
+Long-pressing any vowel or accented base letter pops up a horizontal strip of accented variants. Tap one to insert it; tap anywhere outside the popover to dismiss. The popover is disabled in symbol/number mode (no diacritics on digits or punctuation).
+
+Variants available, both lower and upper case:
+
+| Base | Variants |
+| --- | --- |
+| a / A | á à â |
+| c / C | č ç |
+| e / E | é è ê ë ě |
+| i / I | í ï |
+| o / O | ô |
+| r / R | ř |
+| s / S | š |
+| u / U | ù û ü |
+| y / Y | ý |
+| z / Z | ž |
+
+The set covers French and Czech in full; other languages with overlapping accents (Spanish, Italian, German umlaut variants, Portuguese, Slovak) are partially served by the same table.
+
+### Symbol row
+
+Tap the **`#+=`** key on the bottom row to switch the keyboard into symbol mode. Symbols include the usual punctuation plus `_`, `,`, and `:` — these were moved off the main letter rows so the `1#` shift key (which doubles as a row-mode toggle) doesn't fight them for placement.
+
+Tap **`abc`** to switch back to letters.
+
+---
+
 ## Channel Messages
 
 Tap **Messages** from the home grid to open the channel messages screen.
@@ -182,6 +239,11 @@ Tap **Messages** from the home grid to open the channel messages screen.
 
 Channel message history is persisted to per-channel files on the SD card,
 so messages survive reboots when an SD card is present.
+
+**Per-message metadata:**
+
+- **Incoming messages** display a small hop-count badge showing how many repeaters the packet passed through to reach you. Direct receptions show 0 hops.
+- **Outgoing messages** show an ACK indicator next to each send. The indicator updates from "pending" to "acked" as repeater echoes confirm the packet propagated; subsequent acks bump a delivery counter so you can see how many neighbours heard you.
 
 ---
 
@@ -246,9 +308,73 @@ to prevent accidental loss).
 An **Overwrite oldest when full** toggle decides what happens when the
 contacts table reaches its 2,000-entry limit.
 
+To add a contact that hasn't broadcast an advert recently (so it's not in your auto-add list), use the **Discover** screen below to send an active discovery probe and add the node from the response. This is the easiest way to pick up a nearby repeater you've just brought online or one whose advert your device missed.
+
 > **Note:** Direct messaging is not yet implemented in Meck-P4. The
 > contact detail screen does not yet have a compose action. See the
 > [Road-Map](#road-map--to-do) for status.
+
+---
+
+## Discover
+
+Tap **Discover** from the home grid to open the active-discovery screen. Unlike passive advert reception (which depends on a node spontaneously broadcasting and can take up to 12 hours per node), Discover sends a zero-hop **DISCOVER_REQ** control packet on the air and any repeater or room server within radio range responds within a second or two with its public key, type, and the SNR it measured when receiving your probe.
+
+This is the same mechanism the MeshCore mobile app uses for its "scan" feature, and it's how you find a node that hasn't adverted recently or that your device wasn't listening for at advert time.
+
+### What you see
+
+The screen has a status line, a Rescan button, and a scrollable list of result rows. The status line reads `Scanning... N found` while the 30-second window is open and `Scan done: N found` after it closes.
+
+Each result row shows the node type (R for repeater, S for room server), the name, the 4-byte pub-key prefix, and a signal indicator:
+
+- **Live entries** (heard during this scan) display SNR in dB, colour-graded green (strong) / yellow (marginal) / red (weak). These are direct neighbours one radio hop away.
+- **Cached entries** (pre-seeded from your recent-heard ring at scan start) display a hop count in grey. These come from earlier advert reception and may or may not be reachable right now.
+
+A `[+]` marker next to a row means the node is already in your contacts.
+
+### Adding a contact from Discover
+
+Tap any row to add that node to your contacts list. Three cases:
+
+1. **Already in contacts.** Nothing changes (the `[+]` marker confirms this).
+2. **Known to your recent-heard ring but not yet a contact** (e.g. auto-add was off when the advert came in, or you'd previously deleted it). Meck imports the cached advert blob and the contact appears with full name, location, and feature flags.
+3. **Heard via DISCOVER_RESP only**, with no cached advert blob on hand. The contact is added with a placeholder name like `Rptr 19855E54` (the pub-key prefix) and the type from the response. When that node next sends a flood advert (or you send a manual advert to prompt one), the full name and any location fields populate automatically.
+
+Case 3 is the main reason Discover is useful for picking up *new* repeaters: even without ever having heard their advert, you can request their identity and have them in your contacts within seconds.
+
+### Scan behaviour
+
+The scan window is 30 seconds. During that time:
+
+- A single DISCOVER_REQ goes out at the start (zero-hop, ROUTE_TYPE_DIRECT, ~12 bytes on the wire).
+- The type filter is set to **repeaters + rooms** (chat clients and sensors are not asked to respond).
+- The list pre-seeds with up to 32 repeaters/rooms from your recent-heard ring so the screen has content immediately while live responses arrive.
+- Any flood advert that lands during the window is also captured as a secondary signal, providing fallback for older repeater firmware that doesn't yet implement DISCOVER_RESP.
+- A random tag is generated per scan; late responses to previous scans are ignored.
+
+Tap **Rescan** to start a fresh scan. Tap **Back** to return to the home screen.
+
+---
+
+## Audio Player
+
+Tap **Audio** from the home grid to open the audio player. Plays WAV and MP3 files from the SD card under `/sdcard/audio/`. Two top-level subtrees give the player different defaults:
+
+| Subtree | Defaults |
+| --- | --- |
+| `/sdcard/audio/music/` | Standard music playback. Resume bookmark off by default. |
+| `/sdcard/audio/audiobooks/` | Audiobook mode. Resume bookmark on, sleep timer available, position tracked through the playlist. |
+
+Inside each, organise however you like (typically Artist / Album / track, or Author / Book / chapter). The audio browser shows breadcrumbs and lets you tap a track to play, with transport controls (-30s, play/pause, +30s), volume, and a progress bar on the Now Playing screen.
+
+**Cover art** support is partial in v0.2: the player looks for `cover.png` / `folder.png` / `front.png` / `album.png` (case-insensitive) alongside your tracks and pre-flights the decoder, but typical cover dimensions exceed what LVGL's heap can allocate for the decoded framebuffer, so the music-note placeholder is shown instead in this release. A future build will downscale at decode time. Exported sidecar covers don't display on-device yet but are read automatically once support lands.
+
+**Watchdog crash on first play:** if a file with large embedded album art crashes the device during playback startup, you've hit the libhelix-mp3 sync-word scan issue documented in the audio player guide. The firmware has a defensive ID3v2-skip patch that should prevent this, but the durable fix is to clean your files at the source with the `tools/mp3_clean.py` script before copying them to the SD card.
+
+For full setup instructions including the `mp3_clean.py` script usage, SD card layout, troubleshooting, and developer notes, see:
+
+**[Audio player guide](https://github.com/pelgraine/Meck-P4/blob/main/information/Meck%20Docs/audioplayerguide.md)**
 
 ---
 
@@ -266,6 +392,8 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 | **Home Color** | Tap to cycle: Plain / Multi |
 | **Brightness** | Tap to cycle: eight-step ladder (13% / 25% / 38% / 50% / 63% / 75% / 88% / 100%) — applies live |
 | **Auto Off** | Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — screen fades to black when idle, any touch wakes it |
+| **KB Theme** | Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details. |
+| **KB Layout** | Tap to cycle: QWERTY / AZERTY / QWERTZ. Layout switches apply live to every keyboard instance. |
 | **Contacts >>** | Opens the Contacts sub-screen (auto-add policies, type toggles) |
 | **Backup to SD** | Force-write of every NVS blob to the SD card. Tap shows OK (count) or Failed |
 | **Identity** | Read-only display of your public key |
@@ -298,16 +426,14 @@ sky; subsequent fixes after standby are much faster.
 ## Battery
 
 The BQ27220 fuel gauge reads voltage, current, state of charge, and chip
-temperature. The actual cell capacity (2000 mAh) is configured at boot, so
-the gauge's reported current and SOC scale correctly. (LilyGo's example
-firmware ships with `set_design_capacity(1000)`, which scales every
-reading by 0.5x — Meck-P4 corrects this.)
+temperature. Cell design capacity is configured at boot as **1000 mAh** per [LilyGo wiki FAQ 9.9](https://wiki.lilygo.cc/get_started/en/Display/T-Display-P4/T-Display-P4.html), which is the canonical reference for the T-Display P4 battery setup. The wiki additionally instructs running one full **charge → natural discharge to power-off → recharge** cycle on first use so the gauge can learn its real Full Charge Capacity (FCC). After that single calibration cycle, the gauge's coulomb counter references against the correct capacity and percentage readings are accurate.
+
+If a stale FCC from previous firmware is detected (FCC > 1000 mAh), Meck logs a warning at boot prompting the calibration cycle and caps displayed FCC at the design value to keep the UI sane until the gauge re-learns. Direct readings (voltage, current) are unaffected by FCC state.
 
 The Battery tile shows:
 
 - **Voltage** with a voltage-curve charge percent estimate
-- **Charge%** as reported by the BQ27220 (cross-check against the voltage
-  curve — UI surfaces a note if they disagree by more than 15 points)
+- **Charge%** as reported by the BQ27220, recomputed against `min(FCC, design_capacity)` so a stale internal FCC can't skew the displayed percentage
 - **Current** in mA, with `idle` / `charging` / `discharging` label
 - **Chip temp** — the BQ27220's die temperature, **not** the cell
   temperature. The cell's NTC is wired to the LGS4056H charge IC for
@@ -387,8 +513,11 @@ Files of particular note:
 
 - `MeckUI.cpp` — LVGL screens, settings, navigation
 - `MeckMesh.h` — protocol-side hooks: receive, send, advert handling, ring
-  buffers, contact mutation, channel migration
+  buffers, contact mutation, channel migration, active-discovery state
 - `MeckDataStore.h` — NVS and SD persistence
+- `MeckAudio.cpp` / `MeckAudio.h` — audio backend wrapping `chmorgan/esp-audio-player` for WAV + MP3 playback
+- `MeckAudioUI.cpp` / `MeckAudioUI.h` — audio browser and Now Playing screens
+- `es8311.cpp` — codec write-fn / clock reconfig / volume control routed through LilyGo's `Cpp_Bus_Driver::Es8311`
 - `meck_app.cpp` — lifecycle: NVS init, identity, prefs, mesh task spawn
 - `target.cpp` — radio attach, deferred-config queue, battery accessors,
   antenna selection
@@ -430,6 +559,8 @@ no particular timeframes attached.
 - [x] Core port: ESP-IDF component structure, LVGL UI bring-up, SX1262
       radio attach
 - [x] Channel messaging — send and receive on Public, #test, #sydney
+- [x] Per-message metadata — hop count for incoming, ACK count for
+      outgoing
 - [x] Standalone home screen with seven-tile horizontal tileview
 - [x] Channel picker with unread badges
 - [x] Channel message history persisted to SD
@@ -439,15 +570,27 @@ no particular timeframes attached.
       delete button
 - [x] Contacts auto-add policies (Auto All / Custom / Manual Only) with
       per-type toggles
+- [x] **Discover** — active zero-hop DISCOVER_REQ/RESP scan with SNR
+      readout, list of nearby repeaters/rooms, tap-to-add for nodes not
+      yet in your contacts
+- [x] **Virtual keyboard** — Dark / Light theme, three layouts
+      (QWERTY / AZERTY / QWERTZ), long-press accent popover for French
+      and Czech diacritics
+- [x] **Audio player** — WAV + MP3 playback from SD with music /
+      audiobook subtrees, transport controls, volume, bookmarks. See
+      [Audio Player](#audio-player). Cover-art rendering still incomplete
+      in v0.2 (see audio guide for status).
 - [x] Settings screen with node name, radio preset, TX power, path hash
-      mode, UTC offset, home color, brightness, auto screen-off
+      mode, UTC offset, home color, brightness, auto screen-off, KB theme,
+      KB layout
 - [x] 17-preset radio picker
 - [x] NVS-primary, SD-mirror persistence for prefs / channels / contacts /
       identity
 - [x] Self-healing channel-secret migration on boot
 - [x] Manual "Backup to SD" trigger
-- [x] BQ27220 battery readout with correct 2000 mAh design capacity and
-      voltage-curve cross-check
+- [x] BQ27220 battery readout with correct design capacity per LilyGo
+      wiki FAQ 9.9, FCC clamp + recalibration warning, accurate under-load
+      remaining-mAh from the chip's coulomb counter
 - [x] L76K GPS with live fix data and long-press on/off toggle
 - [x] Clock sync from MeshCore advert timestamps
 - [x] Clock sync from GPS RMC sentences
@@ -465,7 +608,9 @@ no particular timeframes attached.
       neighbours, version
 - [ ] Trace route — view the relay path of a received packet
 - [ ] Notes app
-- [ ] Audio player — local playback of audio files from SD
+- [ ] Audio cover-art rendering — pre-flight succeeds but the LVGL heap
+      can't allocate decoded framebuffers for typical cover sizes; needs
+      decode-time downscale or a streaming decoder
 - [ ] Web browser & IRC client
 - [ ] PCF8563 hardware RTC integration — read on boot, write on shutdown
       so time survives power-off
