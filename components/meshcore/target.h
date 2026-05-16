@@ -43,9 +43,14 @@ extern "C" void meck_apply_pending_send();
 
 // Deferred SD-save for channel messages. ring-write call sites enqueue;
 // meck_task drains via meck_apply_pending_save() and writes to SD without
-// blocking LVGL or message receive paths.
+// blocking LVGL or message receive paths. ring_idx is the slot's position
+// in the channel's ring buffer; the drain uses it to write the resulting
+// file_offset back into the live ring after an initial append, and to
+// snapshot the latest in-memory state (heard_count, file_offset) at drain
+// time so multiple coalesced echoes resolve to a single in-place rewrite.
 struct P4ChannelMessage;
-extern "C" void meck_request_save_message(uint8_t channel_idx, const P4ChannelMessage* msg);
+extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
+                                          const P4ChannelMessage* msg);
 extern "C" void meck_apply_pending_save();
 
 // Sets SKY13453 VCTL to a known antenna port (default HIGH = antenna A).

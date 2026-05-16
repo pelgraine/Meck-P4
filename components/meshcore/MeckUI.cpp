@@ -1459,15 +1459,58 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
         lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(lbl_body, bubble_max_w - 22);
 
-        // Timestamp footer in muted grey.
+        // Timestamp footer in muted grey, optionally suffixed with hop /
+        // heard-by metadata so the user can see at a glance how their
+        // message travelled.
+        //
+        // For received bubbles we append a hop indicator:
+        //   path_len == 0xFF   → "direct" (route_direct, no flood)
+        //   path_len & 63 == 0 → "direct" (flood broadcast heard from the
+        //                        sender with no relay in the path)
+        //   else               → "N hops"
+        //
+        // For sent bubbles we append a heard-by indicator matching what
+        // the MeshCore mobile app shows ("Heard N Repeats"):
+        //   heard_count == 0   → "Sending…" (no echoes yet — either still
+        //                        in flight, never heard back, or out of
+        //                        repeater range)
+        //   else               → "✓ Heard N Repeats"
         char timebuf[32];
         format_local_time(msgs[i].timestamp, timebuf, sizeof(timebuf));
-        if (timebuf[0]) {
+        char meta[64];
+        meta[0] = '\0';
+        if (is_sent) {
+            uint8_t hc = msgs[i].heard_count;
+            if (hc == 0) {
+                snprintf(meta, sizeof(meta), "Sending...");
+            } else {
+                snprintf(meta, sizeof(meta), LV_SYMBOL_OK " Heard %u Repeat%s",
+                         (unsigned)hc, hc == 1 ? "" : "s");
+            }
+        } else {
+            uint8_t pl = msgs[i].path_len;
+            if (pl == 0xFF || (pl & 63) == 0) {
+                snprintf(meta, sizeof(meta), "direct");
+            } else {
+                unsigned hops = pl & 63;
+                snprintf(meta, sizeof(meta), "%u hop%s",
+                         hops, hops == 1 ? "" : "s");
+            }
+        }
+        char footer[96];
+        if (timebuf[0] && meta[0]) {
+            snprintf(footer, sizeof(footer), "%s  ·  %s", timebuf, meta);
+        } else if (timebuf[0]) {
+            snprintf(footer, sizeof(footer), "%s", timebuf);
+        } else {
+            snprintf(footer, sizeof(footer), "%s", meta);
+        }
+        if (footer[0]) {
             lv_obj_t *lbl_time = lv_label_create(bubble);
-            lv_label_set_text(lbl_time, timebuf);
+            lv_label_set_text(lbl_time, footer);
             lv_obj_set_style_text_color(lbl_time, lv_palette_main(LV_PALETTE_GREY), 0);
             lv_obj_set_style_text_font(lbl_time, &meck_montserrat_14, 0);
-            // Right-justify timestamp on sent bubbles to mirror chat-app convention.
+            // Right-justify on sent bubbles to mirror chat-app convention.
             lv_obj_set_style_text_align(lbl_time,
                 is_sent ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
         }

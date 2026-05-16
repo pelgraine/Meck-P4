@@ -29,11 +29,101 @@
 
 // Forward decl for the deferred SD-save queue, defined in meck_app.cpp.
 // Allows ring-write call sites in this header to enqueue without including
-// target.h (which would pull P4SX1262Radio.h into hot paths).
+// target.h (which would pull P4SX1262Radio.h into hot paths). ring_idx is
+// the position of the just-written message in the channel's ring; the
+// drain uses it to write the resulting file_offset back to the same slot
+// after an initial append, and to look up the current heard_count for any
+// in-place rewrite triggered by a subsequent echo.
 struct P4ChannelMessage;
-extern "C" void meck_request_save_message(uint8_t channel_idx, const P4ChannelMessage* msg);
+extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
+                                           const P4ChannelMessage* msg);
 
 // ---- ESP-IDF clock/RNG implementations ----
+
+// ============================================================================
+// P4MeshTables — flood-relay dedup with our-own-packet pass-through
+// ----------------------------------------------------------------------------
+// Mesh::sendFlood marks every packet it sends in _tables (see upstream
+// Mesh.cpp), so that the upstream GRP_TXT receive path
+//
+//     } else if (!_tables->hasSeen(pkt)) {
+//         // ... decrypt + dispatch onGroupDataRecv → onChannelMessageRecv
+//
+// skips re-broadcasts of our own packet. For repeaters this prevents
+// re-forwarding loops. For a companion that wants to count "Heard N
+// Repeats" by listening for flood relays of its own send, the upstream
+// behaviour silently drops every echo before our isOurOwnEcho check
+// ever runs, so heard_count stays at zero.
+//
+// P4MeshTables keeps a small ring of recent outgoing packet hashes. On
+// hasSeen() we check the ring first:
+//   - In "marking outgoing" mode (set by Meck around its own send call):
+//     capture this packet's hash into the ring and return false WITHOUT
+//     adding to the underlying SimpleMeshTables. The send-side caller
+//     ignores the return value but the side effect (no marking) is what
+//     matters.
+//   - On any receive whose hash matches our outgoing ring: return false
+//     WITHOUT touching the underlying table. Every distinct repeater
+//     relay of our packet therefore reaches onChannelMessageRecv, and
+//     isOurOwnEcho counts each one.
+//   - Everything else: defer to SimpleMeshTables for normal dedup.
+//
+// Safe for companion / standalone builds that never forward packets
+// (allowPacketForward returns false). Do NOT use on a repeater build —
+// it would re-forward its own packets indefinitely.
+// ============================================================================
+
+class P4MeshTables : public SimpleMeshTables {
+public:
+    // Flag toggled around our own sendChannelMessage call. While true,
+    // the next hasSeen() invocation is treated as the sendFlood marking
+    // step for our outgoing packet.
+    void beginMarkingOurOutgoing() { _marking_outgoing = true; }
+    void endMarkingOurOutgoing()   { _marking_outgoing = false; }
+
+    bool hasSeen(const mesh::Packet* pkt) override {
+        uint8_t h[MAX_HASH_SIZE];
+        pkt->calculatePacketHash(h);
+
+        if (_marking_outgoing) {
+            // Capture this packet hash so future re-broadcast arrivals
+            // can be recognised and passed through.
+            memcpy(_outgoing[_outgoing_idx], h, MAX_HASH_SIZE);
+            _outgoing_idx = (_outgoing_idx + 1) % OUR_OUTGOING_RING;
+            // Do NOT call SimpleMeshTables::hasSeen() — that would add
+            // the hash to the upstream dedup table and re-introduce the
+            // very filtering we're trying to bypass.
+            return false;
+        }
+
+        // Receive path: if this incoming packet's hash matches one we
+        // sent recently, let it through every time without ever
+        // marking it seen, so subsequent repeater relays (each
+        // delivering the same hash from a different angle) also fire
+        // onChannelMessageRecv and get counted.
+        for (int i = 0; i < OUR_OUTGOING_RING; i++) {
+            if (memcmp(_outgoing[i], h, MAX_HASH_SIZE) == 0) {
+                return false;
+            }
+        }
+
+        return SimpleMeshTables::hasSeen(pkt);
+    }
+
+private:
+    static const int OUR_OUTGOING_RING = 8;
+    uint8_t _outgoing[OUR_OUTGOING_RING][MAX_HASH_SIZE] = {{0}};
+    int _outgoing_idx = 0;
+    bool _marking_outgoing = false;
+};
+
+// Forward decl for begin/end markers exposed by meck_app.cpp so MeckMesh
+// can flip P4MeshTables into "marking outgoing" mode around its own
+// sendGroupMessage call without taking a direct dependency on the
+// globally-instantiated tables.
+extern "C" void meck_tables_begin_outgoing();
+extern "C" void meck_tables_end_outgoing();
+
 
 class P4MillisecondClock : public mesh::MillisecondClock {
 public:
@@ -44,9 +134,69 @@ class P4RTCClock : public mesh::RTCClock {
     uint32_t base_time;
     uint64_t accumulator;
     unsigned long prev_millis;
+
+    // Compile-time fallback epoch. Used as the boot-time clock value
+    // until something more authoritative (advert, GPS, or explicit
+    // setCurrentTime) overrides it. This way pre-sync timestamps fall
+    // close to "now" rather than at a baked-in 2025 date that ages out
+    // over time. Recomputes automatically every flash; no manual
+    // maintenance needed.
+    //
+    // Two sources, in priority order:
+    //   1. MECK_BUILD_EPOCH (preferred) — UTC epoch injected at build
+    //      time by CMakeLists.txt via `string(TIMESTAMP ... %s UTC)`.
+    //      This is the only way to get a true UTC value at build time;
+    //      __DATE__ / __TIME__ are LOCAL time on the build machine, so
+    //      relying on them alone leaves the device displaying
+    //      local_time + utc_offset, off by the build machine's offset.
+    //   2. __DATE__ / __TIME__ parse — fallback if MECK_BUILD_EPOCH is
+    //      not defined (e.g. the CMakeLists snippet wasn't applied).
+    //      The result is treated as UTC even though it's really local,
+    //      which on a +10 build machine displays 10 hours late.
+    //
+    // __DATE__ is "Mmm dd yyyy" (11 chars + NUL), __TIME__ is "hh:mm:ss".
+    // The parser is constexpr-friendly but kept as a static helper for
+    // clarity rather than constexpr-correctness; the resulting epoch is
+    // computed once in the constructor and stored.
+    static uint32_t compileTimeEpoch() {
+#ifdef MECK_BUILD_EPOCH
+        return (uint32_t)MECK_BUILD_EPOCH;
+#else
+        const char* d = __DATE__;
+        const char* t = __TIME__;
+        int year = (d[7] - '0') * 1000 + (d[8] - '0') * 100
+                 + (d[9] - '0') * 10   + (d[10] - '0');
+        const char* months = "JanFebMarAprMayJunJulAugSepOctNovDec";
+        int month = 0;
+        for (int i = 0; i < 12; i++) {
+            if (d[0] == months[i*3] && d[1] == months[i*3+1] && d[2] == months[i*3+2]) {
+                month = i; break;
+            }
+        }
+        int day = (d[4] == ' ' ? 0 : (d[4] - '0') * 10) + (d[5] - '0');
+        int hour = (t[0] - '0') * 10 + (t[1] - '0');
+        int minute = (t[3] - '0') * 10 + (t[4] - '0');
+        int second = (t[6] - '0') * 10 + (t[7] - '0');
+
+        // Days-since-epoch using Howard Hinnant's date algorithm
+        // (https://howardhinnant.github.io/date_algorithms.html). Treats
+        // year/month/day as a date in the proleptic Gregorian calendar and
+        // returns days since 1970-01-01. Works for all years we'll see.
+        int y = year - (month < 2 ? 1 : 0);
+        int m = month + 1;  // algorithm wants 1-indexed
+        int era = (y >= 0 ? y : y - 399) / 400;
+        unsigned yoe = (unsigned)(y - era * 400);
+        unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + day - 1;
+        unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        long days_since_epoch = (long)era * 146097 + (long)doe - 719468;
+
+        return (uint32_t)(days_since_epoch * 86400 + hour * 3600 + minute * 60 + second);
+#endif
+    }
+
 public:
     P4RTCClock() : RTCClock() {
-        base_time = 1747267200;  // 15 May 2025 00:00 UTC fallback
+        base_time = compileTimeEpoch();
         accumulator = 0;
         prev_millis = millis();
     }
@@ -84,32 +234,59 @@ struct P4ChannelMessage {
     uint32_t timestamp;
     uint8_t channel_idx;
     uint8_t path_len;
+    // heard_count: for our own outgoing messages, the number of flood-echo
+    // copies we've heard come back through the mesh. Each distinct repeater
+    // that re-broadcasts our packet causes onChannelMessageRecv to fire on
+    // the isOurOwnEcho path and bump this counter. UI uses it to display a
+    // "✓ Heard by N" indicator on sent bubbles — the same affordance the
+    // MeshCore mobile app shows as "Heard N Repeats". For received bubbles
+    // this stays 0 (the field is meaningful only for our own sends).
+    // Persisted to disk in schema v2 onward so a "Heard 3 Repeats" footer
+    // survives a reboot.
+    uint8_t heard_count;
     bool valid;
+    // file_offset: byte offset of this record within its channel's ch_<idx>.bin
+    // file. Zero means "not yet persisted" (initial save still pending or this
+    // message predates persistence). Once non-zero, future state changes
+    // (e.g. heard_count increment) rewrite the record in-place at this offset
+    // rather than appending a duplicate. In-memory only — not part of the
+    // on-disk record, recomputed at load time from file position.
+    uint32_t file_offset;
 };
 
 // ---- On-disk format for channel message persistence ----
 //
 // File path: /sdcard/meshcore/messages/ch_<idx>.bin (one per channel)
-// Schema version 1 ships with just timestamp/channel/path_len/text/valid;
-// fields like SNR, hop path, and DM peer hash are reserved zeros so
-// schema version 2 can fill them in without changing record size again.
+//
+// Schema v1: timestamp / channel / path_len / text / valid, with reserved
+//            bytes for SNR, hop path, DM peer hash, heard_count.
+// Schema v2: adds heard_count (1 byte stolen from the path[] reserved
+//            region). Layout is byte-compatible with v1 because v1 always
+//            wrote zero to the stolen byte, so a v2 reader interprets v1
+//            records as v2 records with heard_count=0 (semantically correct
+//            — pre-v2 records simply never had echo counts persisted).
+//            Migration is a header version bump, no record data movement.
+//
 // Magic 'MCMS' (Meck Channel Message Store) — distinct from upstream Meck's
 // 'MCHS' since the storage strategy differs (per-channel vs single file).
 
-#define P4_MSG_FILE_MAGIC    0x4D434D53U  // 'MCMS' little-endian
-#define P4_MSG_FILE_VERSION  1
+#define P4_MSG_FILE_MAGIC           0x4D434D53U  // 'MCMS' little-endian
+#define P4_MSG_FILE_VERSION         2
+#define P4_MSG_FILE_VERSION_MIN     1  // oldest accepted on load (in-place upgraded on first write)
 
 struct __attribute__((packed)) P4MsgFileRecord {
     uint32_t timestamp;
     uint32_t dm_peer_hash;       // reserved (0) — DM persistence pending
     uint8_t  channel_idx;
     uint8_t  path_len;
-    int8_t   snr_x4;             // reserved (0) — bumped to v2 when wired
+    int8_t   snr_x4;             // reserved (0) — bumped to v3 when wired
     uint8_t  flags;              // bit 0 = valid; rest reserved
-    uint8_t  path[8];            // reserved zeros — hop hashes pending
+    uint8_t  heard_count;        // v2: flood-echo count for our own sends
+    uint8_t  path[7];            // reserved zeros — hop hashes pending (was [8] in v1)
     char     text[P4_MSG_TEXT_LEN];
 };
-// Total: 4 + 4 + 1 + 1 + 1 + 1 + 8 + 300 = 320 bytes
+// Total: 4 + 4 + 1 + 1 + 1 + 1 + 1 + 7 + 300 = 320 bytes (identical to v1)
+static_assert(sizeof(P4MsgFileRecord) == 320, "P4MsgFileRecord size must stay 320 bytes for v1 compatibility");
 
 // ---- Recent heard ring buffer ----
 
@@ -231,6 +408,23 @@ public:
             saveContactsToStore();
         }
 
+        // Periodic retry of the SD-backup of the device identity. Runs
+        // every 5 seconds while pending. The data store's ensureIdentity-
+        // OnSD() is cheap: a flag check + (when due) an SD-mount probe.
+        // Once the backup succeeds, the flag clears and subsequent calls
+        // are a single bool test. Handles two scenarios:
+        //   1. SD wasn't mounted when loadIdentity ran during begin().
+        //   2. SD card was inserted after boot.
+        // Both end with the identity safely mirrored to SD before any
+        // future reflash could orphan the NVS-only copy.
+        if (_store) {
+            unsigned long now = millis();
+            if (now - _last_identity_sd_check >= 5000) {
+                _last_identity_sd_check = now;
+                _store->ensureIdentityOnSD();
+            }
+        }
+
         if (_advert_enabled && _advert_interval_ms > 0) {
             unsigned long now = millis();
             if (now >= _next_advert_ms) {
@@ -250,7 +444,17 @@ public:
         ChannelDetails ch;
         if (!getChannel(channel_idx, ch)) return false;
         uint32_t ts = _rtc_ref.getCurrentTime();
+
+        // Flip P4MeshTables into "marking outgoing" mode for the duration
+        // of the send. The Mesh layer's sendFlood will call hasSeen() on
+        // the just-created packet to mark it; our override captures the
+        // packet hash for echo-recognition without adding to the seen
+        // table. The marker is cleared as soon as sendGroupMessage
+        // returns so unrelated background packet processing reverts to
+        // normal dedup.
+        meck_tables_begin_outgoing();
         bool ok = sendGroupMessage(ts, ch.channel, _prefs->node_name, text, strlen(text));
+        meck_tables_end_outgoing();
         if (ok) {
             // Mark this (timestamp, channel) so flood-relayed copies of our
             // own packet that bounce back via the mesh don't get re-stashed
@@ -267,26 +471,30 @@ public:
             P4ChannelMessage* ring = (channel_idx < MAX_GROUP_CHANNELS)
                                        ? _msgs_ch[channel_idx] : nullptr;
             P4ChannelMessage saved_copy;
-            bool wrote = false;
+            int wrote_idx = -1;
             if (ring) {
                 _msg_newest_ch[channel_idx] = (_msg_newest_ch[channel_idx] + 1) % P4_MSG_PER_CHANNEL;
                 P4ChannelMessage& m = ring[_msg_newest_ch[channel_idx]];
                 m.timestamp = ts;
                 m.channel_idx = channel_idx;
                 m.path_len = 0;  // local
+                m.heard_count = 0;  // no echoes yet — increments as repeaters re-flood
                 m.valid = true;
+                m.file_offset = 0;  // not yet persisted — queue drain sets this after append
                 strncpy(m.text, echo, P4_MSG_TEXT_LEN - 1);
                 m.text[P4_MSG_TEXT_LEN - 1] = '\0';
                 if (_msg_count_ch[channel_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[channel_idx]++;
                 _msg_dirty = true;
                 saved_copy = m;
-                wrote = true;
+                wrote_idx = _msg_newest_ch[channel_idx];
             }
             xSemaphoreGive(_mutex);
 
-            // Queue the SD save outside the mutex (deferred to meck_task)
-            if (wrote) {
-                meck_request_save_message(channel_idx, &saved_copy);
+            // Queue the SD save outside the mutex (deferred to meck_task).
+            // ring_idx lets the drain write file_offset back to this exact
+            // slot once the initial append returns its position on disk.
+            if (wrote_idx >= 0) {
+                meck_request_save_message(channel_idx, wrote_idx, &saved_copy);
             }
         }
         return ok;
@@ -517,8 +725,16 @@ public:
         // so allocate from PSRAM heap (we already have plenty there).
         size_t buf_size = P4_MSG_PER_CHANNEL * sizeof(P4MsgFileRecord);
         P4MsgFileRecord* buf = (P4MsgFileRecord*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-        if (!buf) {
+        // Parallel offsets array so each loaded record knows where it
+        // lives on disk — needed for future in-place rewrites of heard_count
+        // when echoes arrive (though in practice loaded records won't see
+        // echoes since the recent-outgoing ring is rebuilt at boot).
+        uint32_t* offs = (uint32_t*)heap_caps_malloc(
+            P4_MSG_PER_CHANNEL * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+        if (!buf || !offs) {
             printf("Meck: loadMessagesFromStore malloc failed\n");
+            if (buf) free(buf);
+            if (offs) free(offs);
             return;
         }
 
@@ -531,7 +747,7 @@ public:
                 ch,
                 P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
                 (uint16_t)sizeof(P4MsgFileRecord),
-                buf, P4_MSG_PER_CHANNEL);
+                buf, offs, P4_MSG_PER_CHANNEL);
             if (n <= 0) continue;
 
             // Records are in chronological order (oldest first). Copy into
@@ -542,7 +758,11 @@ public:
                 m.timestamp = buf[i].timestamp;
                 m.channel_idx = buf[i].channel_idx;
                 m.path_len = buf[i].path_len;
+                // heard_count restored from schema v2 (or zero on a v1
+                // record, since v1's byte at this offset was reserved zero).
+                m.heard_count = buf[i].heard_count;
                 m.valid = (buf[i].flags & 0x01) != 0;
+                m.file_offset = offs[i];
                 memcpy(m.text, buf[i].text, P4_MSG_TEXT_LEN);
                 m.text[P4_MSG_TEXT_LEN - 1] = '\0';
             }
@@ -554,6 +774,7 @@ public:
         }
 
         free(buf);
+        free(offs);
         printf("Meck: loadMessagesFromStore — %d total messages loaded across %d channels\n",
                total_loaded, MAX_GROUP_CHANNELS);
     }
@@ -675,6 +896,70 @@ public:
         return out;
     }
 
+    // Write back the on-disk file offset for a freshly-appended message
+    // record. Called by the save-queue drain after appendChannelMessageRecord
+    // returns the position where it placed the bytes. The expected_timestamp
+    // guards against the rare race where the ring slot has been overwritten
+    // by a newer message between queue and drain — if the timestamps don't
+    // match, we silently skip rather than clobber the new entry's offset.
+    bool setMessageFileOffset(uint8_t channel_idx, int ring_idx,
+                               uint32_t expected_timestamp, uint32_t file_offset) {
+        if (channel_idx >= MAX_GROUP_CHANNELS) return false;
+        if (ring_idx < 0 || ring_idx >= P4_MSG_PER_CHANNEL) return false;
+        P4ChannelMessage* ring = _msgs_ch[channel_idx];
+        if (!ring) return false;
+        bool ok = false;
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        P4ChannelMessage& m = ring[ring_idx];
+        if (m.valid && m.timestamp == expected_timestamp) {
+            m.file_offset = file_offset;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    // Snapshot a ring slot's current state into both an on-disk record and
+    // the slot's file_offset. Called by the save-queue drain so it sees the
+    // latest in-memory state (including any heard_count or file_offset
+    // changes made between enqueue and drain), rather than trusting the
+    // possibly-stale copy captured at enqueue time.
+    //
+    // expected_timestamp guards against ring-slot reuse: if the slot has
+    // been overwritten by a newer message with a different timestamp, the
+    // snapshot fails and the caller skips this drain entry.
+    //
+    // Returns true if the slot is valid and timestamp matches.
+    bool buildMessageRecordSnapshot(uint8_t channel_idx, int ring_idx,
+                                     uint32_t expected_timestamp,
+                                     P4MsgFileRecord* out_rec,
+                                     uint32_t* out_file_offset) {
+        if (!out_rec || !out_file_offset) return false;
+        if (channel_idx >= MAX_GROUP_CHANNELS) return false;
+        if (ring_idx < 0 || ring_idx >= P4_MSG_PER_CHANNEL) return false;
+        P4ChannelMessage* ring = _msgs_ch[channel_idx];
+        if (!ring) return false;
+        bool ok = false;
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        P4ChannelMessage& m = ring[ring_idx];
+        if (m.valid && m.timestamp == expected_timestamp) {
+            memset(out_rec, 0, sizeof(*out_rec));
+            out_rec->timestamp    = m.timestamp;
+            out_rec->dm_peer_hash = 0;                        // reserved
+            out_rec->channel_idx  = m.channel_idx;
+            out_rec->path_len     = m.path_len;
+            out_rec->snr_x4       = 0;                        // reserved (schema v3+)
+            out_rec->flags        = m.valid ? 0x01 : 0x00;
+            out_rec->heard_count  = m.heard_count;
+            // out_rec->path[] left zeroed (reserved for schema v3)
+            memcpy(out_rec->text, m.text, P4_MSG_TEXT_LEN);
+            *out_file_offset = m.file_offset;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
     void setAdvertEnabled(bool en) { _advert_enabled = en; }
     bool isAdvertEnabled() const { return _advert_enabled; }
     const mesh::LocalIdentity& getIdentity() const { return self_id; }
@@ -690,26 +975,62 @@ protected:
         // Self-echo dedup: if this is our own packet bouncing back via flood,
         // drop it. We already wrote a local-echo entry at send time. Update
         // that entry's path_len to reflect the real flood-relay path so the
-        // user sees their message was successfully relayed.
+        // user sees their message was successfully relayed, AND bump
+        // heard_count so we accumulate a "heard by N repeaters" indicator
+        // as additional repeaters re-flood the same packet. Each increment
+        // also queues a save so the count is rewritten in-place at the
+        // record's existing file_offset on SD (set on the initial append).
         if (isOurOwnEcho(timestamp, ch_idx)) {
             uint8_t real_path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFE;
+            // Debug: lets you confirm in serial whether a sent packet bounced
+            // back through any repeaters at all, and via how many hops. If
+            // nothing prints in the seconds after a send, no repeater in
+            // earshot picked it up.
+            printf("Meck: heard own echo ch[%d] ts=%u path_len=0x%02X flood=%d\n",
+                   (int)ch_idx, (unsigned)timestamp, (unsigned)real_path_len,
+                   (int)pkt->isRouteFlood());
             xSemaphoreTake(_mutex, portMAX_DELAY);
             P4ChannelMessage* ring = (ch_idx < MAX_GROUP_CHANNELS) ? _msgs_ch[ch_idx] : nullptr;
+            P4ChannelMessage saved_copy;
+            int matched_idx = -1;
             if (ring) {
                 int newest = _msg_newest_ch[ch_idx];
                 int count  = _msg_count_ch[ch_idx];
                 for (int i = 0; i < count; i++) {
                     int idx = (newest + P4_MSG_PER_CHANNEL - i) % P4_MSG_PER_CHANNEL;
                     P4ChannelMessage& existing = ring[idx];
-                    if (existing.valid && existing.timestamp == timestamp &&
-                        existing.path_len == 0) {
-                        existing.path_len = real_path_len;
+                    if (existing.valid && existing.timestamp == timestamp) {
+                        // First echo: capture real path_len. Subsequent
+                        // echoes don't overwrite — we keep the first echo's
+                        // path as representative.
+                        if (existing.path_len == 0) {
+                            existing.path_len = real_path_len;
+                        }
+                        // Every echo from a distinct repeater bumps the
+                        // heard counter. Saturate at 255 so we never wrap.
+                        if (existing.heard_count < 0xFF) {
+                            existing.heard_count++;
+                        }
+                        printf("Meck:   heard_count now %u (file_offset=%u)\n",
+                               (unsigned)existing.heard_count,
+                               (unsigned)existing.file_offset);
                         _msg_dirty = true;
+                        saved_copy = existing;
+                        matched_idx = idx;
                         break;
                     }
                 }
             }
             xSemaphoreGive(_mutex);
+
+            // Queue an in-place rewrite. The drain sees file_offset != 0 on
+            // the captured copy and seeks to that offset rather than
+            // appending a duplicate. If file_offset is still 0 (initial
+            // append hasn't drained yet), the drain coalesces and the
+            // single eventual append captures the updated heard_count.
+            if (matched_idx >= 0) {
+                meck_request_save_message(ch_idx, matched_idx, &saved_copy);
+            }
             return;
         }
 
@@ -720,27 +1041,29 @@ protected:
         xSemaphoreTake(_mutex, portMAX_DELAY);
         P4ChannelMessage* ring = (ch_idx < MAX_GROUP_CHANNELS) ? _msgs_ch[ch_idx] : nullptr;
         P4ChannelMessage saved_copy;
-        bool wrote = false;
+        int wrote_idx = -1;
         if (ring) {
             _msg_newest_ch[ch_idx] = (_msg_newest_ch[ch_idx] + 1) % P4_MSG_PER_CHANNEL;
             P4ChannelMessage& m = ring[_msg_newest_ch[ch_idx]];
             m.timestamp = timestamp;
             m.channel_idx = ch_idx;
             m.path_len = path_len;
+            m.heard_count = 0;  // unused for incoming, but keep deterministic
             m.valid = true;
+            m.file_offset = 0;  // queue drain sets this after initial append
             strncpy(m.text, text, P4_MSG_TEXT_LEN - 1);
             m.text[P4_MSG_TEXT_LEN - 1] = '\0';
             if (_msg_count_ch[ch_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[ch_idx]++;
             _msg_unread_ch[ch_idx]++;
             _msg_dirty = true;
             saved_copy = m;
-            wrote = true;
+            wrote_idx = _msg_newest_ch[ch_idx];
         }
         xSemaphoreGive(_mutex);
 
         // Queue the SD save outside the mutex (deferred to meck_task)
-        if (wrote) {
-            meck_request_save_message(ch_idx, &saved_copy);
+        if (wrote_idx >= 0) {
+            meck_request_save_message(ch_idx, wrote_idx, &saved_copy);
         }
     }
 
@@ -942,6 +1265,13 @@ private:
 
     bool _contacts_save_pending;
     unsigned long _contacts_save_at;
+
+    // Last millis() at which Meck::loop() called ensureIdentityOnSD().
+    // Spaced 5 seconds apart so the periodic SD-mount probe doesn't run
+    // on every loop iteration. Once the data store reports backup done
+    // (its internal pending flag clears), the call becomes a cheap bool
+    // check and the throttle stops mattering.
+    unsigned long _last_identity_sd_check = 0;
 
     SemaphoreHandle_t _mutex;
 

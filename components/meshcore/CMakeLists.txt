@@ -83,3 +83,22 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DMAX_GROUP_CHANNELS=8
     -DMAX_CONTACTS=2000
 )
+
+# Capture the actual UTC build epoch and inject it into the firmware so
+# P4RTCClock's fallback boot time is a true UTC value, not the build
+# machine's local time.
+#
+# Why: __DATE__ / __TIME__ are LOCAL time on the build machine. If we
+# parse those and treat the result as UTC, the UI subsequently adds the
+# user's UTC offset on top, displaying pre-sync timestamps off by the
+# build machine's timezone offset (e.g. AEST/+10 → "12:01 build" shown
+# as "22:01 = 10:01 PM"). string(TIMESTAMP ... %s UTC) is built into
+# CMake itself (no shell or `date` dependency) and re-evaluates every
+# configure step, so each clean build bakes a fresh epoch.
+#
+# PRIVATE scope: only P4RTCClock in MeckMesh.h consumes the macro; no
+# need to leak it to other components.
+string(TIMESTAMP MECK_BUILD_EPOCH "%s" UTC)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    MECK_BUILD_EPOCH=${MECK_BUILD_EPOCH}
+)

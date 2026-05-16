@@ -29,11 +29,27 @@ static P4DataStore g_dataStore;
 static P4NodePrefs g_node_prefs;
 static P4RNG g_rng;
 static P4RTCClock g_rtc;
-static SimpleMeshTables g_mesh_tables;
+// P4MeshTables replaces upstream SimpleMeshTables so that flood-relayed
+// copies of our own outgoing packets aren't filtered before reaching
+// onChannelMessageRecv. Without this swap the upstream Mesh.cpp pre-
+// marks every outgoing packet in the seen-table at sendFlood time, which
+// silently drops every repeater echo of our own send and prevents
+// heard_count from ever advancing past zero. See P4MeshTables in
+// MeckMesh.h for the full rationale.
+static P4MeshTables g_mesh_tables;
 static Meck* g_the_mesh = nullptr;
 
 // ---- Internal accessor (declared in target.h) ----
 Meck* meck_get_instance() { return g_the_mesh; }
+
+// ---- P4MeshTables outgoing-mode markers ----
+// Called by Meck::sendChannelMessage around its sendGroupMessage call so
+// the hash of our just-built packet is captured (not marked seen) and
+// relayed copies can pass through hasSeen on every arrival. Implemented
+// here (rather than as static methods on P4MeshTables) so MeckMesh.h
+// doesn't need to know which P4MeshTables instance is the active one.
+extern "C" void meck_tables_begin_outgoing() { g_mesh_tables.beginMarkingOurOutgoing(); }
+extern "C" void meck_tables_end_outgoing()   { g_mesh_tables.endMarkingOurOutgoing(); }
 
 // ---- App init ----
 extern "C" bool meck_app_init() {
@@ -136,9 +152,24 @@ extern "C" void meck_apply_pending_send() {
 // ============================================================================
 // Deferred SD-save queue for channel messages
 // ----------------------------------------------------------------------------
-// Ring-write call sites in MeckMesh enqueue completed messages. The
-// meck_task drains the queue and writes each record to SD via the
-// P4DataStore append helper. SD writes never block LVGL or receive paths.
+// Ring-write call sites in MeckMesh enqueue completed messages; meck_task
+// drains the queue and writes each record to SD via P4DataStore. SD writes
+// never block LVGL or receive paths.
+//
+// Each entry carries (channel_idx, ring_idx, msg_copy):
+//   - msg_copy holds the in-memory state captured at enqueue time, which
+//     includes timestamp, heard_count, file_offset, and the text.
+//   - ring_idx is the index of the source ring slot, used to write the
+//     resulting file_offset back to the live ring after an initial append.
+//
+// On drain, the action depends on msg_copy.file_offset:
+//   - file_offset == 0  → initial append. Capture the position returned
+//                         by appendChannelMessageRecord and write it back
+//                         to the live ring slot (guarded by timestamp so a
+//                         ring-overwrite race can't clobber a newer entry).
+//   - file_offset != 0  → in-place rewrite at that offset. Used when a
+//                         flood echo bumps heard_count on an already-
+//                         persisted message; avoids appending duplicates.
 //
 // Queue size 16: at typical channel-message arrival rates (~1/sec) the
 // drain stays empty most of the time. On overflow we drop the oldest
@@ -149,15 +180,30 @@ extern "C" void meck_apply_pending_send() {
 
 struct PendingSaveEntry {
     uint8_t channel_idx;
-    P4ChannelMessage msg;
+    int     ring_idx;        // location in the source ring (for offset writeback)
+    P4ChannelMessage msg;    // captured state (timestamp, heard_count, file_offset, text)
 };
 
 static PendingSaveEntry g_save_queue[MECK_SAVE_QUEUE_SIZE];
 static volatile int g_save_head = 0;  // next slot to write (producer)
 static volatile int g_save_tail = 0;  // next slot to read  (consumer)
 
-extern "C" void meck_request_save_message(uint8_t channel_idx, const P4ChannelMessage* msg) {
+extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
+                                          const P4ChannelMessage* msg) {
     if (!msg) return;
+
+    // Dedup: if an entry for this (channel, ring slot) is already pending,
+    // skip — the drain will read fresh state via buildMessageRecordSnapshot
+    // and pick up whatever the latest heard_count is at drain time. This
+    // matters for sent messages: each flood echo would otherwise enqueue
+    // another save, and a busy mesh could trivially overflow a 16-deep
+    // queue when several repeaters re-broadcast the same packet.
+    for (int i = g_save_tail; i != g_save_head; i = (i + 1) % MECK_SAVE_QUEUE_SIZE) {
+        if (g_save_queue[i].channel_idx == channel_idx &&
+            g_save_queue[i].ring_idx    == ring_idx) {
+            return;
+        }
+    }
 
     int next_head = (g_save_head + 1) % MECK_SAVE_QUEUE_SIZE;
     if (next_head == g_save_tail) {
@@ -167,7 +213,8 @@ extern "C" void meck_request_save_message(uint8_t channel_idx, const P4ChannelMe
     }
 
     g_save_queue[g_save_head].channel_idx = channel_idx;
-    g_save_queue[g_save_head].msg = *msg;
+    g_save_queue[g_save_head].ring_idx    = ring_idx;
+    g_save_queue[g_save_head].msg         = *msg;
     g_save_head = next_head;
 }
 
@@ -183,22 +230,57 @@ extern "C" void meck_apply_pending_save() {
     while (g_save_tail != g_save_head) {
         PendingSaveEntry& e = g_save_queue[g_save_tail];
 
-        // Convert in-memory P4ChannelMessage to packed on-disk record.
-        P4MsgFileRecord rec = {};
-        rec.timestamp    = e.msg.timestamp;
-        rec.dm_peer_hash = 0;                        // reserved for DM use
-        rec.channel_idx  = e.msg.channel_idx;
-        rec.path_len     = e.msg.path_len;
-        rec.snr_x4       = 0;                        // reserved (schema v2)
-        rec.flags        = e.msg.valid ? 0x01 : 0x00;
-        memset(rec.path, 0, sizeof(rec.path));       // reserved (schema v2)
-        memcpy(rec.text, e.msg.text, P4_MSG_TEXT_LEN);
+        // Snapshot the live ring slot at drain time. This captures the
+        // latest heard_count and the current file_offset (which may have
+        // been written back by a previous drain pass for the same slot).
+        // The expected_timestamp (taken from the enqueue-time copy) guards
+        // against ring-slot reuse: if the slot has been overwritten by a
+        // newer message with a different timestamp, snapshot fails and we
+        // skip this entry rather than persist stale or wrong-slot data.
+        P4MsgFileRecord rec;
+        uint32_t file_offset = 0;
+        bool ok_snap = g_the_mesh->buildMessageRecordSnapshot(
+            e.channel_idx, e.ring_idx, e.msg.timestamp, &rec, &file_offset);
 
-        store->appendChannelMessageRecord(
-            e.channel_idx,
-            P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
-            (uint16_t)sizeof(P4MsgFileRecord),
-            &rec);
+        if (!ok_snap) {
+            printf("meck_save: ring slot ch[%u] idx[%d] no longer holds ts=%u, "
+                   "skipping persist\n",
+                   (unsigned)e.channel_idx, e.ring_idx,
+                   (unsigned)e.msg.timestamp);
+            g_save_tail = (g_save_tail + 1) % MECK_SAVE_QUEUE_SIZE;
+            continue;
+        }
+
+        if (file_offset != 0) {
+            // In-place rewrite — message has been appended before. Most
+            // common reason to reach this branch is a heard_count bump
+            // triggered by a flood echo of one of our own sends.
+            store->rewriteChannelMessageRecord(
+                e.channel_idx,
+                P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
+                file_offset,
+                (uint16_t)sizeof(P4MsgFileRecord),
+                &rec);
+        } else {
+            // Initial append. Capture the offset where the record was
+            // placed, then write it back to the live ring slot so future
+            // updates can target the same record in-place.
+            uint32_t new_offset = 0;
+            bool ok = store->appendChannelMessageRecord(
+                e.channel_idx,
+                P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
+                (uint16_t)sizeof(P4MsgFileRecord),
+                &rec,
+                &new_offset);
+            if (ok && new_offset != 0) {
+                // Guarded by expected timestamp inside setMessageFileOffset:
+                // if the ring slot has been overwritten between snapshot
+                // and writeback, the update is silently skipped.
+                g_the_mesh->setMessageFileOffset(
+                    e.channel_idx, e.ring_idx,
+                    e.msg.timestamp, new_offset);
+            }
+        }
 
         g_save_tail = (g_save_tail + 1) % MECK_SAVE_QUEUE_SIZE;
     }
