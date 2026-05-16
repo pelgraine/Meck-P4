@@ -6004,7 +6004,7 @@ extern "C" void app_main(void)
     // so it can never starve real work. Disable by commenting out this line
     // (or set the configs in sdkconfig to off and the function compiles to
     // a no-op stub).
-    xTaskCreate(meck_stats_task, "meck_stats_task", 4 * 1024, NULL, 1, NULL);
+   // xTaskCreate(meck_stats_task, "meck_stats_task", 4 * 1024, NULL, 1, NULL);
 
     // ---- end Meck ----
 
