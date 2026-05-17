@@ -73,6 +73,124 @@ extern "C" {
     extern const lv_font_t meck_montserrat_28;
 }
 
+// ----------------------------------------------------------------------------
+// Font scale registry — live re-style of every text object on toggle
+// ----------------------------------------------------------------------------
+// LVGL bakes the font pointer into each object's style at the time of the
+// lv_obj_set_style_text_font call, so changing P4NodePrefs::font_scale later
+// has no retroactive effect. Instead of doing that call directly, screen
+// builders use meck_set_font(obj, base, part). That installs the font now
+// (calling meck_font(base) to honour the current scale) and remembers the
+// triple so meck_font_restyle_all() can walk the registry on toggle and
+// reapply the right scaled font to every entry. LV_EVENT_DELETE removes
+// dead entries when LVGL frees the underlying object.
+struct MeckFontReg {
+    lv_obj_t* obj;
+    const lv_font_t* base;
+    lv_style_selector_t part;
+};
+#define MECK_FONT_REG_MAX 1024
+static MeckFontReg g_font_reg[MECK_FONT_REG_MAX];
+static int g_font_reg_count = 0;
+
+static const lv_font_t* meck_font(const lv_font_t* base) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return base;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs || prefs->font_scale == 0) return base;
+    if (prefs->font_scale == 1) {
+        // Larger: bump to next size; 28 is the ceiling.
+        if (base == &meck_montserrat_14) return &meck_montserrat_16;
+        if (base == &meck_montserrat_16) return &meck_montserrat_18;
+        if (base == &meck_montserrat_18) return &meck_montserrat_22;
+        if (base == &meck_montserrat_22) return &meck_montserrat_24;
+        if (base == &meck_montserrat_24) return &meck_montserrat_28;
+        return base;
+    }
+    // font_scale == 2 (Extra Large): double-jump where possible. No font
+    // larger than 28 exists, so 24 and 28 share the same ceiling as the
+    // Larger step.
+    if (base == &meck_montserrat_14) return &meck_montserrat_18;
+    if (base == &meck_montserrat_16) return &meck_montserrat_22;
+    if (base == &meck_montserrat_18) return &meck_montserrat_24;
+    if (base == &meck_montserrat_22) return &meck_montserrat_28;
+    if (base == &meck_montserrat_24) return &meck_montserrat_28;
+    return base;
+}
+
+static const char* meck_font_scale_name(uint8_t scale) {
+    switch (scale) {
+        case 0:  return "Classic";
+        case 1:  return "Larger";
+        case 2:  return "Extra Large";
+        default: return "?";
+    }
+}
+
+// Pick a font for the home-screen node name based on its character count.
+// Long names get a smaller font so they fit on the panel without being
+// obscured by the camera punch-hole or running off the right edge.
+// Thresholds: ≤12 → 28pt, 13-17 → 24pt, 18-19 → 22pt, ≥20 → 18pt.
+static const lv_font_t* meck_node_name_font(const char* name) {
+    if (!name) return &meck_montserrat_24;
+    size_t len = strlen(name);
+    if (len <= 12) return &meck_montserrat_28;
+    if (len <= 17) return &meck_montserrat_24;
+    if (len <= 19) return &meck_montserrat_22;
+    return &meck_montserrat_18;
+}
+
+static void meck_font_reg_remove_cb(lv_event_t* e) {
+    lv_obj_t* target = (lv_obj_t*)lv_event_get_target(e);
+    for (int i = 0; i < g_font_reg_count; i++) {
+        if (g_font_reg[i].obj == target) {
+            g_font_reg[i] = g_font_reg[g_font_reg_count - 1];
+            g_font_reg_count--;
+            return;
+        }
+    }
+}
+
+static void meck_set_font(lv_obj_t* obj, const lv_font_t* base, lv_style_selector_t part) {
+    lv_obj_set_style_text_font(obj, meck_font(base), part);
+    if (g_font_reg_count < MECK_FONT_REG_MAX) {
+        g_font_reg[g_font_reg_count].obj  = obj;
+        g_font_reg[g_font_reg_count].base = base;
+        g_font_reg[g_font_reg_count].part = part;
+        g_font_reg_count++;
+        lv_obj_add_event_cb(obj, meck_font_reg_remove_cb, LV_EVENT_DELETE, NULL);
+    }
+}
+
+// Update an already-registered object's base font (or register fresh if
+// not present). Use when an object's underlying base font needs to change
+// at runtime — e.g. the home node name picks its base from name length, so
+// renaming the node may bump it from 24 to 22.
+static void meck_update_font(lv_obj_t* obj, const lv_font_t* base, lv_style_selector_t part) {
+    lv_obj_set_style_text_font(obj, meck_font(base), part);
+    for (int i = 0; i < g_font_reg_count; i++) {
+        if (g_font_reg[i].obj == obj && g_font_reg[i].part == part) {
+            g_font_reg[i].base = base;
+            return;
+        }
+    }
+    if (g_font_reg_count < MECK_FONT_REG_MAX) {
+        g_font_reg[g_font_reg_count].obj  = obj;
+        g_font_reg[g_font_reg_count].base = base;
+        g_font_reg[g_font_reg_count].part = part;
+        g_font_reg_count++;
+        lv_obj_add_event_cb(obj, meck_font_reg_remove_cb, LV_EVENT_DELETE, NULL);
+    }
+}
+
+static void meck_font_restyle_all() {
+    for (int i = 0; i < g_font_reg_count; i++) {
+        lv_obj_set_style_text_font(g_font_reg[i].obj,
+                                   meck_font(g_font_reg[i].base),
+                                   g_font_reg[i].part);
+    }
+}
+
 #define NOTCH_SAFE_X  20
 #define NOTCH_SAFE_Y  20
 
@@ -139,8 +257,11 @@ static const uint8_t TX_POWER_OPTIONS[] = { 10, 14, 17, 20, 22 };
 // Screen brightness levels — eight-step ladder spanning the full visible
 // range. Lowest level (32) is dim but readable in a dark room; highest
 // (255) is full HBM. Cycle order matches the array order.
-static const uint8_t BRIGHTNESS_OPTIONS[] = { 32, 64, 96, 128, 160, 192, 224, 255 };
-#define NUM_BRIGHTNESS_OPTIONS 8
+// Brightness slider range is 12-100% (raw 31-255). 12% is the lowest
+// step where the AMOLED is still comfortably visible; below that the
+// panel goes too dim to read.
+#define MECK_BRIGHTNESS_MIN_PCT 12
+#define MECK_BRIGHTNESS_MAX_PCT 100
 
 // Auto screen-off timeouts in minutes. 0 means "never". User cycles
 // forward through the ladder; matches the convention of every other
@@ -198,8 +319,21 @@ static lv_obj_t *g_tileview        = NULL;
 
 // Home tile header labels
 static lv_obj_t *lbl_home_title    = NULL;
-static lv_obj_t *lbl_home_packets  = NULL;
-static lv_obj_t *lbl_home_rssi     = NULL;
+// Clock + battery labels are mirrored on every tileview page (7 pages in the
+// home tileview). The ui_update_timer_cb walks both arrays each interval.
+#define MECK_HOME_PAGE_COUNT 7
+static lv_obj_t *lbl_home_clock[MECK_HOME_PAGE_COUNT]   = {};
+static lv_obj_t *lbl_home_battery[MECK_HOME_PAGE_COUNT] = {};
+
+// Clock + battery labels for every non-home screen and modal. Slot 0..7
+// reserved for full screens (Settings, Settings/Contacts, Radio Picker,
+// Channel Picker, Messages, Contacts, Contact Detail, Discover); slot
+// 8..9 for the two semi-transparent overlay modals (name-edit, channel-add).
+// Updated by the same timer block that drives the home page arrays.
+#define MECK_SCREEN_HOST_COUNT 10
+static lv_obj_t *lbl_screen_clock[MECK_SCREEN_HOST_COUNT]   = {};
+static lv_obj_t *lbl_screen_battery[MECK_SCREEN_HOST_COUNT] = {};
+
 static lv_obj_t *lbl_home_unread   = NULL;
 
 // Detail tile labels
@@ -223,10 +357,12 @@ static lv_obj_t *lbl_set_txpower   = NULL;
 static lv_obj_t *lbl_set_utc       = NULL;
 static lv_obj_t *lbl_set_pathhash  = NULL;
 static lv_obj_t *lbl_set_homecolor = NULL;
-static lv_obj_t *lbl_set_brightness  = NULL;
+static lv_obj_t *slider_set_brightness   = NULL;
+static lv_obj_t *lbl_set_brightness_pct  = NULL;
 static lv_obj_t *lbl_set_screen_off  = NULL;
 static lv_obj_t *lbl_set_kb_theme    = NULL;
 static lv_obj_t *lbl_set_kb_layout   = NULL;
+static lv_obj_t *lbl_set_font_scale  = NULL;
 static lv_obj_t *lbl_set_identity  = NULL;
 static lv_obj_t *obj_name_edit_panel = NULL;
 static lv_obj_t *ta_settings_name    = NULL;
@@ -346,10 +482,11 @@ static void on_settings_autoadd_room_tap(lv_event_t *e);
 static void on_settings_autoadd_sensor_tap(lv_event_t *e);
 static void on_settings_autoadd_overwrite_tap(lv_event_t *e);
 static void on_settings_backup_to_sd_tap(lv_event_t *e);
-static void on_settings_brightness_tap(lv_event_t *e);
+static void on_settings_brightness_slider_event(lv_event_t *e);
 static void on_settings_screen_off_tap(lv_event_t *e);
 static void on_settings_kb_theme_tap(lv_event_t *e);
 static void on_settings_kb_layout_tap(lv_event_t *e);
+static void on_settings_font_scale_tap(lv_event_t *e);
 static void on_gps_tile_long_press(lv_event_t *e);
 
 static void on_ch_delete(lv_event_t *e);
@@ -456,7 +593,7 @@ static lv_obj_t* create_back_button(lv_obj_t *parent) {
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl, &meck_montserrat_18, 0);
+    meck_set_font(lbl, &meck_montserrat_18, 0);
     lv_obj_center(lbl);
 
     lv_obj_add_event_cb(btn, goto_home, LV_EVENT_CLICKED, NULL);
@@ -514,7 +651,7 @@ static lv_obj_t* create_tile_button(lv_obj_t *parent, const char *label,
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
     // Was _18; bumped to _28 to match the home title and to make icons
     // (which are glyphs in the same font) visibly larger.
-    lv_obj_set_style_text_font(lbl, &meck_montserrat_28, 0);
+    meck_set_font(lbl, &meck_montserrat_28, 0);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(lbl);
 
@@ -540,20 +677,20 @@ static lv_obj_t* create_settings_row(lv_obj_t *parent, const char *label,
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, label);
     lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(lbl, &meck_montserrat_14, 0);
+    meck_set_font(lbl, &meck_montserrat_14, 0);
     lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 5, -12);
 
     lv_obj_t *val = lv_label_create(btn);
     lv_label_set_text(val, "...");
     lv_obj_set_style_text_color(val, lv_color_white(), 0);
-    lv_obj_set_style_text_font(val, &meck_montserrat_18, 0);
+    meck_set_font(val, &meck_montserrat_18, 0);
     lv_obj_align(val, LV_ALIGN_LEFT_MID, 5, 10);
     if (value_label) *value_label = val;
 
     lv_obj_t *arrow = lv_label_create(btn);
     lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
     lv_obj_set_style_text_color(arrow, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(arrow, &meck_montserrat_16, 0);
+    meck_set_font(arrow, &meck_montserrat_16, 0);
     lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -5, 0);
 
     return btn;
@@ -1030,7 +1167,7 @@ static void meck_style_keyboard(lv_obj_t *kb) {
     if (!kb) return;
     lv_obj_set_size(kb, SCREEN_WIDTH, MECK_KB_HEIGHT);
     lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_text_font(kb, &meck_montserrat_24, LV_PART_ITEMS);
+    meck_set_font(kb, &meck_montserrat_24, LV_PART_ITEMS);
     // Tighter row pad than before — extra height was redistributing into
     // gaps, not key area. 5 px is enough visual separation; the rest of
     // the height goes to the keys themselves.
@@ -1171,11 +1308,17 @@ static void settings_update_labels() {
         }
         lv_label_set_text(lbl_set_homecolor, hcs);
     }
-    if (lbl_set_brightness) {
+    if (slider_set_brightness) {
         uint8_t b = prefs->screen_brightness ? prefs->screen_brightness : 200;
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d%%", (int)((unsigned)b * 100 / 255));
-        lv_label_set_text(lbl_set_brightness, buf);
+        int pct = (int)((unsigned)b * 100 / 255);
+        if (pct < 12) pct = 12;
+        if (pct > 100) pct = 100;
+        lv_slider_set_value(slider_set_brightness, pct, LV_ANIM_OFF);
+        if (lbl_set_brightness_pct) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%d%%", pct);
+            lv_label_set_text(lbl_set_brightness_pct, buf);
+        }
     }
     if (lbl_set_screen_off) {
         char buf[16];
@@ -1200,6 +1343,9 @@ static void settings_update_labels() {
             default: name = "?";       break;
         }
         lv_label_set_text(lbl_set_kb_layout, name);
+    }
+    if (lbl_set_font_scale) {
+        lv_label_set_text(lbl_set_font_scale, meck_font_scale_name(prefs->font_scale));
     }
 }
 
@@ -1365,7 +1511,7 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
         lv_obj_t *empty = lv_label_create(obj_msg_scroll);
         lv_label_set_text(empty, "No messages yet.");
         lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
-        lv_obj_set_style_text_font(empty, &meck_montserrat_18, 0);
+        meck_set_font(empty, &meck_montserrat_18, 0);
         lbl_messages_body = empty;  // keep dirty-flag gate happy
         return;
     }
@@ -1463,14 +1609,14 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
             // Black text on a V=75 chip reads cleanly across every hue,
             // even on yellow and lime where white would wash out.
             lv_obj_set_style_text_color(lbl_sender, lv_color_black(), 0);
-            lv_obj_set_style_text_font(lbl_sender, &meck_montserrat_22, 0);
+            meck_set_font(lbl_sender, &meck_montserrat_22, 0);
         }
 
         // Message body. Width-bounded so wrapping kicks in inside the bubble.
         lv_obj_t *lbl_body = lv_label_create(bubble);
         lv_label_set_text(lbl_body, body);
         lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
-        lv_obj_set_style_text_font(lbl_body, &meck_montserrat_22, 0);
+        meck_set_font(lbl_body, &meck_montserrat_22, 0);
         lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(lbl_body, bubble_max_w - 22);
 
@@ -1524,7 +1670,7 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
             lv_obj_t *lbl_time = lv_label_create(bubble);
             lv_label_set_text(lbl_time, footer);
             lv_obj_set_style_text_color(lbl_time, lv_palette_main(LV_PALETTE_GREY), 0);
-            lv_obj_set_style_text_font(lbl_time, &meck_montserrat_14, 0);
+            meck_set_font(lbl_time, &meck_montserrat_14, 0);
             // Right-justify on sent bubbles to mirror chat-app convention.
             lv_obj_set_style_text_align(lbl_time,
                 is_sent ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
@@ -1563,10 +1709,12 @@ static void update_radio_detail_label() {
         "Coding Rate:   4/%d\n"
         "TX Power:      %d dBm\n"
         "Sync Word:     0x1424\n"
-        "Noise Floor:   %d dBm",
+        "Noise Floor:   %d dBm\n"
+        "RX Packets:    %lu",
         prefs->freq, prefs->bw, prefs->sf, prefs->cr,
         (int)prefs->tx_power_dbm,
-        nf);
+        nf,
+        (unsigned long)radio_driver.getPacketsRecv());
     lv_label_set_text(lbl_radio_detail, buf);
 }
 
@@ -1970,6 +2118,57 @@ static void goto_channel_n(lv_event_t *e) {
 
 // ============================================================================
 // Tile 0: Home
+
+// Attach the clock + battery pair to a home tile and register them in the
+// per-tile arrays so ui_update_timer_cb can drive them. Called once from
+// each tile builder. The battery field is space-padded to 4 chars in the
+// timer callback so its bounding box never grows; the clock sits at a
+// fixed offset to its left so neither moves as digits change.
+static void home_attach_clock_battery(lv_obj_t *page, int tile_idx) {
+    if (tile_idx < 0 || tile_idx >= MECK_HOME_PAGE_COUNT) return;
+
+    lv_obj_t *bat = lv_label_create(page);
+    lv_label_set_text(bat, "");
+    meck_set_font(bat, &meck_montserrat_24, 0);
+    lv_obj_set_style_text_align(bat, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(bat, LV_ALIGN_TOP_RIGHT, -15, NOTCH_SAFE_Y);
+    lbl_home_battery[tile_idx] = bat;
+
+    lv_obj_t *clk = lv_label_create(page);
+    lv_label_set_text(clk, "");
+    lv_obj_set_style_text_color(clk, lv_color_white(), 0);
+    meck_set_font(clk, &meck_montserrat_24, 0);
+    lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(clk, LV_ALIGN_TOP_RIGHT, -165, NOTCH_SAFE_Y);
+    lbl_home_clock[tile_idx] = clk;
+}
+
+// Attach a clock + battery pair to any non-home screen or modal panel.
+// Mirrors home_attach_clock_battery but writes into the screen/modal
+// arrays. Each caller passes its own slot index (0..MECK_SCREEN_HOST_COUNT-1)
+// so the timer can address every label individually. The caller also
+// passes the font and y-offset so the clock/battery can be visually
+// aligned with that screen's own title (e.g. Messages title is 22pt at
+// y=30, Settings is 24pt at y=30).
+static void screen_attach_clock_battery(lv_obj_t *parent, int slot,
+                                        const lv_font_t* font, int y_offset) {
+    if (slot < 0 || slot >= MECK_SCREEN_HOST_COUNT) return;
+
+    lv_obj_t *bat = lv_label_create(parent);
+    lv_label_set_text(bat, "");
+    meck_set_font(bat, font, 0);
+    lv_obj_set_style_text_align(bat, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(bat, LV_ALIGN_TOP_RIGHT, -15, y_offset);
+    lbl_screen_battery[slot] = bat;
+
+    lv_obj_t *clk = lv_label_create(parent);
+    lv_label_set_text(clk, "");
+    lv_obj_set_style_text_color(clk, lv_color_white(), 0);
+    meck_set_font(clk, font, 0);
+    lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(clk, LV_ALIGN_TOP_RIGHT, -165, y_offset);
+    lbl_screen_clock[slot] = clk;
+}
 // ============================================================================
 
 static void create_page_home(lv_obj_t *page) {
@@ -1991,42 +2190,16 @@ static void create_page_home(lv_obj_t *page) {
                              : "(no name)";
     lv_label_set_text(lbl_home_title, initial_name);
     lv_obj_set_style_text_color(lbl_home_title, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_home_title, &meck_montserrat_28, 0);
+    meck_set_font(lbl_home_title, meck_node_name_font(initial_name), 0);
     lv_obj_align(lbl_home_title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
-    lv_obj_t *radio = lv_label_create(page);
-    lv_label_set_long_mode(radio, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(radio, SCREEN_WIDTH / 2 - 40);
-    char radio_str[64];
-    if (prefs) {
-        snprintf(radio_str, sizeof(radio_str), "%.3f MHz\nBW%.0f SF%d CR4/%d",
-                 prefs->freq, prefs->bw, prefs->sf, prefs->cr);
-    } else {
-        snprintf(radio_str, sizeof(radio_str), "(no prefs)");
-    }
-    lv_label_set_text(radio, radio_str);
-    lv_obj_set_style_text_color(radio, lv_palette_main(LV_PALETTE_CYAN), 0);
-    lv_obj_set_style_text_font(radio, &meck_montserrat_16, 0);
-    lv_obj_set_style_text_align(radio, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(radio, LV_ALIGN_TOP_RIGHT, -5, NOTCH_SAFE_Y);
+    home_attach_clock_battery(page, 0);
 
     lbl_home_unread = lv_label_create(page);
     lv_label_set_text(lbl_home_unread, "MSG: 0");
     lv_obj_set_style_text_color(lbl_home_unread, lv_color_make(0, 255, 100), 0);
-    lv_obj_set_style_text_font(lbl_home_unread, &meck_montserrat_18, 0);
+    meck_set_font(lbl_home_unread, &meck_montserrat_18, 0);
     lv_obj_align(lbl_home_unread, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
-
-    lbl_home_packets = lv_label_create(page);
-    lv_label_set_text(lbl_home_packets, "RX: 0");
-    lv_obj_set_style_text_color(lbl_home_packets, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(lbl_home_packets, &meck_montserrat_14, 0);
-    lv_obj_align(lbl_home_packets, LV_ALIGN_TOP_RIGHT, -10, 60);
-
-    lbl_home_rssi = lv_label_create(page);
-    lv_label_set_text(lbl_home_rssi, "");
-    lv_obj_set_style_text_color(lbl_home_rssi, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(lbl_home_rssi, &meck_montserrat_14, 0);
-    lv_obj_align(lbl_home_rssi, LV_ALIGN_TOP_RIGHT, -10, 80);
 
     // Navigation grid: 10 tiles in 2 columns × 5 rows. First two rows are
     // the high-traffic items; placeholder tiles for Trace, Maps, Audio, and
@@ -2047,7 +2220,7 @@ static void create_page_home(lv_obj_t *page) {
     lv_obj_t *hint = lv_label_create(page);
     lv_label_set_text(hint, "Swipe left for more pages " LV_SYMBOL_RIGHT);
     lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(hint, &meck_montserrat_14, 0);
+    meck_set_font(hint, &meck_montserrat_14, 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
 }
 
@@ -2059,16 +2232,18 @@ static void create_page_recent(lv_obj_t *page) {
     lv_obj_t *title = lv_label_create(page);
     lv_label_set_text(title, "Recent Heard");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_28, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     lbl_recent_list = lv_label_create(page);
     lv_label_set_text(lbl_recent_list, "Waiting for adverts...");
     lv_obj_set_style_text_color(lbl_recent_list, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_recent_list, &meck_montserrat_16, 0);
+    meck_set_font(lbl_recent_list, &meck_montserrat_16, 0);
     lv_label_set_long_mode(lbl_recent_list, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_recent_list, SCREEN_WIDTH - 40);
     lv_obj_align(lbl_recent_list, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
+
+    home_attach_clock_battery(page, 1);
 }
 
 // ============================================================================
@@ -2079,18 +2254,20 @@ static void create_page_radio(lv_obj_t *page) {
     lv_obj_t *title = lv_label_create(page);
     lv_label_set_text(title, "Radio Details");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_YELLOW), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_28, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     lbl_radio_detail = lv_label_create(page);
     lv_label_set_text(lbl_radio_detail, "Loading...");
     lv_obj_set_style_text_color(lbl_radio_detail, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_radio_detail, &meck_montserrat_18, 0);
+    meck_set_font(lbl_radio_detail, &meck_montserrat_18, 0);
     lv_label_set_long_mode(lbl_radio_detail, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_radio_detail, SCREEN_WIDTH - 40);
     lv_obj_align(lbl_radio_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
 
     update_radio_detail_label();
+
+    home_attach_clock_battery(page, 2);
 }
 
 // ============================================================================
@@ -2114,26 +2291,28 @@ static void advert_toggle_cb(lv_event_t *e) {
 
 static void create_page_advert(lv_obj_t *page) {
     lv_obj_t *title = lv_label_create(page);
-    lv_label_set_text(title, "Advertising");
+    lv_label_set_text(title, "Adverts");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_28, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     lv_obj_t *icon = lv_label_create(page);
     lv_label_set_text(icon, LV_SYMBOL_WIFI);
     lv_obj_set_style_text_color(icon, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(icon, &meck_montserrat_28, 0);
+    meck_set_font(icon, &meck_montserrat_28, 0);
     lv_obj_align(icon, LV_ALIGN_CENTER, 0, -30);
 
     lbl_advert_status = lv_label_create(page);
     lv_label_set_text(lbl_advert_status, "Advert\n\nLong press to send");
     lv_obj_set_style_text_color(lbl_advert_status, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_advert_status, &meck_montserrat_18, 0);
+    meck_set_font(lbl_advert_status, &meck_montserrat_18, 0);
     lv_obj_set_style_text_align(lbl_advert_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(lbl_advert_status, LV_ALIGN_CENTER, 0, 30);
 
     lv_obj_add_event_cb(page, advert_toggle_cb, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_add_flag(page, LV_OBJ_FLAG_CLICKABLE);
+
+    home_attach_clock_battery(page, 3);
 }
 
 // ============================================================================
@@ -2151,13 +2330,13 @@ static void create_page_gps(lv_obj_t *page) {
     lv_obj_t *title = lv_label_create(page);
     lv_label_set_text(title, "GPS");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_28, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     lbl_gps_detail = lv_label_create(page);
     lv_label_set_text(lbl_gps_detail, "Loading...");
     lv_obj_set_style_text_color(lbl_gps_detail, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_gps_detail, &meck_montserrat_18, 0);
+    meck_set_font(lbl_gps_detail, &meck_montserrat_18, 0);
     lv_label_set_long_mode(lbl_gps_detail, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_gps_detail, SCREEN_WIDTH - 40);
     lv_obj_align(lbl_gps_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
@@ -2168,6 +2347,8 @@ static void create_page_gps(lv_obj_t *page) {
     lv_obj_add_flag(page, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(page, on_gps_tile_long_press,
                         LV_EVENT_LONG_PRESSED, NULL);
+
+    home_attach_clock_battery(page, 4);
 }
 
 // ============================================================================
@@ -2178,16 +2359,18 @@ static void create_page_battery(lv_obj_t *page) {
     lv_obj_t *title = lv_label_create(page);
     lv_label_set_text(title, "Battery Gauge");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_28, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     lbl_battery_detail = lv_label_create(page);
     lv_label_set_text(lbl_battery_detail, "Reading BQ27220...");
     lv_obj_set_style_text_color(lbl_battery_detail, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_battery_detail, &meck_montserrat_18, 0);
+    meck_set_font(lbl_battery_detail, &meck_montserrat_18, 0);
     lv_label_set_long_mode(lbl_battery_detail, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_battery_detail, SCREEN_WIDTH - 40);
     lv_obj_align(lbl_battery_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
+
+    home_attach_clock_battery(page, 5);
 }
 
 // ============================================================================
@@ -2198,15 +2381,17 @@ static void create_page_shutdown(lv_obj_t *page) {
     lv_obj_t *icon = lv_label_create(page);
     lv_label_set_text(icon, LV_SYMBOL_POWER);
     lv_obj_set_style_text_color(icon, lv_palette_main(LV_PALETTE_RED), 0);
-    lv_obj_set_style_text_font(icon, &meck_montserrat_28, 0);
+    meck_set_font(icon, &meck_montserrat_28, 0);
     lv_obj_align(icon, LV_ALIGN_CENTER, 0, -40);
 
     lv_obj_t *lbl = lv_label_create(page);
     lv_label_set_text(lbl, "Hibernate\n\nLong press to enter\ndeep sleep");
     lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl, &meck_montserrat_18, 0);
+    meck_set_font(lbl, &meck_montserrat_18, 0);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 30);
+
+    home_attach_clock_battery(page, 6);
 }
 
 // ============================================================================
@@ -2379,48 +2564,36 @@ static void on_settings_backup_to_sd_tap(lv_event_t *e) {
     printf("Settings: backup to SD -> %s\n", buf);
 }
 
-// Snap the saved brightness to the nearest value in the BRIGHTNESS_OPTIONS
-// ladder. Used by the cycle handler to find the user's current step even
-// when the stored value (e.g. on a fresh boot or after migration) doesn't
-// land exactly on a step boundary.
-static int brightness_step_for(uint8_t value) {
-    int best = 0;
-    int best_diff = 1024;
-    for (int i = 0; i < NUM_BRIGHTNESS_OPTIONS; i++) {
-        int diff = (int)BRIGHTNESS_OPTIONS[i] - (int)value;
-        if (diff < 0) diff = -diff;
-        if (diff < best_diff) { best_diff = diff; best = i; }
-    }
-    return best;
-}
-
-static void on_settings_brightness_tap(lv_event_t *e) {
+// Slider event handler. LV_EVENT_VALUE_CHANGED fires continuously as the
+// user drags; we apply the new brightness to the panel immediately so the
+// change is visible while sliding, but don't persist until release to
+// avoid hammering NVS. LV_EVENT_RELEASED fires once when the finger lifts.
+static void on_settings_brightness_slider_event(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!mesh) return;
     P4NodePrefs* prefs = mesh->getNodePrefs();
     if (!prefs) return;
+    if (!slider_set_brightness) return;
 
-    uint8_t cur = prefs->screen_brightness ? prefs->screen_brightness : 200;
-    int step = brightness_step_for(cur);
-    step = (step + 1) % NUM_BRIGHTNESS_OPTIONS;
-    uint8_t next = BRIGHTNESS_OPTIONS[step];
+    int pct = (int)lv_slider_get_value(slider_set_brightness);
+    if (pct < MECK_BRIGHTNESS_MIN_PCT) pct = MECK_BRIGHTNESS_MIN_PCT;
+    if (pct > MECK_BRIGHTNESS_MAX_PCT) pct = MECK_BRIGHTNESS_MAX_PCT;
+    uint8_t raw = (uint8_t)((pct * 255 + 50) / 100);
 
-    prefs->screen_brightness = next;
-    mesh->getDataStore()->savePrefs(*prefs);
+    meck_screen_set_brightness(raw);
 
-    // Apply immediately. The hardware fades smoothly via the AMOLED
-    // brightness register, so the user sees the change as they tap.
-    meck_screen_set_brightness(next);
-
-    if (lbl_set_brightness) {
-        char buf[16];
-        // Display as a percentage so it reads naturally — 32/255 → 13%,
-        // 255/255 → 100%. Avoids exposing the raw register value.
-        snprintf(buf, sizeof(buf), "%d%%", (int)((unsigned)next * 100 / 255));
-        lv_label_set_text(lbl_set_brightness, buf);
+    if (lbl_set_brightness_pct) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", pct);
+        lv_label_set_text(lbl_set_brightness_pct, buf);
     }
-    printf("Settings: brightness = %u (%d%%)\n",
-           (unsigned)next, (int)((unsigned)next * 100 / 255));
+
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_RELEASED) {
+        prefs->screen_brightness = raw;
+        mesh->getDataStore()->savePrefs(*prefs);
+        printf("Settings: brightness = %u (%d%%)\n", (unsigned)raw, pct);
+    }
 }
 
 static void on_settings_screen_off_tap(lv_event_t *e) {
@@ -2493,6 +2666,28 @@ static void on_settings_kb_layout_tap(lv_event_t *e) {
     if (lbl_set_kb_layout) lv_label_set_text(lbl_set_kb_layout, name);
     meck_kb_restyle_all();
     printf("Settings: kb layout = %s\n", name);
+}
+
+// Font size cycle: 0 = Classic, 1 = Larger, 2 = Extra Large. Each scale
+// step maps every active label's base font to a larger pre-built size
+// (Larger steps one row; Extra Large double-jumps where possible). 28 is
+// the ceiling so 24/28 don't grow further. Walks the font registry to
+// retroactively rescale every existing object, since LVGL bakes the font
+// pointer at creation.
+static void on_settings_font_scale_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->font_scale = (uint8_t)((prefs->font_scale + 1) % 3);
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    if (lbl_set_font_scale) {
+        lv_label_set_text(lbl_set_font_scale, meck_font_scale_name(prefs->font_scale));
+    }
+    meck_font_restyle_all();
+    printf("Settings: font scale = %s\n", meck_font_scale_name(prefs->font_scale));
 }
 
 // Long-press anywhere on the GPS tile toggles the L76K module between
@@ -2606,6 +2801,7 @@ static void create_settings_contacts_screen() {
     scr_settings_contacts = lv_obj_create(NULL);
     lock_screen_scroll(scr_settings_contacts);
     lv_obj_set_style_bg_color(scr_settings_contacts, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_settings_contacts, 1, &meck_montserrat_24, 30);
 
     // Custom back button → main Settings (not home).
     lv_obj_t *btn_back = lv_button_create(scr_settings_contacts);
@@ -2616,7 +2812,7 @@ static void create_settings_contacts_screen() {
     lv_obj_t *bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &meck_montserrat_18, 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, goto_settings_from_contacts,
                         LV_EVENT_CLICKED, NULL);
@@ -2624,7 +2820,7 @@ static void create_settings_contacts_screen() {
     lv_obj_t *title = lv_label_create(scr_settings_contacts);
     lv_label_set_text(title, "Contacts");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *scroll = lv_obj_create(scr_settings_contacts);
@@ -2673,13 +2869,14 @@ static void create_settings_screen() {
     scr_settings = lv_obj_create(NULL);
     lock_screen_scroll(scr_settings);
     lv_obj_set_style_bg_color(scr_settings, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_settings, 0, &meck_montserrat_24, 30);
 
     create_back_button(scr_settings);
 
     lv_obj_t *title = lv_label_create(scr_settings);
     lv_label_set_text(title, "Settings");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *scroll = lv_obj_create(scr_settings);
@@ -2738,11 +2935,49 @@ static void create_settings_screen() {
     lbl_set_backup_status = backup_value_lbl;
     y += 65;
 
-    // Screen brightness — eight-step ladder, displayed as percentage. Tap
-    // cycles forward; the change applies live so the user sees the screen
-    // dim/brighten as they tap.
-    create_settings_row(scroll, "Brightness (tap to cycle)",
-        &lbl_set_brightness, on_settings_brightness_tap, y);
+    // Screen brightness — slider from MECK_BRIGHTNESS_MIN_PCT to
+    // MECK_BRIGHTNESS_MAX_PCT in 1% steps. Live-applies to the panel while
+    // dragging; persists on release.
+    {
+        lv_obj_t *row = lv_obj_create(scroll);
+        lv_obj_set_size(row, SCREEN_WIDTH - 40, 55);
+        lv_obj_set_pos(row, 20, y);
+        lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(row, 10, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(50, 50, 60), 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *title_lbl = lv_label_create(row);
+        lv_label_set_text(title_lbl, "Brightness");
+        lv_obj_set_style_text_color(title_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(title_lbl, &meck_montserrat_14, 0);
+        lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 10, -12);
+
+        lbl_set_brightness_pct = lv_label_create(row);
+        lv_label_set_text(lbl_set_brightness_pct, "...");
+        lv_obj_set_style_text_color(lbl_set_brightness_pct, lv_color_white(), 0);
+        meck_set_font(lbl_set_brightness_pct, &meck_montserrat_14, 0);
+        lv_obj_align(lbl_set_brightness_pct, LV_ALIGN_RIGHT_MID, -10, -12);
+
+        slider_set_brightness = lv_slider_create(row);
+        lv_obj_set_size(slider_set_brightness, SCREEN_WIDTH - 60, 8);
+        lv_slider_set_range(slider_set_brightness,
+            MECK_BRIGHTNESS_MIN_PCT, MECK_BRIGHTNESS_MAX_PCT);
+        lv_obj_align(slider_set_brightness, LV_ALIGN_BOTTOM_MID, 0, -8);
+        // Darker cyan accent — LV_PALETTE_CYAN reads light blue on the
+        // AMOLED panel, lv_palette_darken brings it closer to the teal
+        // shade used for the Identity hex string.
+        lv_obj_set_style_bg_color(slider_set_brightness,
+            lv_palette_darken(LV_PALETTE_CYAN, 2), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(slider_set_brightness,
+            lv_palette_darken(LV_PALETTE_CYAN, 2), LV_PART_KNOB);
+        lv_obj_add_event_cb(slider_set_brightness,
+            on_settings_brightness_slider_event, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_add_event_cb(slider_set_brightness,
+            on_settings_brightness_slider_event, LV_EVENT_RELEASED, NULL);
+    }
     y += 65;
 
     // Auto screen-off — six-step ladder (Never / 1 / 2 / 5 / 10 / 30 min).
@@ -2768,6 +3003,13 @@ static void create_settings_screen() {
         &lbl_set_kb_layout, on_settings_kb_layout_tap, y);
     y += 65;
 
+    // Font size — Classic / Larger. Tap cycles. Walks the font registry and
+    // retroactively rescales every label so the change is visible without a
+    // reboot or screen rebuild.
+    create_settings_row(scroll, "Font Size (tap to cycle)",
+        &lbl_set_font_scale, on_settings_font_scale_tap, y);
+    y += 65;
+
     lv_obj_t *id_row = lv_obj_create(scroll);
     lv_obj_set_size(id_row, SCREEN_WIDTH - 40, 110);
     lv_obj_set_pos(id_row, 20, y);
@@ -2779,7 +3021,7 @@ static void create_settings_screen() {
     lv_obj_t *id_title = lv_label_create(id_row);
     lv_label_set_text(id_title, "Identity (public key)");
     lv_obj_set_style_text_color(id_title, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(id_title, &meck_montserrat_14, 0);
+    meck_set_font(id_title, &meck_montserrat_14, 0);
     lv_obj_align(id_title, LV_ALIGN_TOP_LEFT, 0, 0);
 
     lbl_set_identity = lv_label_create(id_row);
@@ -2801,7 +3043,7 @@ static void create_settings_screen() {
         lv_label_set_text(lbl_set_identity, "Not initialized");
     }
     lv_obj_set_style_text_color(lbl_set_identity, lv_palette_main(LV_PALETTE_CYAN), 0);
-    lv_obj_set_style_text_font(lbl_set_identity, &meck_montserrat_14, 0);
+    meck_set_font(lbl_set_identity, &meck_montserrat_14, 0);
     lv_obj_align(lbl_set_identity, LV_ALIGN_TOP_LEFT, 0, 22);
 
     // Firmware row at the bottom of the settings list. Static; not tappable.
@@ -2820,13 +3062,13 @@ static void create_settings_screen() {
     lv_obj_t *fw_title_lbl = lv_label_create(fw_row);
     lv_label_set_text(fw_title_lbl, "Firmware");
     lv_obj_set_style_text_color(fw_title_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(fw_title_lbl, &meck_montserrat_14, 0);
+    meck_set_font(fw_title_lbl, &meck_montserrat_14, 0);
     lv_obj_align(fw_title_lbl, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *fw_value_lbl = lv_label_create(fw_row);
     lv_label_set_text(fw_value_lbl, MECK_FIRMWARE_NAME " v" MECK_FIRMWARE_VERSION);
     lv_obj_set_style_text_color(fw_value_lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(fw_value_lbl, &meck_montserrat_16, 0);
+    meck_set_font(fw_value_lbl, &meck_montserrat_16, 0);
     lv_obj_align(fw_value_lbl, LV_ALIGN_RIGHT_MID, 0, 0);
 
     // Name edit overlay
@@ -2845,17 +3087,17 @@ static void create_settings_screen() {
     lv_obj_t *edit_title = lv_label_create(obj_name_edit_panel);
     lv_label_set_text(edit_title, "Edit Node Name");
     lv_obj_set_style_text_color(edit_title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(edit_title, &meck_montserrat_22, 0);
-    lv_obj_align(edit_title, LV_ALIGN_TOP_MID, 0, 20);
+    meck_set_font(edit_title, &meck_montserrat_22, 0);
+    lv_obj_align(edit_title, LV_ALIGN_TOP_MID, 0, 50);
 
     ta_settings_name = lv_textarea_create(obj_name_edit_panel);
     lv_obj_set_size(ta_settings_name, SCREEN_WIDTH - 40, 50);
-    lv_obj_align(ta_settings_name, LV_ALIGN_TOP_MID, 0, 60);
+    lv_obj_align(ta_settings_name, LV_ALIGN_TOP_MID, 0, 100);
     lv_textarea_set_one_line(ta_settings_name, true);
     lv_textarea_set_max_length(ta_settings_name, 30);
     lv_obj_set_style_bg_color(ta_settings_name, lv_color_make(30, 30, 40), 0);
     lv_obj_set_style_text_color(ta_settings_name, lv_color_white(), 0);
-    lv_obj_set_style_text_font(ta_settings_name, &meck_montserrat_18, 0);
+    meck_set_font(ta_settings_name, &meck_montserrat_18, 0);
     lv_obj_set_style_border_color(ta_settings_name, lv_palette_main(LV_PALETTE_CYAN), 0);
 
     kb_settings = lv_keyboard_create(obj_name_edit_panel);
@@ -2877,6 +3119,7 @@ static void create_radio_picker_screen() {
     scr_radio_picker = lv_obj_create(NULL);
     lock_screen_scroll(scr_radio_picker);
     lv_obj_set_style_bg_color(scr_radio_picker, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_radio_picker, 2, &meck_montserrat_24, 30);
 
     lv_obj_t *btn_back = lv_button_create(scr_radio_picker);
     lv_obj_set_size(btn_back, 100, 70);
@@ -2886,14 +3129,14 @@ static void create_radio_picker_screen() {
     lv_obj_t *bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &meck_montserrat_18, 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, goto_settings, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *title = lv_label_create(scr_radio_picker);
     lv_label_set_text(title, "Radio Preset");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *scroll = lv_obj_create(scr_radio_picker);
@@ -2918,7 +3161,7 @@ static void create_radio_picker_screen() {
         lv_obj_t *name_lbl = lv_label_create(btn);
         lv_label_set_text(name_lbl, RADIO_PRESETS[i].name);
         lv_obj_set_style_text_color(name_lbl, lv_color_white(), 0);
-        lv_obj_set_style_text_font(name_lbl, &meck_montserrat_16, 0);
+        meck_set_font(name_lbl, &meck_montserrat_16, 0);
         lv_obj_align(name_lbl, LV_ALIGN_LEFT_MID, 5, -8);
 
         char detail[64];
@@ -2928,7 +3171,7 @@ static void create_radio_picker_screen() {
         lv_obj_t *det_lbl = lv_label_create(btn);
         lv_label_set_text(det_lbl, detail);
         lv_obj_set_style_text_color(det_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
-        lv_obj_set_style_text_font(det_lbl, &meck_montserrat_14, 0);
+        meck_set_font(det_lbl, &meck_montserrat_14, 0);
         lv_obj_align(det_lbl, LV_ALIGN_LEFT_MID, 5, 12);
     }
 }
@@ -2965,7 +3208,7 @@ static void refresh_channel_picker() {
         lv_obj_t *lbl_name = lv_label_create(btn);
         lv_label_set_text(lbl_name, ch.name);
         lv_obj_set_style_text_color(lbl_name, color, 0);
-        lv_obj_set_style_text_font(lbl_name, &meck_montserrat_22, 0);
+        meck_set_font(lbl_name, &meck_montserrat_22, 0);
         lv_obj_align(lbl_name, LV_ALIGN_LEFT_MID, 10, 0);
 
         lv_obj_t *btn_del = lv_button_create(btn);
@@ -2982,7 +3225,7 @@ static void refresh_channel_picker() {
         lbl_picker_unread[i] = lv_label_create(btn);
         lv_label_set_text(lbl_picker_unread[i], "");
         lv_obj_set_style_text_color(lbl_picker_unread[i], lv_color_make(100, 255, 100), 0);
-        lv_obj_set_style_text_font(lbl_picker_unread[i], &meck_montserrat_18, 0);
+        meck_set_font(lbl_picker_unread[i], &meck_montserrat_18, 0);
         lv_obj_align(lbl_picker_unread[i], LV_ALIGN_RIGHT_MID, -55, 0);
 
         y += 85;
@@ -3001,7 +3244,7 @@ static void refresh_channel_picker() {
     lv_obj_t *add_lbl = lv_label_create(btn_add);
     lv_label_set_text(add_lbl, LV_SYMBOL_PLUS " Add Channel");
     lv_obj_set_style_text_color(add_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(add_lbl, &meck_montserrat_22, 0);
+    meck_set_font(add_lbl, &meck_montserrat_22, 0);
     lv_obj_center(add_lbl);
 }
 
@@ -3009,13 +3252,14 @@ static void create_channel_picker_screen() {
     scr_channel_picker = lv_obj_create(NULL);
     lock_screen_scroll(scr_channel_picker);
     lv_obj_set_style_bg_color(scr_channel_picker, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_channel_picker, 3, &meck_montserrat_24, 30);
 
     create_back_button(scr_channel_picker);
 
     lv_obj_t *title = lv_label_create(scr_channel_picker);
     lv_label_set_text(title, "Channels");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     obj_ch_picker_scroll = lv_obj_create(scr_channel_picker);
@@ -3040,24 +3284,24 @@ static void create_channel_picker_screen() {
     lv_obj_t *add_title = lv_label_create(obj_ch_add_panel);
     lv_label_set_text(add_title, "Add Channel");
     lv_obj_set_style_text_color(add_title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(add_title, &meck_montserrat_22, 0);
-    lv_obj_align(add_title, LV_ALIGN_TOP_MID, 0, 20);
+    meck_set_font(add_title, &meck_montserrat_22, 0);
+    lv_obj_align(add_title, LV_ALIGN_TOP_MID, 0, 50);
 
     lv_obj_t *hint = lv_label_create(obj_ch_add_panel);
     lv_label_set_text(hint, "Enter channel name (e.g. #sydney)");
     lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(hint, &meck_montserrat_14, 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 50);
+    meck_set_font(hint, &meck_montserrat_14, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 90);
 
     ta_ch_add = lv_textarea_create(obj_ch_add_panel);
     lv_obj_set_size(ta_ch_add, SCREEN_WIDTH - 40, 50);
-    lv_obj_align(ta_ch_add, LV_ALIGN_TOP_MID, 0, 80);
+    lv_obj_align(ta_ch_add, LV_ALIGN_TOP_MID, 0, 120);
     lv_textarea_set_one_line(ta_ch_add, true);
     lv_textarea_set_max_length(ta_ch_add, 30);
     lv_textarea_set_text(ta_ch_add, "#");
     lv_obj_set_style_bg_color(ta_ch_add, lv_color_make(30, 30, 40), 0);
     lv_obj_set_style_text_color(ta_ch_add, lv_color_white(), 0);
-    lv_obj_set_style_text_font(ta_ch_add, &meck_montserrat_18, 0);
+    meck_set_font(ta_ch_add, &meck_montserrat_18, 0);
     lv_obj_set_style_border_color(ta_ch_add, lv_palette_main(LV_PALETTE_GREEN), 0);
 
     kb_ch_add = lv_keyboard_create(obj_ch_add_panel);
@@ -3077,6 +3321,7 @@ static void create_messages_screen() {
     scr_messages = lv_obj_create(NULL);
     lock_screen_scroll(scr_messages);
     lv_obj_set_style_bg_color(scr_messages, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_messages, 4, &meck_montserrat_22, 30);
 
     // Back -> channel picker (NOT home)
     lv_obj_t *btn_back = lv_button_create(scr_messages);
@@ -3087,14 +3332,14 @@ static void create_messages_screen() {
     lv_obj_t *bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &meck_montserrat_18, 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, goto_channel_picker, LV_EVENT_CLICKED, NULL);
 
     lbl_msg_channel_name = lv_label_create(scr_messages);
     lv_label_set_text(lbl_msg_channel_name, "#public");
     lv_obj_set_style_text_color(lbl_msg_channel_name, lv_palette_main(LV_PALETTE_CYAN), 0);
-    lv_obj_set_style_text_font(lbl_msg_channel_name, &meck_montserrat_22, 0);
+    meck_set_font(lbl_msg_channel_name, &meck_montserrat_22, 0);
     lv_obj_align(lbl_msg_channel_name, LV_ALIGN_TOP_LEFT, 120, 30);
 
     obj_msg_scroll = lv_obj_create(scr_messages);
@@ -3134,7 +3379,7 @@ static void create_messages_screen() {
     lv_textarea_set_max_length(ta_compose, 180);
     lv_obj_set_style_bg_color(ta_compose, lv_color_make(30, 30, 40), 0);
     lv_obj_set_style_text_color(ta_compose, lv_color_white(), 0);
-    lv_obj_set_style_text_font(ta_compose, &meck_montserrat_16, 0);
+    meck_set_font(ta_compose, &meck_montserrat_16, 0);
     lv_obj_set_style_border_color(ta_compose, lv_palette_main(LV_PALETTE_CYAN), 0);
     lv_obj_set_style_border_width(ta_compose, 1, 0);
     lv_obj_set_style_radius(ta_compose, 8, 0);
@@ -3158,7 +3403,7 @@ static void create_messages_screen() {
     lv_obj_t *send_lbl = lv_label_create(btn_send);
     lv_label_set_text(send_lbl, LV_SYMBOL_RIGHT);
     lv_obj_set_style_text_color(send_lbl, lv_color_black(), 0);
-    lv_obj_set_style_text_font(send_lbl, &meck_montserrat_22, 0);
+    meck_set_font(send_lbl, &meck_montserrat_22, 0);
     lv_obj_center(send_lbl);
     lv_obj_add_event_cb(btn_send, on_send_clicked, LV_EVENT_CLICKED, NULL);
 
@@ -3213,13 +3458,14 @@ static void create_contacts_screen() {
     scr_contacts = lv_obj_create(NULL);
     lock_screen_scroll(scr_contacts);
     lv_obj_set_style_bg_color(scr_contacts, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_contacts, 5, &meck_montserrat_24, 30);
 
     create_back_button(scr_contacts);
 
     lv_obj_t *title = lv_label_create(scr_contacts);
     lv_label_set_text(title, "Contacts");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     // ---- Filter chip bar ----
@@ -3337,7 +3583,7 @@ static void refresh_contacts_list() {
             lv_obj_set_style_text_color(lbl,
                 active ? lv_color_white()
                        : lv_palette_main(LV_PALETTE_GREY), 0);
-            lv_obj_set_style_text_font(lbl, &meck_montserrat_16, 0);
+            meck_set_font(lbl, &meck_montserrat_16, 0);
             lv_obj_center(lbl);
         }
     }
@@ -3353,7 +3599,7 @@ static void refresh_contacts_list() {
         lv_obj_t *empty = lv_label_create(obj_contacts_scroll);
         lv_label_set_text(empty, "No contacts yet.\nAdverts will populate\nthis list.");
         lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
-        lv_obj_set_style_text_font(empty, &meck_montserrat_16, 0);
+        meck_set_font(empty, &meck_montserrat_16, 0);
         return;
     }
 
@@ -3384,14 +3630,17 @@ static void refresh_contacts_list() {
         lv_obj_set_style_text_color(star,
             (ci.flags & 0x01) ? lv_palette_main(LV_PALETTE_YELLOW)
                               : lv_color_make(70, 70, 80), 0);
-        lv_obj_set_style_text_font(star, &meck_montserrat_22, 0);
+        meck_set_font(star, &meck_montserrat_22, 0);
         lv_obj_align(star, LV_ALIGN_LEFT_MID, 8, 0);
 
-        // Name.
+        // Name. Strip emoji / higher-plane Unicode so they don't render
+        // as tofu boxes (Montserrat covers Latin-1 only).
+        char clean_name[64];
+        strip_unrenderable(ci.name, clean_name, sizeof(clean_name));
         lv_obj_t *lbl = lv_label_create(row);
-        lv_label_set_text(lbl, ci.name);
+        lv_label_set_text(lbl, clean_name);
         lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-        lv_obj_set_style_text_font(lbl, &meck_montserrat_18, 0);
+        meck_set_font(lbl, &meck_montserrat_18, 0);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 28, 0);
 
         // Type badge — small coloured pill on the right with the C/R/RS/S
@@ -3409,7 +3658,7 @@ static void refresh_contacts_list() {
         lv_obj_t *type_lbl = lv_label_create(type_chip);
         lv_label_set_text(type_lbl, contact_type_badge(ci.type));
         lv_obj_set_style_text_color(type_lbl, lv_color_black(), 0);
-        lv_obj_set_style_text_font(type_lbl, &meck_montserrat_14, 0);
+        meck_set_font(type_lbl, &meck_montserrat_14, 0);
         lv_obj_center(type_lbl);
 
         // Pub-key prefix on the far right.
@@ -3419,7 +3668,7 @@ static void refresh_contacts_list() {
                  ci.id.pub_key[0], ci.id.pub_key[1]);
         lv_label_set_text(pk, pk_buf);
         lv_obj_set_style_text_color(pk, lv_palette_main(LV_PALETTE_GREY), 0);
-        lv_obj_set_style_text_font(pk, &meck_montserrat_14, 0);
+        meck_set_font(pk, &meck_montserrat_14, 0);
         lv_obj_align(pk, LV_ALIGN_RIGHT_MID, -10, 0);
     }
 
@@ -3432,7 +3681,7 @@ static void refresh_contacts_list() {
                  contact_filter_label(g_contact_filter));
         lv_label_set_text(empty, buf);
         lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
-        lv_obj_set_style_text_font(empty, &meck_montserrat_16, 0);
+        meck_set_font(empty, &meck_montserrat_16, 0);
     }
 }
 
@@ -3511,13 +3760,14 @@ static void create_discover_screen() {
     scr_discover = lv_obj_create(NULL);
     lock_screen_scroll(scr_discover);
     lv_obj_set_style_bg_color(scr_discover, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_discover, 7, &meck_montserrat_24, 30);
 
     create_back_button(scr_discover);
 
     lv_obj_t *title = lv_label_create(scr_discover);
     lv_label_set_text(title, "Discover");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     // Status text under the title — "Scanning... N found" while active,
@@ -3528,7 +3778,7 @@ static void create_discover_screen() {
     lv_label_set_text(lbl_discover_status, "");
     lv_obj_set_style_text_color(lbl_discover_status,
         lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_text_font(lbl_discover_status, &meck_montserrat_16, 0);
+    meck_set_font(lbl_discover_status, &meck_montserrat_16, 0);
     lv_obj_align(lbl_discover_status, LV_ALIGN_TOP_LEFT, 120, 65);
 
     // Rescan button — top-right of the screen. Starts a fresh active
@@ -3548,7 +3798,7 @@ static void create_discover_screen() {
     lv_obj_t *rescan_lbl = lv_label_create(btn_rescan);
     lv_label_set_text(rescan_lbl, LV_SYMBOL_REFRESH " Rescan");
     lv_obj_set_style_text_color(rescan_lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(rescan_lbl, &meck_montserrat_18, 0);
+    meck_set_font(rescan_lbl, &meck_montserrat_18, 0);
     lv_obj_center(rescan_lbl);
 
     // Body: scrollable column of rows.
@@ -3620,7 +3870,7 @@ static void refresh_discover_list() {
                 "will reply with their own advert.");
         }
         lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
-        lv_obj_set_style_text_font(empty, &meck_montserrat_16, 0);
+        meck_set_font(empty, &meck_montserrat_16, 0);
         return;
     }
 
@@ -3646,7 +3896,7 @@ static void refresh_discover_list() {
                  d.name[0] ? d.name : "?");
         lv_label_set_text(name, namebuf);
         lv_obj_set_style_text_color(name, lv_color_white(), 0);
-        lv_obj_set_style_text_font(name, &meck_montserrat_22, 0);
+        meck_set_font(name, &meck_montserrat_22, 0);
         lv_obj_align(name, LV_ALIGN_TOP_LEFT, 0, 0);
 
         // Meta line: short id, then either SNR (live) or hops (cached).
@@ -3683,7 +3933,7 @@ static void refresh_discover_list() {
             meta_col = lv_palette_main(LV_PALETTE_GREY);
         }
         lv_obj_set_style_text_color(meta_lbl, meta_col, 0);
-        lv_obj_set_style_text_font(meta_lbl, &meck_montserrat_14, 0);
+        meck_set_font(meta_lbl, &meck_montserrat_14, 0);
         lv_obj_align(meta_lbl, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
         // Right side: Add button OR Added badge.
@@ -3692,7 +3942,7 @@ static void refresh_discover_list() {
             lv_label_set_text(added, LV_SYMBOL_OK " Added");
             lv_obj_set_style_text_color(added,
                 lv_palette_main(LV_PALETTE_GREY), 0);
-            lv_obj_set_style_text_font(added, &meck_montserrat_16, 0);
+            meck_set_font(added, &meck_montserrat_16, 0);
             lv_obj_align(added, LV_ALIGN_RIGHT_MID, 0, 0);
         } else {
             lv_obj_t *add_btn = lv_button_create(row);
@@ -3708,7 +3958,7 @@ static void refresh_discover_list() {
             lv_obj_t *add_lbl = lv_label_create(add_btn);
             lv_label_set_text(add_lbl, LV_SYMBOL_PLUS " Add");
             lv_obj_set_style_text_color(add_lbl, lv_color_black(), 0);
-            lv_obj_set_style_text_font(add_lbl, &meck_montserrat_18, 0);
+            meck_set_font(add_lbl, &meck_montserrat_18, 0);
             lv_obj_center(add_lbl);
         }
     }
@@ -3754,14 +4004,14 @@ static void create_contact_detail_screen() {
     lv_obj_t *bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &meck_montserrat_18, 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, goto_contacts_from_detail, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *title = lv_label_create(scr_contact_detail);
     lv_label_set_text(title, "Contact");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(title, &meck_montserrat_24, 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *btn_fav = lv_button_create(scr_contact_detail);
@@ -3772,7 +4022,7 @@ static void create_contact_detail_screen() {
     lv_obj_t *fav_lbl = lv_label_create(btn_fav);
     lv_label_set_text(fav_lbl, LV_SYMBOL_OK " Fav");
     lv_obj_set_style_text_color(fav_lbl, lv_color_black(), 0);
-    lv_obj_set_style_text_font(fav_lbl, &meck_montserrat_16, 0);
+    meck_set_font(fav_lbl, &meck_montserrat_16, 0);
     lv_obj_center(fav_lbl);
     lv_obj_add_event_cb(btn_fav, on_contact_fav_toggle, LV_EVENT_CLICKED, NULL);
 
@@ -3787,7 +4037,7 @@ static void create_contact_detail_screen() {
     lv_obj_t *del_lbl = lv_label_create(btn_del);
     lv_label_set_text(del_lbl, LV_SYMBOL_TRASH " Hold");
     lv_obj_set_style_text_color(del_lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(del_lbl, &meck_montserrat_16, 0);
+    meck_set_font(del_lbl, &meck_montserrat_16, 0);
     lv_obj_center(del_lbl);
     lv_obj_add_event_cb(btn_del, on_contact_delete, LV_EVENT_LONG_PRESSED, NULL);
 
@@ -3802,7 +4052,7 @@ static void create_contact_detail_screen() {
     lbl_contact_detail_body = lv_label_create(scroll);
     lv_label_set_text(lbl_contact_detail_body, "");
     lv_obj_set_style_text_color(lbl_contact_detail_body, lv_color_white(), 0);
-    lv_obj_set_style_text_font(lbl_contact_detail_body, &meck_montserrat_16, 0);
+    meck_set_font(lbl_contact_detail_body, &meck_montserrat_16, 0);
     lv_label_set_long_mode(lbl_contact_detail_body, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_contact_detail_body, SCREEN_WIDTH - 50);
 }
@@ -3839,13 +4089,13 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 
     // Home title: show the user's chosen node name. Refreshed every tick so
     // a rename in Settings shows up without needing to rebuild the screen.
+    // Font is sized to the name length so long names stay on screen without
+    // running past the camera punch-hole.
     if (lbl_home_title && mesh) {
         P4NodePrefs* prefs = mesh->getNodePrefs();
-        if (prefs && prefs->node_name[0]) {
-            lv_label_set_text(lbl_home_title, prefs->node_name);
-        } else {
-            lv_label_set_text(lbl_home_title, "(no name)");
-        }
+        const char* show = (prefs && prefs->node_name[0]) ? prefs->node_name : "(no name)";
+        lv_label_set_text(lbl_home_title, show);
+        meck_update_font(lbl_home_title, meck_node_name_font(show), 0);
     }
 
     // Home tile: unread count
@@ -3857,10 +4107,75 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                        : lv_palette_main(LV_PALETTE_GREY), 0);
     }
 
-    // Home tile: packet counter
-    if (lbl_home_packets) {
-        uint32_t rx = radio_driver.getPacketsRecv();
-        lv_label_set_text_fmt(lbl_home_packets, "RX: %lu", (unsigned long)rx);
+    // Home tiles: clock once per minute. Timer fires at 500ms so 120 ticks
+    // is one minute. Counters start at the period so the first tick fills
+    // the labels rather than leaving them blank for the period. If the
+    // clock isn't synced (epoch < 1750000000) the labels stay empty. The
+    // same string is mirrored to every home tile so the header is
+    // consistent across the tileview.
+    static int clock_ticks = 120;
+    if (++clock_ticks >= 120) {
+        clock_ticks = 0;
+        uint32_t now_utc = 0;
+        int8_t   offset = 0;
+        if (mesh) {
+            mesh::RTCClock* rtc = mesh->getRTCClock();
+            if (rtc) now_utc = rtc->getCurrentTime();
+            P4NodePrefs* prefs = mesh->getNodePrefs();
+            if (prefs) offset = prefs->utc_offset_hours;
+        }
+        char buf[8];
+        bool have_time = (now_utc >= 1750000000U);
+        if (have_time) {
+            time_t local = (time_t)now_utc + (int32_t)offset * 3600;
+            struct tm tm_local;
+            gmtime_r(&local, &tm_local);
+            strftime(buf, sizeof(buf), "%H:%M", &tm_local);
+        }
+        for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
+            if (!lbl_home_clock[i]) continue;
+            lv_label_set_text(lbl_home_clock[i], have_time ? buf : "");
+        }
+        for (int i = 0; i < MECK_SCREEN_HOST_COUNT; i++) {
+            if (!lbl_screen_clock[i]) continue;
+            lv_label_set_text(lbl_screen_clock[i], have_time ? buf : "");
+        }
+    }
+
+    // Home tiles: battery % every 5 minutes (600 ticks at 500ms). Colour-
+    // coded: green ≥70, orange 40-69, yellow 20-39, red <20. Mirrored to
+    // every home tile.
+    static int battery_ticks = 600;
+    if (++battery_ticks >= 600) {
+        battery_ticks = 0;
+        bool available = meck_battery_available();
+        uint8_t pct = 0;
+        lv_color_t col = lv_color_white();
+        if (available) {
+            pct = meck_battery_pct_from_chip();
+            if      (pct >= 70) col = lv_palette_main(LV_PALETTE_GREEN);
+            else if (pct >= 40) col = lv_palette_main(LV_PALETTE_ORANGE);
+            else if (pct >= 20) col = lv_palette_main(LV_PALETTE_YELLOW);
+            else                col = lv_palette_main(LV_PALETTE_RED);
+        }
+        for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
+            if (!lbl_home_battery[i]) continue;
+            if (available) {
+                lv_label_set_text_fmt(lbl_home_battery[i], "%3u%%", (unsigned)pct);
+                lv_obj_set_style_text_color(lbl_home_battery[i], col, 0);
+            } else {
+                lv_label_set_text(lbl_home_battery[i], "");
+            }
+        }
+        for (int i = 0; i < MECK_SCREEN_HOST_COUNT; i++) {
+            if (!lbl_screen_battery[i]) continue;
+            if (available) {
+                lv_label_set_text_fmt(lbl_screen_battery[i], "%3u%%", (unsigned)pct);
+                lv_obj_set_style_text_color(lbl_screen_battery[i], col, 0);
+            } else {
+                lv_label_set_text(lbl_screen_battery[i], "");
+            }
+        }
     }
 
     // Radio detail: redraw when the noise floor moves. The actual
@@ -3872,14 +4187,6 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             g_last_noise_floor_displayed = nf;
             update_radio_detail_label();
         }
-    }
-
-    // Home tile: last RSSI/SNR
-    if (lbl_home_rssi && radio_driver.getPacketsRecv() > 0) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%.0f dBm / %.1f dB",
-                 radio_driver.getLastRSSI(), radio_driver.getLastSNR());
-        lv_label_set_text(lbl_home_rssi, buf);
     }
 
     // Battery tile: refresh every tick. Voltage is authoritative; if the
@@ -3950,9 +4257,13 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             for (int i = 0; i < n; i++) {
                 char timebuf[32];
                 format_local_time(recent[i].timestamp, timebuf, sizeof(timebuf));
+                // Strip emoji / higher-plane Unicode from the heard
+                // node's name so they render cleanly instead of tofu.
+                char clean_name[64];
+                strip_unrenderable(recent[i].name, clean_name, sizeof(clean_name));
                 int w = snprintf(log_buf + pos, sizeof(log_buf) - pos,
                     "%s  [%02X%02X]\n  RSSI %.0f  SNR %.1f  hops %s\n  %s\n\n",
-                    recent[i].name,
+                    clean_name,
                     recent[i].pub_key_prefix[0], recent[i].pub_key_prefix[1],
                     recent[i].rssi, recent[i].snr,
                     recent[i].path_len == 0xFF ? "direct" : "flood",

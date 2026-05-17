@@ -104,6 +104,7 @@ struct P4NodePrefs {
     // layout on first boot after the upgrade, no migration step needed.
     uint8_t kb_dark_mode;         // 0 = dark (default), 1 = light
     uint8_t kb_layout;            // 0 = QWERTY (default), 1 = AZERTY, 2 = QWERTZ
+    uint8_t font_scale;           // 0 = Classic, 1 = Larger
 
     // Initialize with defaults from variant.h
     void setDefaults() {
@@ -125,6 +126,7 @@ struct P4NodePrefs {
         gps_enabled = 1;        // on by default
         kb_dark_mode = 0;       // dark theme (matches the rest of Meck's UI)
         kb_layout = 0;          // QWERTY
+        font_scale = 0;         // Classic
     }
 };
 
@@ -372,11 +374,20 @@ public:
         nvs_handle_t handle;
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
         if (err == ESP_OK) {
-            size_t len = sizeof(P4NodePrefs);
-            err = nvs_get_blob(handle, "prefs", &prefs, &len);
+            // Older firmware may have stored a shorter struct (before fields
+            // like font_scale were added). Zero-fill prefs, then read using
+            // the on-disk blob size so the missing tail comes up as zero —
+            // which setDefaults already maps to sensible values for every
+            // field. Avoids wiping users' saved prefs on every struct grow.
+            memset(&prefs, 0, sizeof(P4NodePrefs));
+            size_t len = 0;
+            err = nvs_get_blob(handle, "prefs", NULL, &len);
+            if (err == ESP_OK && len > 0 && len <= sizeof(P4NodePrefs)) {
+                err = nvs_get_blob(handle, "prefs", &prefs, &len);
+            }
             nvs_close(handle);
 
-            if (err == ESP_OK && len == sizeof(P4NodePrefs)) {
+            if (err == ESP_OK && len > 0 && len <= sizeof(P4NodePrefs)) {
                 ESP_LOGI(TAG, "loadPrefs: from NVS (name=%s, freq=%.3f, sf=%d)",
                          prefs.node_name, prefs.freq, prefs.sf);
                 return true;
@@ -387,9 +398,11 @@ public:
         if (p4_sdcard_is_mounted() && p4_sdcard_file_exists(SD_PREFS_PATH)) {
             FILE* f = fopen(SD_PREFS_PATH, "rb");
             if (f) {
+                // Same shorter-blob tolerance as the NVS path above.
+                memset(&prefs, 0, sizeof(P4NodePrefs));
                 size_t rd = fread(&prefs, 1, sizeof(P4NodePrefs), f);
                 fclose(f);
-                if (rd == sizeof(P4NodePrefs)) {
+                if (rd > 0 && rd <= sizeof(P4NodePrefs)) {
                     // Save to NVS for next boot
                     savePrefs(prefs);
                     ESP_LOGI(TAG, "loadPrefs: restored from SD (name=%s)", prefs.node_name);
@@ -1314,6 +1327,48 @@ public:
         size_t wrote = fwrite(record_bytes, 1, record_size, f);
         fclose(f);
         return wrote == record_size;
+    }
+
+    // Delete the entire message file for a channel slot. Used when a
+    // channel is removed from the picker, so the slot can be re-used
+    // for a fresh channel without inheriting the old channel's history.
+    // Returns true if the file was removed (or didn't exist to begin
+    // with); false on a hard error.
+    bool deleteChannelMessageFile(uint8_t channel_idx) {
+        if (!p4_sdcard_is_mounted()) return false;
+        char path[80];
+        buildMessagePath(channel_idx, path, sizeof(path));
+        if (!p4_sdcard_file_exists(path)) return true;
+        if (unlink(path) == 0) {
+            ESP_LOGI(TAG, "deleteChannelMessageFile: removed %s", path);
+            return true;
+        }
+        ESP_LOGW(TAG, "deleteChannelMessageFile: unlink(%s) failed (errno=%d)",
+                 path, errno);
+        return false;
+    }
+
+    // Rename a channel's message file when its slot index changes (e.g.
+    // delete-and-compact shifts channels down to fill a gap). Returns
+    // true if the rename succeeded, or if there was no source file to
+    // rename (a slot that never had any messages persisted). False on
+    // a hard error.
+    bool renameChannelMessageFile(uint8_t from_idx, uint8_t to_idx) {
+        if (!p4_sdcard_is_mounted()) return false;
+        if (from_idx == to_idx) return true;
+        char from_path[80], to_path[80];
+        buildMessagePath(from_idx, from_path, sizeof(from_path));
+        buildMessagePath(to_idx,   to_path,   sizeof(to_path));
+        if (!p4_sdcard_file_exists(from_path)) return true;
+        // Clear any stale file at the destination so rename doesn't fail.
+        if (p4_sdcard_file_exists(to_path)) unlink(to_path);
+        if (rename(from_path, to_path) == 0) {
+            ESP_LOGI(TAG, "renameChannelMessageFile: %s -> %s", from_path, to_path);
+            return true;
+        }
+        ESP_LOGW(TAG, "renameChannelMessageFile: rename(%s, %s) failed (errno=%d)",
+                 from_path, to_path, errno);
+        return false;
     }
 
 

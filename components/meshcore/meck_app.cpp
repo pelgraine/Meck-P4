@@ -20,6 +20,7 @@
 #include "target.h"
 #include "MeckMesh.h"
 #include "MeckDataStore.h"
+#include "MeckImport.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <cstdio>
@@ -69,6 +70,16 @@ extern "C" bool meck_app_init() {
         printf("meck_app_init: no prefs in NVS, using variant.h defaults\n");
         g_node_prefs.setDefaults();
         g_dataStore.savePrefs(g_node_prefs);
+    }
+
+    // 3a. One-shot import from /sdcard/meshcore/import.json if present.
+    // Runs after loadPrefs so the import can overlay its name and
+    // radio_settings onto the loaded prefs rather than zeroes. If
+    // anything was applied, persist the modified prefs back to NVS+SD
+    // so the loaded copy reflects the import.
+    if (meck_import_from_sd(g_dataStore, g_node_prefs)) {
+        g_dataStore.savePrefs(g_node_prefs);
+        printf("meck_app_init: import applied, prefs persisted\n");
     }
 
     // ---- Apply prefs to the live radio ----

@@ -66,6 +66,7 @@ idf_component_register(
         fatfs
         chmorgan__esp-audio-player
         driver
+        espressif__cjson
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

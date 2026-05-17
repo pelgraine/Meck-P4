@@ -614,6 +614,43 @@ public:
             }
         }
 
+        // Drop the message history file for the slot being deleted, then
+        // shift the remaining files down so each ch_<N>.bin stays aligned
+        // with the channel that ends up at slot N after the compact.
+        if (_store) {
+            _store->deleteChannelMessageFile(idx);
+            for (int i = idx; i < total - 1; i++) {
+                _store->renameChannelMessageFile((uint8_t)(i + 1), (uint8_t)i);
+            }
+        }
+
+        // Compact the in-RAM message rings the same way: shift each
+        // surviving ring down one slot, then clear the now-vacated tail
+        // slot. getMessages reads from the ring exclusively, so without
+        // this step the new channel that ends up at slot N would inherit
+        // the deleted channel's messages from RAM even though its file
+        // on SD is now correct.
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        for (int i = idx; i < total - 1; i++) {
+            if (_msgs_ch[i] && _msgs_ch[i + 1]) {
+                memcpy(_msgs_ch[i], _msgs_ch[i + 1],
+                       P4_MSG_PER_CHANNEL * sizeof(P4ChannelMessage));
+            }
+            _msg_count_ch[i]  = _msg_count_ch[i + 1];
+            _msg_newest_ch[i] = _msg_newest_ch[i + 1];
+            _msg_unread_ch[i] = _msg_unread_ch[i + 1];
+        }
+        if (total - 1 >= 0 && _msgs_ch[total - 1]) {
+            memset(_msgs_ch[total - 1], 0,
+                   P4_MSG_PER_CHANNEL * sizeof(P4ChannelMessage));
+        }
+        if (total - 1 >= 0) {
+            _msg_count_ch[total - 1]  = 0;
+            _msg_newest_ch[total - 1] = -1;
+            _msg_unread_ch[total - 1] = 0;
+        }
+        xSemaphoreGive(_mutex);
+
         // Shift channels down to fill the gap
         for (int i = idx; i < total - 1; i++) {
             ChannelDetails next;
