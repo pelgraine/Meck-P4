@@ -197,7 +197,7 @@ static void meck_font_restyle_all() {
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3.3"
+#define MECK_FIRMWARE_VERSION "0.3.2"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -4152,7 +4152,14 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         uint8_t pct = 0;
         lv_color_t col = lv_color_white();
         if (available) {
-            pct = meck_battery_pct_from_chip();
+            // Use voltage-derived percentage until the BQ27220's chip-side
+            // calibration (Design Capacity in flash) is fixed. LilyGo's
+            // factory FCC=3000 mAh causes pct_from_chip to read ~100% for
+            // most of the discharge curve on the actual 1000 mAh cell;
+            // pct_from_voltage tracks the real voltage and is closer to
+            // reality. Battery Gauge detail tile still shows both for
+            // diagnostics.
+            pct = meck_battery_pct_from_voltage(meck_battery_voltage_mv());
             if      (pct >= 70) col = lv_palette_main(LV_PALETTE_GREEN);
             else if (pct >= 40) col = lv_palette_main(LV_PALETTE_ORANGE);
             else if (pct >= 20) col = lv_palette_main(LV_PALETTE_YELLOW);
