@@ -41,6 +41,55 @@ extern "C" void radio_apply_pending_reconfig();
 extern "C" void meck_request_send_text(uint8_t channel_idx, const char* text);
 extern "C" void meck_apply_pending_send();
 
+// ---- Direct message bridge (LVGL <-> mesh task) ----
+//
+// Send path: LVGL calls meck_request_send_dm() which queues the request;
+// meck_task drains via meck_apply_pending_send_dm() at the top of its loop.
+// Mirrors meck_request_send_text exactly — same SPI-race avoidance applies.
+//
+// Receive path: pull-based. meck_task fills Meck's pending-DM ring inside
+// onMessageRecv. The LVGL task calls meck_drain_pending_dms() periodically
+// (from ui_update_timer_cb), which pops queued DMs and invokes the
+// callback registered via meck_register_dm_recv_callback. The callback
+// thereby runs on the LVGL task, safe to touch LVGL state.
+//
+// The callback is given the sender's pub_key (32 bytes), sender name,
+// message text, sender_timestamp, path_len (0xFF for direct route, raw
+// hop count for flooded), and SNR×4. Lifetimes: the pointers are only
+// valid for the duration of the callback — the UI must copy anything it
+// wants to retain.
+typedef void (*meck_dm_recv_cb_t)(const uint8_t* from_pub_key,
+                                  const char* from_name,
+                                  const char* text,
+                                  uint32_t sender_timestamp,
+                                  uint8_t path_len,
+                                  int8_t snr_x4);
+
+extern "C" void meck_request_send_dm(int contact_idx, const char* text);
+extern "C" void meck_apply_pending_send_dm();
+extern "C" void meck_register_dm_recv_callback(meck_dm_recv_cb_t cb);
+extern "C" void meck_drain_pending_dms();
+
+// ---- DM send completion bridge (mesh task -> LVGL) ----
+//
+// When meck_apply_pending_send_dm successfully transmits a DM, it
+// records the expected_ack value (matching the entry the mesh placed
+// in the ACK table) plus the estimated round-trip timeout. The UI
+// thread pulls this on its periodic tick via meck_drain_pending_dm_sends
+// and invokes the registered callback, which writes the expected_ack
+// onto the matching outgoing DMMessage in the per-contact ring so the
+// bubble can later poll Meck::lookupDMAckStatus and render "Delivered"
+// / "Sending..." / "Failed".
+//
+// Same threading rationale as the receive path — callback runs on the
+// LVGL task, safe to touch LVGL state.
+typedef void (*meck_dm_sent_cb_t)(int contact_idx,
+                                  uint32_t expected_ack,
+                                  uint32_t est_timeout_ms);
+
+extern "C" void meck_register_dm_sent_callback(meck_dm_sent_cb_t cb);
+extern "C" void meck_drain_pending_dm_sends();
+
 // Deferred SD-save for channel messages. ring-write call sites enqueue;
 // meck_task drains via meck_apply_pending_save() and writes to SD without
 // blocking LVGL or message receive paths. ring_idx is the slot's position
@@ -52,6 +101,27 @@ struct P4ChannelMessage;
 extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
                                           const P4ChannelMessage* msg);
 extern "C" void meck_apply_pending_save();
+
+// ---- Config export (user-triggered, MeshCore app-compatible JSON) ----
+//
+// UI bridge to MeckExport.h. UI code (MeckUI.cpp) doesn't see P4DataStore
+// or cJSON directly — this function reaches the static instances in
+// meck_app.cpp and passes them through. flags is a bitmask of
+// MECK_EXPORT_* values (mirrored here so UI code doesn't have to include
+// MeckExport.h). On success, the resulting filename basename (e.g.
+// "export-1737253200.json") is copied into out_path. Safe to call inline
+// from an LVGL handler — the I/O is bounded (single JSON serialise +
+// one file write).
+#define MECK_EXPORT_IDENTITY  (1u << 0)
+#define MECK_EXPORT_CHANNELS  (1u << 1)
+#define MECK_EXPORT_CONTACTS  (1u << 2)
+#define MECK_EXPORT_RADIO     (1u << 3)
+#define MECK_EXPORT_ALL       (MECK_EXPORT_IDENTITY | MECK_EXPORT_CHANNELS | \
+                               MECK_EXPORT_CONTACTS | MECK_EXPORT_RADIO)
+
+extern "C" bool meck_export_to_sd_with_flags(uint32_t flags,
+                                             char* out_path,
+                                             size_t out_path_size);
 
 // ---- Boot button (ESP32-P4 strapping pin, direct GPIO) ----
 //

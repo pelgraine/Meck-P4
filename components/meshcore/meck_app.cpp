@@ -21,6 +21,7 @@
 #include "MeckMesh.h"
 #include "MeckDataStore.h"
 #include "MeckImport.h"
+#include "MeckExport.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <cstdio>
@@ -122,6 +123,7 @@ static void meck_task(void* arg) {
     while (true) {
         radio_apply_pending_reconfig();
         meck_apply_pending_send();
+        meck_apply_pending_send_dm();
         meck_apply_pending_save();
         if (g_the_mesh) {
             g_the_mesh->loop();
@@ -163,6 +165,152 @@ extern "C" void meck_apply_pending_send() {
         printf(">>> Sent on ch[%d]: %s\n", (int)g_send_pending_ch, g_send_pending_text);
     } else {
         printf(">>> FAILED to send on ch[%d]: %s\n", (int)g_send_pending_ch, g_send_pending_text);
+    }
+}
+
+// ============================================================================
+// Direct-message send bridge
+// ----------------------------------------------------------------------------
+// LVGL task enqueues a DM via meck_request_send_dm(); meck_task drains via
+// meck_apply_pending_send_dm() at the top of its loop. Same SPI-race
+// avoidance pattern as meck_request_send_text — the LVGL handler must
+// never call Meck::sendDirectMessage directly because that touches the
+// radio bus.
+//
+// One-deep queue (matching the channel-send pattern). DMs are rare enough
+// that a deeper queue would just add complexity for no gain; if the user
+// taps send twice in quick succession the second tap overwrites the first
+// pending entry. That's an edge case where the user is best served by
+// seeing only the more recent send.
+// ============================================================================
+static volatile bool g_dm_send_pending      = false;
+static volatile int  g_dm_send_pending_idx  = -1;
+static char          g_dm_send_pending_text[200] = {};
+
+// Pending DM send completion — populated by meck_apply_pending_send_dm
+// after a successful send, drained by meck_drain_pending_dm_sends()
+// from the LVGL task so the UI can write expected_ack back to the
+// matching ring slot. One-deep mirrors the send queue; if two sends
+// happen between drain cycles the second one overwrites the first's
+// pending notification (the actual sends both happened on the radio,
+// only the UI status writeback is at risk — and the lookupDMAckStatus
+// fallback handles "no expected_ack on bubble" gracefully).
+static volatile bool     g_dm_sent_pending      = false;
+static volatile int      g_dm_sent_contact_idx  = -1;
+static volatile uint32_t g_dm_sent_expected_ack = 0;
+static volatile uint32_t g_dm_sent_est_timeout  = 0;
+
+extern "C" void meck_request_send_dm(int contact_idx, const char* text) {
+    if (!text) return;
+    g_dm_send_pending_idx = contact_idx;
+    strncpy(g_dm_send_pending_text, text, sizeof(g_dm_send_pending_text) - 1);
+    g_dm_send_pending_text[sizeof(g_dm_send_pending_text) - 1] = '\0';
+    g_dm_send_pending = true;
+    printf("meck_request_send_dm: queued contact[%d] msg='%s'\n",
+           contact_idx, g_dm_send_pending_text);
+}
+
+extern "C" void meck_apply_pending_send_dm() {
+    if (!g_dm_send_pending) return;
+    g_dm_send_pending = false;
+    if (!g_the_mesh) return;
+    int contact_idx = g_dm_send_pending_idx;
+    uint32_t expected_ack = 0;
+    // sendDirectMessage's overload takes &est_timeout indirectly via the
+    // ack table; we read the captured timeout back from the table after
+    // the send returns. Simpler than threading another out-parameter
+    // through the public signature.
+    if (g_the_mesh->sendDirectMessage(contact_idx, g_dm_send_pending_text,
+                                      &expected_ack)) {
+        // Capture est_timeout by looking up the entry we just populated.
+        // The ack table is small and the entry is the newest write, so
+        // an exact lookup gives us the est_timeout_ms.
+        bool dummy_acked;
+        unsigned long dummy_sent;
+        uint32_t est_timeout = 0;
+        g_the_mesh->lookupDMAckStatus(expected_ack, dummy_acked, dummy_sent, est_timeout);
+
+        g_dm_sent_contact_idx  = contact_idx;
+        g_dm_sent_expected_ack = expected_ack;
+        g_dm_sent_est_timeout  = est_timeout;
+        g_dm_sent_pending      = true;
+
+        printf(">>> Sent DM to contact[%d]: %s (ack=0x%08X)\n",
+               contact_idx, g_dm_send_pending_text, (unsigned)expected_ack);
+    } else {
+        printf(">>> FAILED to send DM to contact[%d]: %s\n",
+               contact_idx, g_dm_send_pending_text);
+    }
+}
+
+// Callback type: invoked on the LVGL task when a DM send has completed
+// on the mesh task. The UI uses this to write expected_ack back into
+// the matching outgoing DMMessage in the per-contact ring so future
+// renders can poll lookupDMAckStatus and show "Delivered" once the
+// ACK lands. contact_idx + expected_ack identify which bubble; the
+// UI scans its own ring (newest outgoing message for that contact with
+// expected_ack == 0) and fills it in.
+typedef void (*meck_dm_sent_cb_t)(int contact_idx,
+                                  uint32_t expected_ack,
+                                  uint32_t est_timeout_ms);
+
+static meck_dm_sent_cb_t g_dm_sent_cb = nullptr;
+
+extern "C" void meck_register_dm_sent_callback(meck_dm_sent_cb_t cb) {
+    g_dm_sent_cb = cb;
+    printf("meck_register_dm_sent_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+extern "C" void meck_drain_pending_dm_sends() {
+    if (!g_dm_sent_pending) return;
+    g_dm_sent_pending = false;
+    int      idx     = g_dm_sent_contact_idx;
+    uint32_t ack     = g_dm_sent_expected_ack;
+    uint32_t timeout = g_dm_sent_est_timeout;
+    if (g_dm_sent_cb) {
+        g_dm_sent_cb(idx, ack, timeout);
+    } else {
+        printf("meck_drain_pending_dm_sends: no callback for contact[%d]\n", idx);
+    }
+}
+
+// ============================================================================
+// Direct-message receive bridge
+// ----------------------------------------------------------------------------
+// Pull-based: meck_task fills Meck's pending-DM ring inside onMessageRecv
+// (mesh task). The LVGL task calls meck_drain_pending_dms() periodically
+// from ui_update_timer_cb, which pops queued DMs and dispatches them to
+// the registered callback. The callback therefore runs on the LVGL task
+// and can safely touch LVGL state.
+//
+// One callback slot — the UI registers a single dispatcher and routes
+// internally to the right conversation view / inbox unread counter.
+// Multiple registrations would just complicate ordering for no benefit.
+// ============================================================================
+static meck_dm_recv_cb_t g_dm_recv_cb = nullptr;
+
+extern "C" void meck_register_dm_recv_callback(meck_dm_recv_cb_t cb) {
+    g_dm_recv_cb = cb;
+    printf("meck_register_dm_recv_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+extern "C" void meck_drain_pending_dms() {
+    if (!g_the_mesh) return;
+    // Drain whatever is queued. Each iteration is one ring pop + one
+    // callback invocation; cheap enough to run every UI tick (500ms).
+    // The UI callback decides whether to redraw, update unread counts,
+    // persist, etc.
+    Meck::PendingDMRecv dm;
+    while (g_the_mesh->drainPendingDM(dm)) {
+        if (g_dm_recv_cb) {
+            g_dm_recv_cb(dm.from_pub_key, dm.from_name, dm.text,
+                         dm.sender_timestamp, dm.path_len, dm.snr_x4);
+        } else {
+            // No callback registered yet (UI not initialised, or someone
+            // unregistered). Log so the message isn't silently lost.
+            printf("meck_drain_pending_dms: no callback, dropping DM from %s: %s\n",
+                   dm.from_name, dm.text);
+        }
     }
 }
 
@@ -301,4 +449,19 @@ extern "C" void meck_apply_pending_save() {
 
         g_save_tail = (g_save_tail + 1) % MECK_SAVE_QUEUE_SIZE;
     }
+}
+
+// ============================================================================
+// Config export bridge for UI thread
+// ----------------------------------------------------------------------------
+// MeckUI.cpp doesn't directly see g_dataStore or g_node_prefs (both are
+// static to this translation unit), so this extern "C" wrapper passes them
+// through to meck_export_to_sd. Same pattern as meck_get_instance() for
+// the mesh.
+// ============================================================================
+extern "C" bool meck_export_to_sd_with_flags(uint32_t flags,
+                                             char* out_path,
+                                             size_t out_path_size) {
+    return meck_export_to_sd(g_dataStore, g_node_prefs, flags,
+                             out_path, out_path_size);
 }

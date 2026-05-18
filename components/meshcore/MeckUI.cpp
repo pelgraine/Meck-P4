@@ -379,6 +379,13 @@ static lv_obj_t *obj_ch_add_panel  = NULL;
 static lv_obj_t *ta_ch_add         = NULL;
 static lv_obj_t *kb_ch_add         = NULL;
 
+// DM inbox — list of contacts with at least one DM (sent or received),
+// sorted newest-first. Entered from the channel picker's Direct Messages
+// pseudo-row. Per-row tap opens the contact's existing DM conversation
+// view via load_dm_view().
+static lv_obj_t *scr_dm_inbox       = NULL;
+static lv_obj_t *obj_dm_inbox_scroll = NULL;
+
 // Messages screen
 static lv_obj_t *scr_messages           = NULL;
 static lv_obj_t *lbl_msg_channel_name   = NULL;
@@ -388,6 +395,57 @@ static lv_obj_t *ta_compose             = NULL;
 static lv_obj_t *kb_compose             = NULL;
 static lv_obj_t *btn_send               = NULL;
 static uint8_t  g_active_channel        = 0;
+
+// ============================================================================
+// DMs — per-contact conversation rings + state
+// ----------------------------------------------------------------------------
+// The DM conversation view reuses scr_messages so all the textarea/keyboard
+// re-layout logic stays in one place. The active dataset (channel vs DM) is
+// selected by g_in_dm_mode; the send and back-button paths branch on this
+// flag.
+//
+// Storage: per-contact ring of up to MECK_DM_PER_CONTACT messages. Rings
+// are allocated lazily from PSRAM on first message touching that contact,
+// so the cost scales with actual DM usage rather than MAX_CONTACTS (1500).
+// Allocation is via heap_caps_calloc with MALLOC_CAP_SPIRAM (matches the
+// pattern MeckMesh.h uses for the channel message rings and contacts
+// array), freed only if/when the contact is deleted
+// (TODO: deleteContactByIdx needs to call into a DM-side helper to free
+// and compact the rings; not on v0.3.4 roadmap, flagged so we don't get
+// caught by stale pointers when contact deletion is exercised).
+//
+// Sent DMs are added to the ring immediately (local-echo, in-RAM only).
+// Received DMs are added when meck_drain_pending_dms invokes the
+// registered callback. Piece 5 will add SD persistence for the received
+// half so they survive reboot.
+// ============================================================================
+#define MECK_DM_PER_CONTACT  20
+
+struct DMMessage {
+    uint32_t timestamp;       // unique sender timestamp (or our send time for outgoing)
+    bool     outgoing;        // true = we sent it, false = we received it
+    uint8_t  path_len;        // recv only: 0xFF direct, else flood hop count
+    int8_t   snr_x4;          // recv only: SNR * 4
+    uint32_t expected_ack;    // outgoing only; matched against incoming ACKs (piece 5)
+    bool     acked;           // outgoing only; flipped true when ACK matched (piece 5)
+    char     text[160];       // raw message body
+};
+
+struct DMRing {
+    DMMessage* messages;      // heap_caps_calloc'd, MECK_DM_PER_CONTACT entries in PSRAM
+    int        count;         // valid entries in ring
+    int        newest_idx;    // most-recent slot; oldest = (newest+1) % depth (when full)
+    int        unread;        // received-but-not-viewed
+};
+
+// One ring per contact index. nullptr until a message arrives or is sent.
+// MAX_CONTACTS is 1500 on P4; pointer array is 12 KB on PSRAM, cheap.
+static DMRing* g_dm_rings[MAX_CONTACTS] = {nullptr};
+
+// View state — which contact's conversation is currently open. -1 when
+// the DM screen isn't loaded.
+static int  g_active_dm_contact_idx = -1;
+static bool g_in_dm_mode            = false;
 
 // Contacts
 static lv_obj_t *scr_contacts            = NULL;
@@ -421,6 +479,17 @@ static lv_obj_t *lbl_set_autoadd_sensor       = NULL;
 static lv_obj_t *lbl_set_autoadd_overwrite    = NULL;
 static lv_obj_t *lbl_set_backup_status        = NULL;
 
+// Export Config modal — overlay panel on scr_settings with four section
+// checkboxes (Identity, Channels, Contacts, Radio settings) plus Cancel
+// and Export buttons. Built once at settings-screen construction time
+// and hidden/shown via LV_OBJ_FLAG_HIDDEN. See create_settings_screen.
+static lv_obj_t *obj_export_panel       = NULL;
+static lv_obj_t *cb_export_identity     = NULL;
+static lv_obj_t *cb_export_channels     = NULL;
+static lv_obj_t *cb_export_contacts     = NULL;
+static lv_obj_t *cb_export_radio        = NULL;
+static lv_obj_t *lbl_export_warn        = NULL;
+
 // Discover (repeaters-only, mirrors Meck T-Deck Pro's F-key Discover)
 static lv_obj_t *scr_discover         = NULL;
 static lv_obj_t *obj_discover_scroll  = NULL;
@@ -433,10 +502,15 @@ static lv_obj_t *lbl_discover_status  = NULL;
 static void goto_home(lv_event_t *e);
 static void goto_settings(lv_event_t *e);
 static void goto_channel_picker(lv_event_t *e);
+static void goto_messages_back(lv_event_t *e);
+static void goto_dm_inbox(lv_event_t *e);
+static void refresh_dm_inbox_list();
+static void create_dm_inbox_screen();
 static void goto_contacts(lv_event_t *e);
 static void goto_contacts_from_detail(lv_event_t *e);
 static void goto_channel_n(lv_event_t *e);
 static void load_channel_view(uint8_t ch_idx);
+static void load_dm_view(int contact_idx);
 static void rebuild_message_bubbles(uint8_t ch_idx);
 
 static void settings_update_labels();
@@ -465,6 +539,7 @@ static void on_contact_tap(lv_event_t *e);
 static void on_contact_fav_toggle(lv_event_t *e);
 static void on_contact_long_press(lv_event_t *e);
 static void on_contact_delete(lv_event_t *e);
+static void on_contact_send_dm_tap(lv_event_t *e);
 static void on_contacts_screen_gesture(lv_event_t *e);
 static void on_filter_chip_tap(lv_event_t *e);
 
@@ -482,6 +557,10 @@ static void on_settings_autoadd_room_tap(lv_event_t *e);
 static void on_settings_autoadd_sensor_tap(lv_event_t *e);
 static void on_settings_autoadd_overwrite_tap(lv_event_t *e);
 static void on_settings_backup_to_sd_tap(lv_event_t *e);
+static void on_settings_export_config_tap(lv_event_t *e);
+static void on_export_modal_identity_changed(lv_event_t *e);
+static void on_export_modal_cancel(lv_event_t *e);
+static void on_export_modal_export(lv_event_t *e);
 static void on_settings_brightness_slider_event(lv_event_t *e);
 static void on_settings_screen_off_tap(lv_event_t *e);
 static void on_settings_kb_theme_tap(lv_event_t *e);
@@ -1480,6 +1559,107 @@ static lv_color_t sender_chip_color(const char *name) {
 }
 
 // ============================================================================
+// DM ring management
+// ----------------------------------------------------------------------------
+// Lazy per-contact rings (see the DMRing block at the top of this file).
+// Helpers here are kept narrow:
+//   dm_ring_get_or_alloc()  — fetch or allocate a ring for a contact
+//   dm_ring_append()        — append a message, advancing newest_idx and
+//                              wrapping over the oldest entry when full
+//   dm_ring_clear_unread()  — call when the user opens the conversation
+//
+// Thread model: all three are called only from the LVGL task. The DM
+// receive callback (meck_dm_recv_cb) is invoked from
+// meck_drain_pending_dms which runs in the LVGL ui_update_timer_cb, and
+// the send-echo path runs in the LVGL on_send_clicked. No mutex needed.
+// ============================================================================
+
+static DMRing* dm_ring_get_or_alloc(int contact_idx) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return nullptr;
+    if (g_dm_rings[contact_idx]) return g_dm_rings[contact_idx];
+
+    DMRing* r = (DMRing*)heap_caps_calloc(1, sizeof(DMRing), MALLOC_CAP_SPIRAM);
+    if (!r) {
+        printf("dm_ring_get_or_alloc: PSRAM alloc DMRing failed for idx=%d\n", contact_idx);
+        return nullptr;
+    }
+    r->messages = (DMMessage*)heap_caps_calloc(MECK_DM_PER_CONTACT,
+                                               sizeof(DMMessage),
+                                               MALLOC_CAP_SPIRAM);
+    if (!r->messages) {
+        printf("dm_ring_get_or_alloc: PSRAM alloc messages failed for idx=%d\n", contact_idx);
+        free(r);
+        return nullptr;
+    }
+    r->count      = 0;
+    r->newest_idx = -1;
+    r->unread     = 0;
+    g_dm_rings[contact_idx] = r;
+    return r;
+}
+
+// Append a message to the per-contact ring. newest_idx advances; oldest
+// rolls off when the ring is full. Returns the slot index written, or
+// -1 on failure.
+static int dm_ring_append(int contact_idx, const DMMessage& msg) {
+    DMRing* r = dm_ring_get_or_alloc(contact_idx);
+    if (!r) return -1;
+    int idx = (r->newest_idx + 1) % MECK_DM_PER_CONTACT;
+    r->messages[idx] = msg;
+    r->newest_idx = idx;
+    if (r->count < MECK_DM_PER_CONTACT) r->count++;
+    if (!msg.outgoing) r->unread++;
+    return idx;
+}
+
+// Mark all messages in a contact's ring as read. Called when the user
+// opens the conversation view for that contact.
+static void dm_ring_clear_unread(int contact_idx) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return;
+    DMRing* r = g_dm_rings[contact_idx];
+    if (!r) return;
+    r->unread = 0;
+}
+
+// Sum of unread across all per-contact rings. Used by the home screen
+// MSG counter and by the Direct Messages pseudo-row in the channel
+// picker. Linear scan over MAX_CONTACTS pointer slots — almost all
+// nullptr in normal use, so cheap.
+static int dm_total_unread() {
+    int total = 0;
+    for (int i = 0; i < MAX_CONTACTS; i++) {
+        DMRing* r = g_dm_rings[i];
+        if (r) total += r->unread;
+    }
+    return total;
+}
+
+// Timestamp of the newest message in a contact's ring. 0 if no ring or
+// the ring is empty. Used to sort the DM inbox by most-recent-first.
+static uint32_t dm_ring_newest_timestamp(int contact_idx) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return 0;
+    DMRing* r = g_dm_rings[contact_idx];
+    if (!r || r->count == 0 || r->newest_idx < 0) return 0;
+    return r->messages[r->newest_idx].timestamp;
+}
+
+// Copy the ring contents into a caller-provided buffer in chronological
+// order (oldest first). Returns the count copied (0 to MECK_DM_PER_CONTACT).
+// Mirrors the shape of Meck::getMessages so rebuild_dm_bubbles can use
+// the same iteration pattern as rebuild_message_bubbles.
+static int dm_ring_copy_chronological(int contact_idx, DMMessage* out, int max_out) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return 0;
+    DMRing* r = g_dm_rings[contact_idx];
+    if (!r || r->count == 0) return 0;
+    int count = (r->count < max_out) ? r->count : max_out;
+    int start = (r->newest_idx - count + 1 + MECK_DM_PER_CONTACT) % MECK_DM_PER_CONTACT;
+    for (int i = 0; i < count; i++) {
+        out[i] = r->messages[(start + i) % MECK_DM_PER_CONTACT];
+    }
+    return count;
+}
+
+// ============================================================================
 // rebuild_message_bubbles
 // ----------------------------------------------------------------------------
 // Tear down and rebuild the message list inside obj_msg_scroll. Each message
@@ -1686,6 +1866,173 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
 }
 
 // ============================================================================
+// rebuild_dm_bubbles
+// ----------------------------------------------------------------------------
+// DM-mode counterpart of rebuild_message_bubbles. Source data is the
+// per-contact ring g_dm_rings[contact_idx] rather than Meck::getMessages.
+// Layout idioms (row container, bubble shape, hop indicator) match
+// rebuild_message_bubbles for visual consistency between channel and DM
+// conversation views. Differences:
+//   - Only two bubble colours: one for "me" (right-aligned), one for "them"
+//     (left-aligned). The hash-into-hue palette doesn't add useful
+//     information when there are only two participants.
+//   - No sender chip — the alignment alone tells you who sent it.
+//   - ACK indicators on outgoing bubbles are placeholder this piece;
+//     piece 5 reads msg.acked and shows "Pending" vs "Delivered".
+// ============================================================================
+
+static void rebuild_dm_bubbles(int contact_idx) {
+    if (!obj_msg_scroll) return;
+
+    lv_obj_clean(obj_msg_scroll);
+    lbl_messages_body = NULL;
+
+    lv_obj_set_layout(obj_msg_scroll, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(obj_msg_scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(obj_msg_scroll, 6, 0);
+
+    DMMessage msgs[MECK_DM_PER_CONTACT];
+    int n = dm_ring_copy_chronological(contact_idx, msgs, MECK_DM_PER_CONTACT);
+
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(obj_msg_scroll);
+        lv_label_set_text(empty, "No DMs yet.");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(empty, &meck_montserrat_18, 0);
+        lbl_messages_body = empty;
+        return;
+    }
+
+    int row_max_w    = (SCREEN_WIDTH - 20) - 20;
+    int bubble_max_w = (int)((float)row_max_w * 0.78f);
+
+    // Bubble colours. Outgoing matches the cyan send button so "me" is
+    // recognisable at a glance; incoming uses a neutral teal that reads
+    // distinct from the cyan but doesn't fight the home-screen palette.
+    lv_color_t color_me   = lv_palette_main(LV_PALETTE_CYAN);
+    lv_color_t color_them = lv_palette_main(LV_PALETTE_TEAL);
+
+    for (int i = 0; i < n; i++) {
+        const DMMessage& m = msgs[i];
+        bool is_sent = m.outgoing;
+
+        char clean_text[256];
+        strip_unrenderable(m.text, clean_text, sizeof(clean_text));
+
+        // Row: full-width, transparent, alignment by sender direction.
+        lv_obj_t *row = lv_obj_create(obj_msg_scroll);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_scroll_dir(row, LV_DIR_NONE);
+        lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row,
+            is_sent ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
+            LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+        // Bubble.
+        lv_obj_t *bubble = lv_obj_create(row);
+        lv_obj_set_width(bubble, LV_SIZE_CONTENT);
+        lv_obj_set_height(bubble, LV_SIZE_CONTENT);
+        lv_obj_set_style_max_width(bubble, bubble_max_w, 0);
+        lv_obj_set_style_radius(bubble, 12, 0);
+        lv_obj_set_style_pad_all(bubble, 10, 0);
+        lv_obj_set_style_border_width(bubble, 0, 0);
+        lv_obj_set_scroll_dir(bubble, LV_DIR_NONE);
+        lv_obj_set_style_bg_color(bubble, is_sent ? color_me : color_them, 0);
+        lv_obj_set_layout(bubble, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(bubble, 2, 0);
+
+        // Body.
+        lv_obj_t *lbl_body = lv_label_create(bubble);
+        lv_label_set_text(lbl_body, clean_text);
+        lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
+        meck_set_font(lbl_body, &meck_montserrat_22, 0);
+        lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(lbl_body, bubble_max_w - 22);
+
+        // Footer: timestamp + hop info (received) or status (sent).
+        char timebuf[32];
+        format_local_time(m.timestamp, timebuf, sizeof(timebuf));
+        char meta[64];
+        meta[0] = '\0';
+        if (is_sent) {
+            // Real ACK status now wired (piece 5 half A). Query
+            // Meck::lookupDMAckStatus with the expected_ack we got
+            // back from the send. Three cases:
+            //   1. expected_ack == 0 — the send completion callback
+            //      hasn't landed yet, so the bubble is brand new.
+            //      Show "Sending..." optimistically.
+            //   2. lookupDMAckStatus returns false — the ack table
+            //      entry has rolled out. We can't tell if the ACK
+            //      landed or not, so leave a neutral "Sent" label.
+            //   3. lookupDMAckStatus returns true:
+            //      - acked → "✓ Delivered"
+            //      - else if (now - sent) < timeout → "Sending..."
+            //      - else → "Failed"
+            Meck* mesh_for_ack = meck_get_instance();
+            if (m.expected_ack == 0) {
+                snprintf(meta, sizeof(meta), "Sending...");
+            } else if (!mesh_for_ack) {
+                snprintf(meta, sizeof(meta), "Sent");
+            } else {
+                bool          acked      = false;
+                unsigned long sent_ms    = 0;
+                uint32_t      timeout_ms = 0;
+                if (mesh_for_ack->lookupDMAckStatus(m.expected_ack, acked,
+                                                    sent_ms, timeout_ms)) {
+                    if (acked) {
+                        snprintf(meta, sizeof(meta), LV_SYMBOL_OK " Delivered");
+                    } else {
+                        unsigned long now = (unsigned long)esp_log_timestamp();
+                        if (now - sent_ms < timeout_ms) {
+                            snprintf(meta, sizeof(meta), "Sending...");
+                        } else {
+                            snprintf(meta, sizeof(meta), "Failed");
+                        }
+                    }
+                } else {
+                    // Rolled out of the ACK table — final state unknown.
+                    snprintf(meta, sizeof(meta), "Sent");
+                }
+            }
+        } else {
+            uint8_t pl = m.path_len;
+            if (pl == 0xFF || (pl & 63) == 0) {
+                snprintf(meta, sizeof(meta), "direct");
+            } else {
+                unsigned hops = pl & 63;
+                snprintf(meta, sizeof(meta), "%u hop%s",
+                         hops, hops == 1 ? "" : "s");
+            }
+        }
+        char footer[96];
+        if (timebuf[0] && meta[0]) {
+            snprintf(footer, sizeof(footer), "%s  ·  %s", timebuf, meta);
+        } else if (timebuf[0]) {
+            snprintf(footer, sizeof(footer), "%s", timebuf);
+        } else {
+            snprintf(footer, sizeof(footer), "%s", meta);
+        }
+        if (footer[0]) {
+            lv_obj_t *lbl_time = lv_label_create(bubble);
+            lv_label_set_text(lbl_time, footer);
+            lv_obj_set_style_text_color(lbl_time, lv_palette_main(LV_PALETTE_GREY), 0);
+            meck_set_font(lbl_time, &meck_montserrat_14, 0);
+            lv_obj_set_style_text_align(lbl_time,
+                is_sent ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
+        }
+    }
+
+    lbl_messages_body = lv_obj_get_child(obj_msg_scroll, -1);
+    lv_obj_scroll_to_y(obj_msg_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+// ============================================================================
 // update_radio_detail_label
 // ============================================================================
 
@@ -1868,8 +2215,28 @@ static void on_send_clicked(lv_event_t *e) {
     if (!ta_compose) return;
     const char *text = lv_textarea_get_text(ta_compose);
     if (text && text[0]) {
-        // Defer to meck_task to avoid SPI race with mesh.loop()
-        meck_request_send_text(g_active_channel, text);
+        if (g_in_dm_mode && g_active_dm_contact_idx >= 0) {
+            // DM path. Defer to meck_task to avoid SPI race with mesh.loop().
+            meck_request_send_dm(g_active_dm_contact_idx, text);
+
+            // Local echo into the per-contact ring so the bubble shows
+            // immediately. The actual delivery state will be filled in
+            // by piece 5 via the ACK table.
+            DMMessage echo = {};
+            echo.timestamp = meck_clock_get_utc();
+            echo.outgoing  = true;
+            echo.path_len  = 0;
+            echo.snr_x4    = 0;
+            echo.expected_ack = 0;
+            echo.acked     = false;
+            strncpy(echo.text, text, sizeof(echo.text) - 1);
+            echo.text[sizeof(echo.text) - 1] = '\0';
+            dm_ring_append(g_active_dm_contact_idx, echo);
+            rebuild_dm_bubbles(g_active_dm_contact_idx);
+        } else {
+            // Channel path (existing behaviour).
+            meck_request_send_text(g_active_channel, text);
+        }
         lv_textarea_set_text(ta_compose, "");
     }
     if (kb_compose) lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
@@ -2564,6 +2931,77 @@ static void on_settings_backup_to_sd_tap(lv_event_t *e) {
     printf("Settings: backup to SD -> %s\n", buf);
 }
 
+// Open the Export Config modal. Defaults: all four section checkboxes
+// ticked, identity warning visible. Hidden by clearing LV_OBJ_FLAG_HIDDEN
+// on the panel; cancel/export close it the same way.
+static void on_settings_export_config_tap(lv_event_t *e) {
+    if (!obj_export_panel) return;
+    // Reset to defaults each time the modal opens — the user's previous
+    // selection on a prior tap shouldn't sticky-influence the next export.
+    if (cb_export_identity) lv_obj_add_state(cb_export_identity, LV_STATE_CHECKED);
+    if (cb_export_channels) lv_obj_add_state(cb_export_channels, LV_STATE_CHECKED);
+    if (cb_export_contacts) lv_obj_add_state(cb_export_contacts, LV_STATE_CHECKED);
+    if (cb_export_radio)    lv_obj_add_state(cb_export_radio,    LV_STATE_CHECKED);
+    if (lbl_export_warn)    lv_obj_clear_flag(lbl_export_warn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_export_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Show/hide the identity-warning sub-label as the Identity checkbox is
+// toggled. Warning only makes sense when identity is being included.
+static void on_export_modal_identity_changed(lv_event_t *e) {
+    if (!cb_export_identity || !lbl_export_warn) return;
+    bool checked = lv_obj_has_state(cb_export_identity, LV_STATE_CHECKED);
+    if (checked) {
+        lv_obj_clear_flag(lbl_export_warn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_export_warn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Dismiss the modal without exporting.
+static void on_export_modal_cancel(lv_event_t *e) {
+    if (obj_export_panel) lv_obj_add_flag(obj_export_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Build the flags bitmask from the four checkboxes and call the bridge.
+// Reuses lbl_set_backup_status for the result line — saves a row, at the
+// cost of the label briefly meaning "last export" when the user has just
+// done an export but is still looking at the Backup to SD row name. Worth
+// it for the tighter layout.
+static void on_export_modal_export(lv_event_t *e) {
+    uint32_t flags = 0;
+    if (cb_export_identity && lv_obj_has_state(cb_export_identity, LV_STATE_CHECKED))
+        flags |= MECK_EXPORT_IDENTITY;
+    if (cb_export_channels && lv_obj_has_state(cb_export_channels, LV_STATE_CHECKED))
+        flags |= MECK_EXPORT_CHANNELS;
+    if (cb_export_contacts && lv_obj_has_state(cb_export_contacts, LV_STATE_CHECKED))
+        flags |= MECK_EXPORT_CONTACTS;
+    if (cb_export_radio && lv_obj_has_state(cb_export_radio, LV_STATE_CHECKED))
+        flags |= MECK_EXPORT_RADIO;
+
+    char filename[64] = {0};
+    bool ok = meck_export_to_sd_with_flags(flags, filename, sizeof(filename));
+
+    if (lbl_set_backup_status) {
+        char buf[80];
+        if (ok) {
+            snprintf(buf, sizeof(buf), "OK: %s", filename);
+        } else {
+            snprintf(buf, sizeof(buf), "Export failed");
+        }
+        lv_label_set_text(lbl_set_backup_status, buf);
+        lv_obj_set_style_text_color(lbl_set_backup_status,
+            ok ? lv_palette_main(LV_PALETTE_GREEN)
+               : lv_palette_main(LV_PALETTE_RED), 0);
+    }
+    printf("Settings: export to SD (flags=0x%X) -> %s%s\n",
+           (unsigned)flags,
+           ok ? "OK " : "FAIL",
+           ok ? filename : "");
+
+    if (obj_export_panel) lv_obj_add_flag(obj_export_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
 // Slider event handler. LV_EVENT_VALUE_CHANGED fires continuously as the
 // user drags; we apply the new brightness to the panel immediately so the
 // change is visible while sliding, but don't persist until release to
@@ -2935,6 +3373,20 @@ static void create_settings_screen() {
     lbl_set_backup_status = backup_value_lbl;
     y += 65;
 
+    // Export Config — write current state to SD as MeshCore-app-compatible
+    // JSON. Opens a modal with four section checkboxes. Reuses
+    // lbl_set_backup_status above for its result line (see
+    // on_export_modal_export for the trade-off).
+    lv_obj_t *export_value_lbl = NULL;
+    create_settings_row(scroll, "Export Config",
+        &export_value_lbl, on_settings_export_config_tap, y);
+    if (export_value_lbl) {
+        lv_label_set_text(export_value_lbl, "Tap");
+        lv_obj_set_style_text_color(export_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
     // Screen brightness — slider from MECK_BRIGHTNESS_MIN_PCT to
     // MECK_BRIGHTNESS_MAX_PCT in 1% steps. Live-applies to the panel while
     // dragging; persists on release.
@@ -3108,6 +3560,103 @@ static void create_settings_screen() {
     lv_obj_add_event_cb(kb_settings, on_kb_long_press,
                         LV_EVENT_LONG_PRESSED, NULL);
 
+    // ---- Export Config modal ----
+    // Same overlay pattern as the Edit Node Name modal above: full-screen
+    // panel, 90% black background, hidden by default. Built once at
+    // settings-screen construction time so the tap handler just unhides.
+    // Title at y=50 clears the camera punch-hole on the TFT variant; the
+    // checkboxes step down from there with the warning sub-label tucked
+    // under the Identity row.
+    obj_export_panel = lv_obj_create(scr_settings);
+    lv_obj_set_size(obj_export_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_export_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_export_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_export_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_export_panel, 0, 0);
+    lv_obj_add_flag(obj_export_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_export_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_export_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *export_title = lv_label_create(obj_export_panel);
+    lv_label_set_text(export_title, "Export Config");
+    lv_obj_set_style_text_color(export_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(export_title, &meck_montserrat_22, 0);
+    lv_obj_align(export_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    // Identity checkbox + small warning sub-label.
+    cb_export_identity = lv_checkbox_create(obj_export_panel);
+    lv_checkbox_set_text(cb_export_identity, "Identity (incl. private key)");
+    lv_obj_set_style_text_color(cb_export_identity, lv_color_white(), 0);
+    meck_set_font(cb_export_identity, &meck_montserrat_18, 0);
+    lv_obj_align(cb_export_identity, LV_ALIGN_TOP_LEFT, 30, 110);
+    lv_obj_add_state(cb_export_identity, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(cb_export_identity,
+                        on_export_modal_identity_changed,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+
+    lbl_export_warn = lv_label_create(obj_export_panel);
+    lv_label_set_text(lbl_export_warn,
+        "Anyone with this file can impersonate your node.");
+    lv_obj_set_style_text_color(lbl_export_warn,
+        lv_palette_main(LV_PALETTE_ORANGE), 0);
+    meck_set_font(lbl_export_warn, &meck_montserrat_14, 0);
+    lv_label_set_long_mode(lbl_export_warn, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_export_warn, SCREEN_WIDTH - 80);
+    lv_obj_align(lbl_export_warn, LV_ALIGN_TOP_LEFT, 60, 150);
+
+    // Channels.
+    cb_export_channels = lv_checkbox_create(obj_export_panel);
+    lv_checkbox_set_text(cb_export_channels, "Channels");
+    lv_obj_set_style_text_color(cb_export_channels, lv_color_white(), 0);
+    meck_set_font(cb_export_channels, &meck_montserrat_18, 0);
+    lv_obj_align(cb_export_channels, LV_ALIGN_TOP_LEFT, 30, 200);
+    lv_obj_add_state(cb_export_channels, LV_STATE_CHECKED);
+
+    // Contacts.
+    cb_export_contacts = lv_checkbox_create(obj_export_panel);
+    lv_checkbox_set_text(cb_export_contacts, "Contacts");
+    lv_obj_set_style_text_color(cb_export_contacts, lv_color_white(), 0);
+    meck_set_font(cb_export_contacts, &meck_montserrat_18, 0);
+    lv_obj_align(cb_export_contacts, LV_ALIGN_TOP_LEFT, 30, 250);
+    lv_obj_add_state(cb_export_contacts, LV_STATE_CHECKED);
+
+    // Radio settings.
+    cb_export_radio = lv_checkbox_create(obj_export_panel);
+    lv_checkbox_set_text(cb_export_radio, "Radio settings");
+    lv_obj_set_style_text_color(cb_export_radio, lv_color_white(), 0);
+    meck_set_font(cb_export_radio, &meck_montserrat_18, 0);
+    lv_obj_align(cb_export_radio, LV_ALIGN_TOP_LEFT, 30, 300);
+    lv_obj_add_state(cb_export_radio, LV_STATE_CHECKED);
+
+    // Cancel button (grey, bottom-left).
+    lv_obj_t *btn_export_cancel = lv_button_create(obj_export_panel);
+    lv_obj_set_size(btn_export_cancel, 140, 70);
+    lv_obj_align(btn_export_cancel, LV_ALIGN_BOTTOM_LEFT, 30, -30);
+    lv_obj_set_style_bg_color(btn_export_cancel, lv_color_make(60, 60, 60), 0);
+    lv_obj_set_style_radius(btn_export_cancel, 8, 0);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_export_cancel);
+    lv_label_set_text(lbl_cancel, "Cancel");
+    lv_obj_set_style_text_color(lbl_cancel, lv_color_white(), 0);
+    meck_set_font(lbl_cancel, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_cancel);
+    lv_obj_add_event_cb(btn_export_cancel, on_export_modal_cancel,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Export button (cyan, bottom-right).
+    lv_obj_t *btn_export_go = lv_button_create(obj_export_panel);
+    lv_obj_set_size(btn_export_go, 140, 70);
+    lv_obj_align(btn_export_go, LV_ALIGN_BOTTOM_RIGHT, -30, -30);
+    lv_obj_set_style_bg_color(btn_export_go,
+        lv_palette_darken(LV_PALETTE_CYAN, 2), 0);
+    lv_obj_set_style_radius(btn_export_go, 8, 0);
+    lv_obj_t *lbl_go = lv_label_create(btn_export_go);
+    lv_label_set_text(lbl_go, "Export");
+    lv_obj_set_style_text_color(lbl_go, lv_color_white(), 0);
+    meck_set_font(lbl_go, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_go);
+    lv_obj_add_event_cb(btn_export_go, on_export_modal_export,
+                        LV_EVENT_CLICKED, NULL);
+
     settings_update_labels();
 }
 
@@ -3187,8 +3736,53 @@ static void refresh_channel_picker() {
     lv_obj_clean(obj_ch_picker_scroll);
     memset(lbl_picker_unread, 0, sizeof(lbl_picker_unread));
 
-    int num_ch = mesh->getActiveChannelCount();
     int y = 5;
+
+    // ---- Direct Messages pseudo-row ----
+    // Always shown, regardless of whether any DMs exist (zero state lives
+    // on the inbox screen as "No DMs yet"). Teal border + label, chosen
+    // to read distinctly from the default-cyan #public channel that
+    // sits directly below. No delete button — DMs are a virtual
+    // category, not a removable channel.
+    {
+        // Teal rather than cyan: cyan is the default channel colour
+        // (CH_COLORS[0]), used by the public channel directly below,
+        // and the two rows were visually identical. Teal is the colour
+        // of the Audio home tile border (CH_COLORS[8]) and reads
+        // clearly distinct against cyan in the same scroll view.
+        lv_color_t dm_color = lv_palette_main(LV_PALETTE_TEAL);
+
+        lv_obj_t *btn_dm = lv_button_create(obj_ch_picker_scroll);
+        lv_obj_set_size(btn_dm, SCREEN_WIDTH - 40, 75);
+        lv_obj_set_pos(btn_dm, 0, y);
+        lv_obj_set_style_bg_color(btn_dm, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn_dm, 12, 0);
+        lv_obj_set_style_border_width(btn_dm, 2, 0);
+        lv_obj_set_style_border_color(btn_dm, dm_color, 0);
+        lv_obj_add_event_cb(btn_dm, goto_dm_inbox, LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t *lbl_dm_name = lv_label_create(btn_dm);
+        lv_label_set_text(lbl_dm_name, "Direct Messages");
+        lv_obj_set_style_text_color(lbl_dm_name, dm_color, 0);
+        meck_set_font(lbl_dm_name, &meck_montserrat_22, 0);
+        lv_obj_align(lbl_dm_name, LV_ALIGN_LEFT_MID, 10, 0);
+
+        // Total unread badge, mirroring the per-channel unread display.
+        int dm_unread = dm_total_unread();
+        lv_obj_t *lbl_dm_unread = lv_label_create(btn_dm);
+        if (dm_unread > 0) {
+            lv_label_set_text_fmt(lbl_dm_unread, "%d new", dm_unread);
+        } else {
+            lv_label_set_text(lbl_dm_unread, "");
+        }
+        lv_obj_set_style_text_color(lbl_dm_unread, lv_color_make(100, 255, 100), 0);
+        meck_set_font(lbl_dm_unread, &meck_montserrat_18, 0);
+        lv_obj_align(lbl_dm_unread, LV_ALIGN_RIGHT_MID, -10, 0);
+
+        y += 85;
+    }
+
+    int num_ch = mesh->getActiveChannelCount();
 
     for (int i = 0; i < num_ch && i < 8; i++) {
         ChannelDetails ch;
@@ -3314,6 +3908,166 @@ static void create_channel_picker_screen() {
 }
 
 // ============================================================================
+// DM inbox screen
+// ----------------------------------------------------------------------------
+// Lists contacts who have at least one DM (sent or received), sorted
+// newest-first. Each row shows name + unread badge; tap opens
+// load_dm_view(idx) which switches into scr_messages with DM mode active.
+//
+// Why a separate screen rather than reusing the contacts list with a
+// filter: the contacts list is for browsing/managing all contacts (with
+// favourite/delete affordances). The DM inbox is for picking back up a
+// conversation. Different mental model, different visual density, much
+// shorter list. Keeping them separate avoids modal complexity.
+// ============================================================================
+
+// Per-tap handler: open the conversation for the contact tied to this row.
+// The contact index is encoded as the user_data on the row's click event.
+static void on_dm_inbox_row_tap(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    load_dm_view(idx);
+}
+
+static void refresh_dm_inbox_list() {
+    Meck* mesh = meck_get_instance();
+    if (!obj_dm_inbox_scroll || !mesh) return;
+
+    lv_obj_clean(obj_dm_inbox_scroll);
+
+    // Build a list of (contact_idx, newest_timestamp) for every contact
+    // that has a ring with at least one message. Sort newest-first by
+    // timestamp. MAX_CONTACTS=1500 but the count of rings is typically
+    // small (only contacts the user has actually DM'd or been DM'd by),
+    // so the scan + sort is cheap. Worst-case sizing is MAX_CONTACTS,
+    // hence heap-allocated rather than on the stack — 1500 * 8 bytes
+    // is 12KB which can blow the LVGL task's stack frame.
+    struct Entry { int idx; uint32_t ts; };
+    Entry* entries = (Entry*)heap_caps_calloc(MAX_CONTACTS, sizeof(Entry),
+                                              MALLOC_CAP_SPIRAM);
+    if (!entries) {
+        printf("refresh_dm_inbox_list: PSRAM alloc failed\n");
+        return;
+    }
+
+    int n = 0;
+    for (int i = 0; i < MAX_CONTACTS; i++) {
+        DMRing* r = g_dm_rings[i];
+        if (!r || r->count == 0) continue;
+        entries[n].idx = i;
+        entries[n].ts  = dm_ring_newest_timestamp(i);
+        n++;
+    }
+
+    // Simple insertion sort, descending by timestamp. For the small n
+    // we expect (handful to a few dozen) this is fine — and stable, so
+    // ties (rare with unique sender timestamps) keep their scan order.
+    for (int i = 1; i < n; i++) {
+        Entry cur = entries[i];
+        int j = i - 1;
+        while (j >= 0 && entries[j].ts < cur.ts) {
+            entries[j + 1] = entries[j];
+            j--;
+        }
+        entries[j + 1] = cur;
+    }
+
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(obj_dm_inbox_scroll);
+        lv_label_set_text(empty, "No DMs yet.");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(empty, &meck_montserrat_22, 0);
+        lv_obj_align(empty, LV_ALIGN_TOP_MID, 0, 30);
+        free(entries);
+        return;
+    }
+
+    int y = 5;
+    lv_color_t row_color = lv_palette_main(LV_PALETTE_CYAN);
+    for (int i = 0; i < n; i++) {
+        ContactInfo ci;
+        if (!mesh->getContactByIdx((uint32_t)entries[i].idx, ci)) continue;
+        DMRing* r = g_dm_rings[entries[i].idx];
+        if (!r) continue;  // shouldn't happen, defensive
+
+        lv_obj_t *btn = lv_button_create(obj_dm_inbox_scroll);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 40, 75);
+        lv_obj_set_pos(btn, 0, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 12, 0);
+        lv_obj_set_style_border_width(btn, 2, 0);
+        lv_obj_set_style_border_color(btn, row_color, 0);
+        lv_obj_add_event_cb(btn, on_dm_inbox_row_tap, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)entries[i].idx);
+
+        // Contact name. Stripped of unrenderable chars (same treatment
+        // the contacts list applies) so emoji-heavy names don't tofu.
+        char clean_name[64];
+        strip_unrenderable(ci.name, clean_name, sizeof(clean_name));
+
+        lv_obj_t *lbl_name = lv_label_create(btn);
+        lv_label_set_text(lbl_name, clean_name);
+        lv_obj_set_style_text_color(lbl_name, lv_color_white(), 0);
+        meck_set_font(lbl_name, &meck_montserrat_22, 0);
+        lv_obj_align(lbl_name, LV_ALIGN_LEFT_MID, 10, 0);
+
+        if (r->unread > 0) {
+            lv_obj_t *lbl_unread = lv_label_create(btn);
+            lv_label_set_text_fmt(lbl_unread, "%d new", r->unread);
+            lv_obj_set_style_text_color(lbl_unread, lv_color_make(100, 255, 100), 0);
+            meck_set_font(lbl_unread, &meck_montserrat_18, 0);
+            lv_obj_align(lbl_unread, LV_ALIGN_RIGHT_MID, -10, 0);
+        }
+
+        y += 85;
+    }
+
+    free(entries);
+}
+
+static void create_dm_inbox_screen() {
+    scr_dm_inbox = lv_obj_create(NULL);
+    lock_screen_scroll(scr_dm_inbox);
+    lv_obj_set_style_bg_color(scr_dm_inbox, lv_color_black(), 0);
+    // Slot 8 (slots 0-5,7 used elsewhere; 6 is free but reserved). 8
+    // groups visually with the message-related screens at slot 4 +5.
+    screen_attach_clock_battery(scr_dm_inbox, 8, &meck_montserrat_24, 30);
+
+    lv_obj_t *btn_back = lv_button_create(scr_dm_inbox);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, goto_channel_picker, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_dm_inbox);
+    lv_label_set_text(title, "Direct Messages");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_CYAN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    obj_dm_inbox_scroll = lv_obj_create(scr_dm_inbox);
+    lv_obj_set_size(obj_dm_inbox_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 100);
+    lv_obj_set_pos(obj_dm_inbox_scroll, 10, 90);
+    lv_obj_set_style_bg_color(obj_dm_inbox_scroll, lv_color_make(10, 10, 15), 0);
+    lv_obj_set_style_border_width(obj_dm_inbox_scroll, 0, 0);
+    lv_obj_set_style_radius(obj_dm_inbox_scroll, 8, 0);
+    lv_obj_set_style_pad_all(obj_dm_inbox_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_dm_inbox_scroll, LV_DIR_VER);
+}
+
+// Navigation entry-point: refresh the list and load the screen. Wired
+// to the Direct Messages pseudo-row in the channel picker.
+static void goto_dm_inbox(lv_event_t *e) {
+    refresh_dm_inbox_list();
+    if (scr_dm_inbox) lv_screen_load(scr_dm_inbox);
+}
+
+// ============================================================================
 // Messages screen (lifted from old:908-1023)
 // ============================================================================
 
@@ -3334,7 +4088,7 @@ static void create_messages_screen() {
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
     meck_set_font(bl, &meck_montserrat_18, 0);
     lv_obj_center(bl);
-    lv_obj_add_event_cb(btn_back, goto_channel_picker, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn_back, goto_messages_back, LV_EVENT_CLICKED, NULL);
 
     lbl_msg_channel_name = lv_label_create(scr_messages);
     lv_label_set_text(lbl_msg_channel_name, "#public");
@@ -3423,6 +4177,7 @@ static void create_messages_screen() {
 
 static void load_channel_view(uint8_t ch_idx) {
     g_active_channel = ch_idx;
+    g_in_dm_mode = false;  // shared scr_messages — make sure we're not in DM mode
     Meck* mesh = meck_get_instance();
 
     if (lbl_msg_channel_name && mesh) {
@@ -4041,9 +4796,30 @@ static void create_contact_detail_screen() {
     lv_obj_center(del_lbl);
     lv_obj_add_event_cb(btn_del, on_contact_delete, LV_EVENT_LONG_PRESSED, NULL);
 
+    // Send DM — opens scr_messages in DM mode for this contact. Cyan to
+    // match the Identity / Export accent and the send-button colour on
+    // scr_messages itself.
+    // Send DM — opens scr_messages in DM mode for this contact. Cyan to
+    // match the Identity / Export accent and the send-button colour on
+    // scr_messages itself. Positioned directly below the Fav button (not
+    // left of Delete) so it clears the TFT camera punch-hole, which sits
+    // along the top edge of the screen.
+    lv_obj_t *btn_dm = lv_button_create(scr_contact_detail);
+    lv_obj_set_size(btn_dm, 100, 70);
+    lv_obj_align(btn_dm, LV_ALIGN_TOP_RIGHT, -10, 90);
+    lv_obj_set_style_bg_color(btn_dm,
+        lv_palette_darken(LV_PALETTE_CYAN, 2), 0);
+    lv_obj_set_style_radius(btn_dm, 8, 0);
+    lv_obj_t *dm_lbl = lv_label_create(btn_dm);
+    lv_label_set_text(dm_lbl, LV_SYMBOL_ENVELOPE " DM");
+    lv_obj_set_style_text_color(dm_lbl, lv_color_white(), 0);
+    meck_set_font(dm_lbl, &meck_montserrat_16, 0);
+    lv_obj_center(dm_lbl);
+    lv_obj_add_event_cb(btn_dm, on_contact_send_dm_tap, LV_EVENT_CLICKED, NULL);
+
     lv_obj_t *scroll = lv_obj_create(scr_contact_detail);
-    lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 100);
-    lv_obj_set_pos(scroll, 10, 90);
+    lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 180);
+    lv_obj_set_pos(scroll, 10, 170);
     lv_obj_set_style_bg_color(scroll, lv_color_make(10, 10, 15), 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
     lv_obj_set_style_radius(scroll, 8, 0);
@@ -4075,6 +4851,75 @@ static void goto_channel_picker(lv_event_t *e) {
     if (scr_channel_picker) lv_screen_load(scr_channel_picker);
 }
 
+// Mode-aware back from the messages screen. In channel mode, returns to
+// the channel picker (existing behaviour). In DM mode, returns to the
+// contact detail screen for the contact we were chatting with. Clears
+// g_in_dm_mode so the next screen-load doesn't accidentally render with
+// DM data. The send/keyboard widgets are shared between channel and DM
+// modes, so we just hide the keyboard rather than rebuild anything.
+static void goto_messages_back(lv_event_t *e) {
+    if (g_in_dm_mode) {
+        g_in_dm_mode = false;
+        // Keep g_active_dm_contact_idx valid so the DM screen can be
+        // reloaded with state-restore if the user re-enters from the
+        // same contact detail.
+        if (kb_compose) lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
+        if (scr_contact_detail) lv_screen_load(scr_contact_detail);
+    } else {
+        goto_channel_picker(e);
+    }
+}
+
+// Load DM conversation for a specific contact. Mirrors load_channel_view's
+// shape: stash the active contact, populate the title label, rebuild the
+// bubbles, clear the textarea, reset layout, mark unread → 0, present
+// scr_messages.
+//
+// scr_messages is reused (one screen, two modes) so all the shared
+// textarea/keyboard/relayout wiring stays in one place. g_in_dm_mode is
+// the flag the rest of the code branches on; on_send_clicked picks the
+// right send path, the back button picks the right return target, and
+// rebuild_dm_bubbles is called from here instead of rebuild_message_bubbles.
+static void load_dm_view(int contact_idx) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+
+    ContactInfo ci;
+    if (!mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
+        printf("load_dm_view: contact idx %d not found\n", contact_idx);
+        return;
+    }
+
+    g_active_dm_contact_idx = contact_idx;
+    g_in_dm_mode = true;
+
+    // Title shows the contact name, coloured cyan to match the send
+    // accent. (Channel mode uses CH_COLORS hashed by channel index;
+    // there's no equivalent palette concept for contacts here.)
+    if (lbl_msg_channel_name) {
+        lv_label_set_text(lbl_msg_channel_name, ci.name);
+        lv_obj_set_style_text_color(lbl_msg_channel_name,
+            lv_palette_main(LV_PALETTE_CYAN), 0);
+    }
+
+    rebuild_dm_bubbles(contact_idx);
+
+    if (ta_compose) lv_textarea_set_text(ta_compose, "");
+    if (kb_compose) lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
+    meck_relayout_compose();
+
+    dm_ring_clear_unread(contact_idx);
+    if (scr_messages) lv_screen_load(scr_messages);
+}
+
+// Settings/Contacts entry-point: open the DM conversation for the contact
+// whose detail screen is currently displayed. Wired to the Send DM button
+// on scr_contact_detail.
+static void on_contact_send_dm_tap(lv_event_t *e) {
+    if (g_selected_contact_idx < 0) return;
+    load_dm_view(g_selected_contact_idx);
+}
+
 static void goto_contacts(lv_event_t *e) {
     refresh_contacts_list();
     if (scr_contacts) lv_screen_load(scr_contacts);
@@ -4086,6 +4931,16 @@ static void goto_contacts(lv_event_t *e) {
 
 static void ui_update_timer_cb(lv_timer_t *t) {
     Meck* mesh = meck_get_instance();
+
+    // Drain anything queued by onMessageRecv since the last tick. This
+    // runs on the LVGL task, so the callback invoked inside is safe to
+    // touch LVGL state. See meck_register_dm_recv_callback below for the
+    // dispatch function.
+    meck_drain_pending_dms();
+    // Same pattern for send completions — the mesh task records the
+    // expected_ack after a successful transmit, the UI thread picks it
+    // up here and writes it onto the matching outgoing bubble.
+    meck_drain_pending_dm_sends();
 
     // Home title: show the user's chosen node name. Refreshed every tick so
     // a rename in Settings shows up without needing to rebuild the screen.
@@ -4100,11 +4955,34 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 
     // Home tile: unread count
     if (lbl_home_unread && mesh) {
-        int unread = mesh->getUnreadCount();
+        int ch_unread = mesh->getUnreadCount();
+        int dm_unread = dm_total_unread();
+        int unread = ch_unread + dm_unread;
         lv_label_set_text_fmt(lbl_home_unread, "MSG: %d", unread);
         lv_obj_set_style_text_color(lbl_home_unread,
             unread > 0 ? lv_color_make(0, 255, 100)
                        : lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+
+    // DM inbox live refresh. If the user is sitting on the inbox screen
+    // when a new DM arrives, the list needs to rebuild so the unread
+    // badge updates and a brand-new contact appears as a row. Gated on
+    // active-screen check so we don't rebuild offscreen for nothing —
+    // the rebuild is cheap (small n) but pointless when not visible.
+    if (scr_dm_inbox && lv_screen_active() == scr_dm_inbox) {
+        refresh_dm_inbox_list();
+    }
+
+    // DM conversation live refresh. When the user is sitting on
+    // scr_messages in DM mode, periodic rebuilds let outgoing-bubble
+    // status footers transition through "Sending..." → "Delivered" /
+    // "Failed" as ACKs arrive or timeouts elapse. Without this, an
+    // outgoing bubble would stay on whatever status it had when last
+    // rebuilt (typically "Sending...") until something else triggered
+    // a redraw. The rebuild is small and gated on visibility.
+    if (g_in_dm_mode && scr_messages && lv_screen_active() == scr_messages
+        && g_active_dm_contact_idx >= 0) {
+        rebuild_dm_bubbles(g_active_dm_contact_idx);
     }
 
     // Home tiles: clock once per minute. Timer fires at 500ms so 120 ticks
@@ -4449,6 +5327,132 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 // Public API
 // ============================================================================
 
+// ============================================================================
+// DM receive dispatcher
+// ----------------------------------------------------------------------------
+// Invoked by meck_drain_pending_dms (on the LVGL task). Looks up the
+// sender's contact by pub_key, appends the message to that contact's
+// ring, increments the unread counter. If the user is currently sitting
+// on the DM conversation view for that exact contact, triggers a
+// re-render so the bubble appears live.
+//
+// If the sender has no matching contact entry (e.g. they were just
+// auto-removed, or auto-add is off and they're a stranger), the DM is
+// dropped with a serial log. This is the simplest correct behaviour;
+// piece 4's inbox could later show a "pending" pile for unknown senders.
+// ============================================================================
+
+static void meck_dm_recv_dispatch(const uint8_t* from_pub_key,
+                                  const char* from_name,
+                                  const char* text,
+                                  uint32_t sender_timestamp,
+                                  uint8_t path_len,
+                                  int8_t snr_x4) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+
+    // Find the contact index by pub_key. We have to scan because there's
+    // no public-key → idx index in P4DataStore. MAX_CONTACTS is 1500;
+    // linear is fine at one-per-DM frequency.
+    int contact_idx = -1;
+    int n = mesh->getNumContacts();
+    ContactInfo ci;
+    for (int i = 0; i < n; i++) {
+        if (!mesh->getContactByIdx((uint32_t)i, ci)) continue;
+        if (memcmp(ci.id.pub_key, from_pub_key, PUB_KEY_SIZE) == 0) {
+            contact_idx = i;
+            break;
+        }
+    }
+    if (contact_idx < 0) {
+        printf("meck_dm_recv_dispatch: no contact for sender %s, dropping DM\n",
+               from_name);
+        return;
+    }
+
+    DMMessage m = {};
+    m.timestamp    = sender_timestamp;
+    m.outgoing     = false;
+    m.path_len     = path_len;
+    m.snr_x4       = snr_x4;
+    m.expected_ack = 0;
+    m.acked        = false;
+    strncpy(m.text, text, sizeof(m.text) - 1);
+    m.text[sizeof(m.text) - 1] = '\0';
+    dm_ring_append(contact_idx, m);
+
+    // Live re-render if this DM is for the conversation currently open.
+    if (g_in_dm_mode && g_active_dm_contact_idx == contact_idx) {
+        rebuild_dm_bubbles(contact_idx);
+        // We're looking at it — clear unread so the inbox doesn't badge
+        // the contact for a message the user has clearly just seen.
+        dm_ring_clear_unread(contact_idx);
+    }
+
+    printf("meck_dm_recv_dispatch: stored DM from %s (idx=%d)\n",
+           from_name, contact_idx);
+}
+
+// ============================================================================
+// DM send completion dispatcher
+// ----------------------------------------------------------------------------
+// Invoked by meck_drain_pending_dm_sends (on the LVGL task) after a
+// queued DM has been transmitted. Locates the matching outgoing
+// DMMessage in the contact's ring — the most recent outgoing entry with
+// expected_ack == 0 — and writes the expected_ack and est_timeout onto
+// it. The bubble's status footer (rebuild_dm_bubbles) reads these via
+// Meck::lookupDMAckStatus on next render.
+//
+// "Most recent outgoing with expected_ack==0" is robust against the
+// rare race where two sends are queued back-to-back: the first send's
+// completion writes onto the older bubble (deeper in the ring), the
+// second send's completion writes onto the newer one. As long as the
+// completions arrive in send order (they will — mesh task processes
+// them sequentially from the queue), the pairing is correct.
+// ============================================================================
+
+static void meck_dm_sent_dispatch(int contact_idx,
+                                  uint32_t expected_ack,
+                                  uint32_t est_timeout_ms) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return;
+    DMRing* r = g_dm_rings[contact_idx];
+    if (!r || r->count == 0) {
+        printf("meck_dm_sent_dispatch: no ring for contact[%d]\n", contact_idx);
+        return;
+    }
+
+    // Walk newest-first looking for an outgoing message with expected_ack
+    // still 0 (i.e. send hasn't been correlated yet). Found one → write
+    // expected_ack onto it and stop. The ring stores up to
+    // MECK_DM_PER_CONTACT slots; the matching slot is almost always at
+    // newest_idx since the send was just appended on the LVGL task.
+    int idx = r->newest_idx;
+    for (int i = 0; i < r->count; i++) {
+        DMMessage& m = r->messages[idx];
+        if (m.outgoing && m.expected_ack == 0) {
+            m.expected_ack = expected_ack;
+            // est_timeout isn't stored on DMMessage — it's looked up
+            // fresh from Meck's ACK table each render. Logging it here
+            // so a serial trace can correlate.
+            printf("meck_dm_sent_dispatch: contact[%d] slot[%d] ack=0x%08X timeout=%ums\n",
+                   contact_idx, idx, (unsigned)expected_ack, (unsigned)est_timeout_ms);
+
+            // Live re-render if this DM is for the conversation currently
+            // open — refreshes the bubble's status from "Sending..."
+            // to whatever lookupDMAckStatus reports right now (still
+            // pending, since the ACK probably hasn't landed yet, but
+            // the bubble now has an ack handle for future renders).
+            if (g_in_dm_mode && g_active_dm_contact_idx == contact_idx) {
+                rebuild_dm_bubbles(contact_idx);
+            }
+            return;
+        }
+        idx = (idx - 1 + MECK_DM_PER_CONTACT) % MECK_DM_PER_CONTACT;
+    }
+    printf("meck_dm_sent_dispatch: contact[%d] no matching outgoing slot\n",
+           contact_idx);
+}
+
 extern "C" void meck_ui_init() {
     printf("MeckUI: building home screen\n");
 
@@ -4489,6 +5493,7 @@ extern "C" void meck_ui_init() {
     create_radio_picker_screen();
     create_channel_picker_screen();
     create_messages_screen();
+    create_dm_inbox_screen();
     create_contacts_screen();
     create_contact_detail_screen();
     create_discover_screen();
@@ -4524,6 +5529,14 @@ extern "C" void meck_ui_init() {
     // and a couple of compares so the higher rate doesn't matter.
     meck_boot_button_init();
     lv_timer_create(screen_idle_timer_cb, 250, NULL);
+
+    // DM receive dispatcher. Registered after the screens exist so the
+    // first incoming DM doesn't fire before rebuild_dm_bubbles can touch
+    // its widgets. The bridge in meck_app.cpp gates on this being non-null
+    // — pre-registration, queued DMs sit in Meck's ring with a serial log
+    // so they're not silently lost.
+    meck_register_dm_recv_callback(meck_dm_recv_dispatch);
+    meck_register_dm_sent_callback(meck_dm_sent_dispatch);
 
     _lock_release(&lvgl_api_lock);
 

@@ -570,6 +570,126 @@ public:
     }
 
     // =====================================================================
+    // Direct message send — encrypted to a single contact
+    // ---------------------------------------------------------------------
+    // Matches upstream MyMesh::uiSendDirectMessage in protocol behaviour but
+    // doesn't do any UI bookkeeping itself — local-echo, conversation ring
+    // writes, and unread tracking live in the UI layer because DMs on Meck-P4
+    // are presented per-contact rather than per-channel-slot. Returns true if
+    // the packet was queued for transmission (flood OR direct route); the UI
+    // is then responsible for showing an outgoing bubble. ACK confirmation
+    // is reported separately via the expected_ack_table — see processAck()
+    // and getDMSendStatus() (piece 5).
+    //
+    // On success, the caller can read the resulting expected_ack via the
+    // optional out parameter so the UI can correlate the outgoing bubble
+    // with a later "delivered" event.
+    //
+    // NOTE on threading: callers from the LVGL task must NOT call this
+    // directly — it sits on the radio path. Use meck_request_send_dm()
+    // (in target.h / meck_app.cpp, piece 2) which queues a deferred send
+    // and lets meck_task drain it without SPI contention.
+    bool sendDirectMessage(int contact_idx, const char* text,
+                           uint32_t* out_expected_ack = nullptr) {
+        if (!text) return false;
+        if (contact_idx < 0) return false;
+
+        ContactInfo contact;
+        if (!getContactByIdx((uint32_t)contact_idx, contact)) {
+            printf("Meck: sendDM idx %d not found\n", contact_idx);
+            return false;
+        }
+
+        // Re-lookup by pub_key so we get the *live* contact slot (the one
+        // whose out_path / out_path_len / last_advert_timestamp will be
+        // mutated by the send machinery), not a copy. Upstream MyMesh
+        // does the same dance for the same reason.
+        ContactInfo* recipient = lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: sendDM pub_key lookup failed for idx %d\n", contact_idx);
+            return false;
+        }
+
+        uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+        uint32_t expected_ack = 0;
+        uint32_t est_timeout = 0;
+        int result = sendMessage(*recipient, timestamp, 0, text,
+                                 expected_ack, est_timeout);
+
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: sendDM to %s FAILED\n", recipient->name);
+            return false;
+        }
+
+        // Track expected ACK for delivery confirmation. Direct port of
+        // upstream MyMesh's circular ack table. processAck() walks this
+        // table on incoming ACKs and matches by expected_ack value.
+        // The table is parsed but not yet wired to UI status — that's
+        // piece 5.
+        if (expected_ack) {
+            _expected_ack_table[_next_ack_idx].msg_sent_millis = millis();
+            _expected_ack_table[_next_ack_idx].expected_ack    = expected_ack;
+            _expected_ack_table[_next_ack_idx].contact         = recipient;
+            _expected_ack_table[_next_ack_idx].est_timeout_ms  = est_timeout;
+            _expected_ack_table[_next_ack_idx].acked           = false;
+            _next_ack_idx = (_next_ack_idx + 1) % EXPECTED_ACK_TABLE_SIZE;
+        }
+
+        if (out_expected_ack) *out_expected_ack = expected_ack;
+
+        printf("Meck: sendDM to %s (%s), ack=0x%08X timeout=%ums\n",
+               recipient->name,
+               result == MSG_SEND_SENT_FLOOD ? "flood" : "direct",
+               (unsigned)expected_ack, (unsigned)est_timeout);
+        return true;
+    }
+
+    // =====================================================================
+    // Pending DM receive ring — drained by UI thread
+    // ---------------------------------------------------------------------
+    // The onMessageRecv callback runs on meck_task and must not block on
+    // LVGL or SD writes, so it stashes received DMs into a ring. The UI
+    // thread calls drainPendingDMs() on a regular timer and dispatches
+    // each entry to the per-contact conversation view + inbox unread
+    // tracking. Read entries are removed in FIFO order.
+    //
+    // Ring size 8: at expected DM rates (~one per several seconds in busy
+    // conditions) this is several seconds of buffering. Overflow drops
+    // oldest unread, which is preferable to silently corrupting newer
+    // messages — the user is more likely to notice "I never got that one"
+    // than "I got two and then nothing".
+    // =====================================================================
+    static constexpr int P4_PENDING_DM_RING = 8;
+
+    struct PendingDMRecv {
+        bool     valid;
+        uint32_t sender_timestamp;
+        uint32_t recv_millis;
+        uint8_t  path_len;
+        int8_t   snr_x4;
+        uint8_t  from_pub_key[PUB_KEY_SIZE];
+        char     from_name[32];
+        char     text[160];
+    };
+
+    // Pop the oldest pending DM into `out`. Returns true if one was
+    // available; false if the ring is empty. Thread-safe; the LVGL task
+    // calls this on a timer and the meck_task fills via onMessageRecv.
+    bool drainPendingDM(PendingDMRecv& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_dm_count > 0) {
+            out = _pending_dm_recv[_pending_dm_tail];
+            _pending_dm_recv[_pending_dm_tail].valid = false;
+            _pending_dm_tail = (_pending_dm_tail + 1) % P4_PENDING_DM_RING;
+            _pending_dm_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    // =====================================================================
     // Channel management — add, delete, save, load
     // =====================================================================
 
@@ -1410,7 +1530,55 @@ protected:
 
     void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt,
                         uint32_t sender_timestamp, const char* text) override {
-        printf("Meck: DM from %s: %s\n", from.name, text);
+        // Real DM receive path. Stash the message into a small ring buffer
+        // that the UI thread drains at its leisure via getPendingDM(). The
+        // receive callback runs on the meck_task and must stay non-blocking
+        // — anything that needs LVGL or SD writes belongs on the LVGL or
+        // save-queue path, not here. The ring is just enough storage for
+        // bursts during a busy mesh moment; older entries are dropped if
+        // the UI hasn't kept up.
+        //
+        // path_len convention (matches upstream MyMesh::queueMessage):
+        //   - flood route: actual hop count
+        //   - direct route: 0xFF sentinel
+        // So a UI reading path_len knows both whether the message came
+        // directly (good signal of established direct path to that
+        // contact) and, if not, how many hops it took.
+        uint8_t path_len = 0xFF;
+        float   snr      = 0.0f;
+        if (pkt) {
+            path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
+            snr      = pkt->getSNR();
+        }
+
+        printf("Meck: DM from %s (ts=%u path=%u snr=%.1f): %s\n",
+               from.name, (unsigned)sender_timestamp,
+               (unsigned)path_len, (double)snr, text);
+
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        PendingDMRecv& slot = _pending_dm_recv[_pending_dm_head];
+        slot.valid = true;
+        slot.sender_timestamp = sender_timestamp;
+        slot.recv_millis = millis();
+        slot.path_len = path_len;
+        slot.snr_x4 = (int8_t)(snr * 4.0f);
+        memcpy(slot.from_pub_key, from.id.pub_key, PUB_KEY_SIZE);
+        strncpy(slot.from_name, from.name, sizeof(slot.from_name) - 1);
+        slot.from_name[sizeof(slot.from_name) - 1] = '\0';
+        strncpy(slot.text, text, sizeof(slot.text) - 1);
+        slot.text[sizeof(slot.text) - 1] = '\0';
+
+        _pending_dm_head = (_pending_dm_head + 1) % P4_PENDING_DM_RING;
+        if (_pending_dm_count < P4_PENDING_DM_RING) {
+            _pending_dm_count++;
+        } else {
+            // Ring full — head has wrapped past tail. Advance tail so the
+            // oldest unread entry is dropped (not the just-arrived one);
+            // this matches the channel-message ring-overwrite policy.
+            _pending_dm_tail = (_pending_dm_tail + 1) % P4_PENDING_DM_RING;
+            printf("Meck: pending DM ring full, dropping oldest unread\n");
+        }
+        xSemaphoreGive(_mutex);
     }
 
     void onCommandDataRecv(const ContactInfo& from, mesh::Packet* pkt,
@@ -1811,8 +1979,73 @@ protected:
     void onContactOverwrite(const uint8_t* pub_key) override {}
     uint8_t getAutoAddMaxHops() const override { return 4; }
 
-    ContactInfo* processAck(const uint8_t* data) override { return NULL; }
+    // Match an incoming ACK against the expected-ACK table populated by
+    // sendDirectMessage. On a hit, flip `acked=true` on the table entry
+    // (the UI polls this via lookupDMAckStatus to render "Delivered" on
+    // the matching outgoing bubble) and return the contact pointer so
+    // the base class can mark the contact's path as known-good.
+    //
+    // The `data` pointer is a 4-byte ack_crc as passed by
+    // BaseChatMesh::onAckRecv — compared raw against the stored
+    // expected_ack uint32_t (same layout, little-endian on RISC-V).
+    //
+    // Dedup: a duplicate ACK (re-broadcast by another repeater) is
+    // suppressed by the acked flag — entries already marked acked are
+    // skipped on subsequent passes. We deliberately keep expected_ack
+    // populated rather than zeroing it, so lookupDMAckStatus can still
+    // find the entry and report acked=true to the UI until the entry
+    // rolls out of the circular table.
+    //
+    // Falls through to checkConnectionsAck if no DM table entry matched
+    // — that path handles room-server connection ACKs (not used yet on
+    // Meck-P4 but harmless to call and matches upstream).
+    ContactInfo* processAck(const uint8_t* data) override {
+        for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
+            if (_expected_ack_table[i].expected_ack == 0) continue;
+            if (_expected_ack_table[i].acked) continue;  // already processed
+            if (memcmp(data, &_expected_ack_table[i].expected_ack, 4) == 0) {
+                ContactInfo* c = _expected_ack_table[i].contact;
+                unsigned long trip_ms = millis() - _expected_ack_table[i].msg_sent_millis;
+                _expected_ack_table[i].acked = true;
+                printf("Meck: DM ACK matched (idx=%d, %s, trip=%lums)\n",
+                       i, c ? c->name : "?", trip_ms);
+                return c;
+            }
+        }
+        return checkConnectionsAck(data);
+    }
 
+    // UI accessor: did the DM with this expected_ack get delivered, and
+    // if not, when was it sent and what's its timeout window? Returns
+    // true if the expected_ack is still in the table (acked or not);
+    // false if it's been rolled over by newer sends. Callers should
+    // treat "rolled out of table" as "delivery unknown" — for the UI
+    // that means leaving the bubble's last-known status in place
+    // (whichever was rendered before the entry rolled out).
+    //
+    // Used by rebuild_dm_bubbles to render the status footer:
+    //   acked=true                                  → "✓ Delivered"
+    //   !acked && (now - sent_millis) < timeout     → "Sending..."
+    //   !acked && (now - sent_millis) >= timeout    → "Failed"
+public:
+    bool lookupDMAckStatus(uint32_t expected_ack,
+                           bool& out_acked,
+                           unsigned long& out_msg_sent_millis,
+                           uint32_t& out_est_timeout_ms) const {
+        if (expected_ack == 0) return false;
+        for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
+            const ExpectedAckEntry& e = _expected_ack_table[i];
+            if (e.expected_ack == expected_ack) {
+                out_acked            = e.acked;
+                out_msg_sent_millis  = e.msg_sent_millis;
+                out_est_timeout_ms   = e.est_timeout_ms;
+                return true;
+            }
+        }
+        return false;
+    }
+
+protected:
     uint8_t getPathHashSize() const override {
         // path_hash_mode is a 0-indexed mode per the MeshCore companion
         // protocol: mode 0 = 1 byte, mode 1 = 2 bytes, mode 2 = 3 bytes.
@@ -1867,6 +2100,40 @@ private:
     unsigned long _last_identity_sd_check = 0;
 
     SemaphoreHandle_t _mutex;
+
+    // ---- Pending DM receive ring ----
+    // Filled by onMessageRecv on meck_task, drained by UI thread via
+    // drainPendingDM(). Sized for ~8 messages of burst buffering.
+    // Overwrite policy on full: drop oldest unread (same as channel ring
+    // wraps over oldest persisted slot).
+    PendingDMRecv _pending_dm_recv[P4_PENDING_DM_RING] = {};
+    int  _pending_dm_head  = 0;  // next slot to write (producer)
+    int  _pending_dm_tail  = 0;  // next slot to read  (consumer)
+    int  _pending_dm_count = 0;
+
+    // ---- Expected-ACK tracking table for outgoing DMs ----
+    // Direct port of upstream MyMesh's circular ack table. Each entry
+    // records an outgoing DM that's awaiting a delivery ACK from the
+    // recipient. processAck() walks this table on incoming ACKs and
+    // matches by expected_ack value.
+    //
+    // Sized 8: rare for more than a handful of DMs to be in flight at
+    // once. When full, the oldest entry rolls over and its delivery
+    // status becomes "unknown" (the UI will leave the bubble showing
+    // "pending" until the timeout window expires).
+    //
+    // Piece 5 wires this up to UI status indicators; for now it's
+    // populated but processAck() still returns NULL.
+    static constexpr int EXPECTED_ACK_TABLE_SIZE = 8;
+    struct ExpectedAckEntry {
+        unsigned long msg_sent_millis;
+        uint32_t      expected_ack;
+        ContactInfo*  contact;
+        uint32_t      est_timeout_ms;
+        bool          acked;
+    };
+    ExpectedAckEntry _expected_ack_table[EXPECTED_ACK_TABLE_SIZE] = {};
+    int _next_ack_idx = 0;
 
     // ---- Self-echo dedup ----
     // When we send a channel message, the dispatcher hands the packet to the
