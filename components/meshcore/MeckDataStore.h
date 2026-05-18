@@ -1466,4 +1466,280 @@ public:
                  (unsigned)channel_idx, loaded, total_records);
         return loaded;
     }
+
+    // =====================================================================
+    // Direct message persistence
+    // ---------------------------------------------------------------------
+    // File layout: /sdcard/meshcore/dms.bin
+    //   [P4MsgFileHeader]   16 bytes (magic 'MCDM', version, record_size)
+    //   [record 0][record 1]...   each P4MsgFileRecord (320 bytes)
+    //
+    // Records share the channel-message schema (P4MsgFileRecord) but use
+    // channel_idx=0xFF and dm_peer_hash = first 4 bytes of the peer's
+    // 32-byte pub_key (raw, no hashing — Curve25519 public keys are
+    // already cryptographically random, so a 4-byte prefix is as uniform
+    // as any 4-byte hash). On load the UI demultiplexes by matching
+    // dm_peer_hash against the first 4 bytes of each contact's pub_key.
+    //
+    // Why a distinct magic from MCMS: although the record layout is
+    // identical, the file is conceptually different (single file across
+    // all DM peers vs one file per channel). Distinct magic prevents
+    // accidental mixing and makes the file recognisable by tools.
+    //
+    // Only RECEIVED DMs are persisted. Outgoing DMs are RAM-only by
+    // design — losing send history on reboot is an acceptable trade for
+    // not having to rewrite ACK status to disk on every state change.
+    // =====================================================================
+
+    static constexpr const char* SD_DM_FILE_PATH = "/sdcard/meshcore/dms.bin";
+
+    // Append one DM record to /sdcard/meshcore/dms.bin. expected_magic /
+    // expected_version / record_size are passed in so caller controls the
+    // schema (mirroring appendChannelMessageRecord — keeps the schema
+    // constants centralised in MeckMesh.h).
+    bool appendDMRecord(uint32_t expected_magic,
+                        uint16_t expected_version,
+                        uint16_t record_size,
+                        const void* record_bytes,
+                        uint32_t* out_offset = nullptr)
+    {
+        if (out_offset) *out_offset = 0;
+        if (!record_bytes || record_size == 0) return false;
+        if (!p4_sdcard_is_mounted()) return false;
+
+        // Ensure /sdcard/meshcore exists. dms.bin sits in that directory
+        // (not the messages/ subdir) because it isn't conceptually a
+        // channel store.
+        if (!ensureDir("/sdcard/meshcore")) {
+            ESP_LOGW(TAG, "appendDMRecord: cannot create /sdcard/meshcore (errno=%d)", errno);
+            return false;
+        }
+
+        const char* path = SD_DM_FILE_PATH;
+
+        FILE* f = fopen(path, "r+b");
+        bool fresh_file = false;
+
+        if (f) {
+            struct {
+                uint32_t magic;
+                uint16_t version;
+                uint16_t record_size;
+                uint32_t reserved[2];
+            } __attribute__((packed)) hdr;
+
+            if (fread(&hdr, sizeof(hdr), 1, f) == 1 &&
+                hdr.magic == expected_magic &&
+                hdr.record_size == record_size &&
+                hdr.version <= expected_version) {
+
+                if (hdr.version < expected_version) {
+                    ESP_LOGI(TAG, "appendDMRecord: upgrading header v%u -> v%u in place",
+                             (unsigned)hdr.version, (unsigned)expected_version);
+                    if (fseek(f, (long)sizeof(uint32_t), SEEK_SET) == 0) {
+                        uint16_t v = expected_version;
+                        fwrite(&v, sizeof(v), 1, f);
+                    }
+                }
+
+                fseek(f, 0, SEEK_END);
+                long append_at = ftell(f);
+                size_t wrote = fwrite(record_bytes, 1, record_size, f);
+                fclose(f);
+                bool ok = (wrote == record_size);
+                if (ok && out_offset && append_at >= 0) {
+                    *out_offset = (uint32_t)append_at;
+                }
+                return ok;
+            }
+
+            // Header mismatch — rename to .bak and start fresh.
+            fclose(f);
+            char bak_path[64];
+            snprintf(bak_path, sizeof(bak_path), "%s.bak", path);
+            remove(bak_path);
+            if (rename(path, bak_path) == 0) {
+                ESP_LOGW(TAG, "appendDMRecord: schema mismatch, renamed to %s, starting fresh",
+                         bak_path);
+            } else {
+                ESP_LOGW(TAG, "appendDMRecord: schema mismatch, rename failed (errno=%d), overwriting",
+                         errno);
+            }
+            fresh_file = true;
+        } else {
+            fresh_file = true;
+        }
+
+        f = fopen(path, "wb");
+        if (!f) {
+            ESP_LOGW(TAG, "appendDMRecord: fopen(%s, wb) failed (errno=%d)", path, errno);
+            return false;
+        }
+
+        struct {
+            uint32_t magic;
+            uint16_t version;
+            uint16_t record_size;
+            uint32_t reserved[2];
+        } __attribute__((packed)) hdr;
+        hdr.magic       = expected_magic;
+        hdr.version     = expected_version;
+        hdr.record_size = record_size;
+        hdr.reserved[0] = 0;
+        hdr.reserved[1] = 0;
+
+        bool ok = (fwrite(&hdr, sizeof(hdr), 1, f) == 1) &&
+                  (fwrite(record_bytes, 1, record_size, f) == record_size);
+        long append_at = (long)sizeof(hdr);
+        fclose(f);
+
+        if (ok) {
+            if (out_offset) *out_offset = (uint32_t)append_at;
+            if (fresh_file) {
+                ESP_LOGI(TAG, "appendDMRecord: created %s", path);
+            }
+        }
+        return ok;
+    }
+
+    // Load up to max_records DM records from /sdcard/meshcore/dms.bin.
+    // Returns the count actually loaded (newest-tail-first wins when the
+    // file has more records than max_records, mirroring the channel
+    // loader). records_buf must be at least max_records * record_size.
+    int loadDMRecords(uint32_t expected_magic,
+                      uint16_t expected_version,
+                      uint16_t record_size,
+                      void* records_buf,
+                      int max_records)
+    {
+        if (!records_buf || record_size == 0 || max_records <= 0) return 0;
+        if (!p4_sdcard_is_mounted()) return 0;
+
+        const char* path = SD_DM_FILE_PATH;
+        if (!p4_sdcard_file_exists(path)) return 0;
+
+        FILE* f = fopen(path, "rb");
+        if (!f) return 0;
+
+        struct {
+            uint32_t magic;
+            uint16_t version;
+            uint16_t record_size;
+            uint32_t reserved[2];
+        } __attribute__((packed)) hdr;
+
+        if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
+            fclose(f);
+            return 0;
+        }
+
+        if (hdr.magic != expected_magic ||
+            hdr.record_size != record_size ||
+            hdr.version > expected_version) {
+            fclose(f);
+            ESP_LOGW(TAG, "loadDMRecords: schema mismatch "
+                          "(file v%u, expected <= v%u, size %u vs %u), skipping",
+                     (unsigned)hdr.version, (unsigned)expected_version,
+                     (unsigned)hdr.record_size, (unsigned)record_size);
+            return 0;
+        }
+        if (hdr.version < expected_version) {
+            ESP_LOGI(TAG, "loadDMRecords: loading legacy v%u (layout-compatible with v%u)",
+                     (unsigned)hdr.version, (unsigned)expected_version);
+        }
+
+        fseek(f, 0, SEEK_END);
+        long file_size = ftell(f);
+        long data_size = file_size - (long)sizeof(hdr);
+        if (data_size < 0) { fclose(f); return 0; }
+
+        long total_records = data_size / record_size;
+        long skip_records  = (total_records > max_records) ? (total_records - max_records) : 0;
+        long load_records  = total_records - skip_records;
+
+        long first_offset = (long)sizeof(hdr) + (skip_records * record_size);
+        if (fseek(f, first_offset, SEEK_SET) != 0) { fclose(f); return 0; }
+
+        size_t bytes_to_read = (size_t)(load_records * record_size);
+        size_t got = fread(records_buf, 1, bytes_to_read, f);
+        fclose(f);
+
+        int loaded = (int)(got / record_size);
+        ESP_LOGI(TAG, "loadDMRecords: loaded %d of %ld total", loaded, total_records);
+        return loaded;
+    }
+
+    // Remove the DM file entirely. Used for a "delete all DMs" action;
+    // not currently surfaced in v0.3.4 but exposed for symmetry with
+    // deleteChannelMessageFile.
+    bool deleteDMFile() {
+        if (!p4_sdcard_is_mounted()) return false;
+        const char* path = SD_DM_FILE_PATH;
+        if (unlink(path) == 0) {
+            ESP_LOGI(TAG, "deleteDMFile: removed %s", path);
+            return true;
+        }
+        if (errno == ENOENT) return true;  // already gone
+        ESP_LOGW(TAG, "deleteDMFile: unlink(%s) failed (errno=%d)", path, errno);
+        return false;
+    }
+
+    // Rewrite a single DM record at a known file offset. Used to update
+    // the is_acked bit on an outgoing DM once its ACK has arrived, so
+    // the "Delivered" status survives a reboot. Same shape as
+    // rewriteChannelMessageRecord — offset is the byte position returned
+    // by appendDMRecord on the original save. On any mismatch (file
+    // missing, header bad, offset misaligned) the rewrite is skipped
+    // and false returned; in-RAM state stays correct, just out of sync
+    // with disk for this record.
+    bool rewriteDMRecord(uint32_t expected_magic,
+                         uint16_t expected_version,
+                         uint32_t file_offset,
+                         uint16_t record_size,
+                         const void* record_bytes)
+    {
+        if (!record_bytes || record_size == 0) return false;
+        if (file_offset == 0) return false;  // 0 means "never appended"
+        if (!p4_sdcard_is_mounted()) return false;
+
+        const char* path = SD_DM_FILE_PATH;
+        if (!p4_sdcard_file_exists(path)) return false;
+
+        FILE* f = fopen(path, "r+b");
+        if (!f) return false;
+
+        struct {
+            uint32_t magic;
+            uint16_t version;
+            uint16_t record_size;
+            uint32_t reserved[2];
+        } __attribute__((packed)) hdr;
+
+        if (fread(&hdr, sizeof(hdr), 1, f) != 1 ||
+            hdr.magic != expected_magic ||
+            hdr.record_size != record_size ||
+            hdr.version > expected_version) {
+            fclose(f);
+            ESP_LOGW(TAG, "rewriteDMRecord: header check failed");
+            return false;
+        }
+
+        // Sanity: offset must be on a record boundary past the header.
+        if (file_offset < sizeof(hdr) ||
+            ((file_offset - sizeof(hdr)) % record_size) != 0) {
+            fclose(f);
+            ESP_LOGW(TAG, "rewriteDMRecord: offset %u not on record boundary",
+                     (unsigned)file_offset);
+            return false;
+        }
+
+        if (fseek(f, (long)file_offset, SEEK_SET) != 0) {
+            fclose(f);
+            return false;
+        }
+
+        size_t wrote = fwrite(record_bytes, 1, record_size, f);
+        fclose(f);
+        return wrote == record_size;
+    }
 };

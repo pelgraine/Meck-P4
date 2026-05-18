@@ -429,6 +429,25 @@ struct DMMessage {
     uint32_t expected_ack;    // outgoing only; matched against incoming ACKs (piece 5)
     bool     acked;           // outgoing only; flipped true when ACK matched (piece 5)
     char     text[160];       // raw message body
+    // SD persistence tracking.
+    //   file_offset      — byte offset of this message's record in
+    //                      dms.bin. 0 = not persisted (save failed,
+    //                      or loaded from disk where the loader didn't
+    //                      track offsets).
+    //   persisted_acked  — shadow of the on-disk ACKED flag bit. Used
+    //                      by the auto-refresh rewrite path to detect
+    //                      RAM→disk drift (RAM acked=true while disk
+    //                      hasn't been rewritten yet) without spamming
+    //                      SD writes on every render tick.
+    //   from_disk        — true if this entry was loaded by
+    //                      load_persisted_dms_into_rings, false if it
+    //                      arrived via the runtime path. Lets the
+    //                      renderer pick "Sent" (unknown final state)
+    //                      vs "Sending..." (fresh, awaiting expected_ack)
+    //                      for outgoing bubbles with expected_ack=0.
+    uint32_t file_offset;
+    bool     persisted_acked;
+    bool     from_disk;
 };
 
 struct DMRing {
@@ -1659,6 +1678,80 @@ static int dm_ring_copy_chronological(int contact_idx, DMMessage* out, int max_o
     return count;
 }
 
+// Locate the outgoing message in a ring by its expected_ack handle and
+// flip its in-RAM acked state, then rewrite the persisted record on
+// disk so the "Delivered" status survives a reboot. Returns true if a
+// matching slot was found and updated.
+//
+// Called from rebuild_dm_bubbles when it detects a RAM→disk drift on
+// an outgoing bubble (m.acked=true while m.persisted_acked=false).
+// Operates on the live ring rather than a copy so the persisted_acked
+// shadow update sticks.
+//
+// Idempotent — once persisted_acked is true, subsequent calls are
+// no-ops. So an over-eager auto-refresh tick that calls this twice
+// causes one SD write, not two.
+static bool dm_ring_persist_ack_if_needed(int contact_idx,
+                                           uint32_t expected_ack) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return false;
+    if (expected_ack == 0) return false;
+    DMRing* r = g_dm_rings[contact_idx];
+    if (!r || r->count == 0) return false;
+
+    // Walk all slots looking for the matching outgoing message. Could
+    // optimise by knowing the typical match is near newest_idx, but
+    // the ring is small (20 entries) so linear is fine.
+    for (int i = 0; i < r->count; i++) {
+        int slot = (r->newest_idx - i + MECK_DM_PER_CONTACT) % MECK_DM_PER_CONTACT;
+        DMMessage& m = r->messages[slot];
+        if (!m.outgoing) continue;
+        if (m.expected_ack != expected_ack) continue;
+        if (m.persisted_acked) return true;  // already done
+        if (m.file_offset == 0) {
+            // Not persisted to disk (initial save failed). Still flip
+            // RAM state to match — the UI will render Delivered — but
+            // there's nothing on disk to rewrite.
+            m.persisted_acked = true;
+            return true;
+        }
+
+        // Rebuild the on-disk record from the in-RAM message + the
+        // peer hash from the contact (the ring entry doesn't carry
+        // dm_peer_hash itself, so we have to look it up by index).
+        Meck* mesh = meck_get_instance();
+        if (!mesh) return false;
+        ContactInfo ci;
+        if (!mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
+            printf("dm_ring_persist_ack_if_needed: contact[%d] vanished\n",
+                   contact_idx);
+            return false;
+        }
+
+        P4MsgFileRecord rec = {};
+        rec.timestamp   = m.timestamp;
+        memcpy(&rec.dm_peer_hash, ci.id.pub_key, sizeof(rec.dm_peer_hash));
+        rec.channel_idx = 0xFF;
+        rec.path_len    = m.path_len;
+        rec.snr_x4      = m.snr_x4;
+        rec.flags       = P4_DM_FLAG_VALID | P4_DM_FLAG_OUTGOING | P4_DM_FLAG_ACKED;
+        rec.heard_count = 0;
+        memset(rec.path, 0, sizeof(rec.path));
+        strncpy(rec.text, m.text, sizeof(rec.text) - 1);
+        rec.text[sizeof(rec.text) - 1] = '\0';
+
+        if (mesh->rewriteDMRecord(m.file_offset, rec)) {
+            m.persisted_acked = true;
+            printf("dm_ring_persist_ack_if_needed: rewrote DM offset=%u as acked\n",
+                   (unsigned)m.file_offset);
+            return true;
+        }
+        printf("dm_ring_persist_ack_if_needed: rewrite failed for offset=%u\n",
+               (unsigned)m.file_offset);
+        return false;
+    }
+    return false;
+}
+
 // ============================================================================
 // rebuild_message_bubbles
 // ----------------------------------------------------------------------------
@@ -1976,7 +2069,20 @@ static void rebuild_dm_bubbles(int contact_idx) {
             //      - else → "Failed"
             Meck* mesh_for_ack = meck_get_instance();
             if (m.expected_ack == 0) {
-                snprintf(meta, sizeof(meta), "Sending...");
+                // Two ways to land here:
+                //   (a) Brand new send before meck_dm_sent_dispatch
+                //       has populated expected_ack — render "Sending..."
+                //   (b) Outgoing DM loaded from disk on boot. Live ACK
+                //       table is empty across reboot, so expected_ack
+                //       stays 0. Render acked-state from the persisted
+                //       flag: "Delivered" if it was acked before
+                //       reboot, otherwise "Sent" (final state unknown).
+                if (m.from_disk) {
+                    snprintf(meta, sizeof(meta),
+                             m.acked ? LV_SYMBOL_OK " Delivered" : "Sent");
+                } else {
+                    snprintf(meta, sizeof(meta), "Sending...");
+                }
             } else if (!mesh_for_ack) {
                 snprintf(meta, sizeof(meta), "Sent");
             } else {
@@ -1987,6 +2093,17 @@ static void rebuild_dm_bubbles(int contact_idx) {
                                                     sent_ms, timeout_ms)) {
                     if (acked) {
                         snprintf(meta, sizeof(meta), LV_SYMBOL_OK " Delivered");
+                        // ACK just arrived (or arrived earlier and we're
+                        // re-rendering). If the on-disk record still
+                        // shows the message as unacked, rewrite it now
+                        // so the Delivered status persists across reboot.
+                        // The helper is idempotent and gates on
+                        // m.persisted_acked, so this is one SD write per
+                        // ACK, not per render tick.
+                        if (!m.persisted_acked && m.file_offset != 0) {
+                            dm_ring_persist_ack_if_needed(contact_idx,
+                                                          m.expected_ack);
+                        }
                     } else {
                         unsigned long now = (unsigned long)esp_log_timestamp();
                         if (now - sent_ms < timeout_ms) {
@@ -2220,8 +2337,9 @@ static void on_send_clicked(lv_event_t *e) {
             meck_request_send_dm(g_active_dm_contact_idx, text);
 
             // Local echo into the per-contact ring so the bubble shows
-            // immediately. The actual delivery state will be filled in
-            // by piece 5 via the ACK table.
+            // immediately. expected_ack will be filled in async by
+            // meck_dm_sent_dispatch once the mesh task has actually
+            // transmitted.
             DMMessage echo = {};
             echo.timestamp = meck_clock_get_utc();
             echo.outgoing  = true;
@@ -2229,8 +2347,51 @@ static void on_send_clicked(lv_event_t *e) {
             echo.snr_x4    = 0;
             echo.expected_ack = 0;
             echo.acked     = false;
+            echo.file_offset = 0;
+            echo.persisted_acked = false;
+            echo.from_disk   = false;
             strncpy(echo.text, text, sizeof(echo.text) - 1);
             echo.text[sizeof(echo.text) - 1] = '\0';
+
+            // Persist immediately so the message survives a reboot even
+            // if the ACK never arrives. flags: valid + outgoing, but
+            // not acked yet — that bit will be set in place via
+            // rewriteDMRecord when the ACK lands (handled by the
+            // auto-refresh path in rebuild_dm_bubbles).
+            //
+            // dm_peer_hash uses the first 4 bytes of the recipient's
+            // pub_key, matching what meck_dm_recv_dispatch writes for
+            // incoming records. Load-time demux can therefore match
+            // both directions of a conversation to the same contact.
+            Meck* mesh_for_save = meck_get_instance();
+            if (mesh_for_save) {
+                ContactInfo ci;
+                if (mesh_for_save->getContactByIdx(
+                        (uint32_t)g_active_dm_contact_idx, ci)) {
+                    P4MsgFileRecord rec = {};
+                    rec.timestamp   = echo.timestamp;
+                    memcpy(&rec.dm_peer_hash, ci.id.pub_key,
+                           sizeof(rec.dm_peer_hash));
+                    rec.channel_idx = 0xFF;
+                    rec.path_len    = 0;
+                    rec.snr_x4      = 0;
+                    rec.flags       = P4_DM_FLAG_VALID | P4_DM_FLAG_OUTGOING;
+                    rec.heard_count = 0;
+                    memset(rec.path, 0, sizeof(rec.path));
+                    strncpy(rec.text, text, sizeof(rec.text) - 1);
+                    rec.text[sizeof(rec.text) - 1] = '\0';
+                    uint32_t saved_offset = 0;
+                    if (!mesh_for_save->saveDMRecord(rec, &saved_offset)) {
+                        printf("on_send_clicked: SD save failed for outgoing DM\n");
+                    }
+                    echo.file_offset = saved_offset;
+                } else {
+                    printf("on_send_clicked: getContactByIdx(%d) failed, "
+                           "outgoing DM not persisted\n",
+                           g_active_dm_contact_idx);
+                }
+            }
+
             dm_ring_append(g_active_dm_contact_idx, echo);
             rebuild_dm_bubbles(g_active_dm_contact_idx);
         } else {
@@ -5328,6 +5489,141 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 // ============================================================================
 
 // ============================================================================
+// Boot-time hydration of per-contact DM rings from /sdcard/meshcore/dms.bin
+// ----------------------------------------------------------------------------
+// Called once from meck_ui_init after the mesh + contacts are loaded.
+// Reads the tail of dms.bin (newest records win when the file is larger
+// than the load cap), iterates each record, looks up the matching
+// contact by comparing dm_peer_hash (first 4 bytes of pub_key) against
+// each contact's pub_key. On match, append to the contact's ring as an
+// incoming DM.
+//
+// Records whose dm_peer_hash matches no current contact are silently
+// dropped (the contact may have been deleted since the DM was received).
+// In the rare hash-collision case (~1 in 3800 at 1500 contacts), DMs
+// would be attributed to whichever colliding contact has the lower
+// index — graceful failure, not catastrophic.
+//
+// Cap: MECK_DM_LOAD_CAP records on boot. Far more than typical use
+// (1500 contacts × 20 messages per ring = 30000 records is the
+// theoretical max in-RAM capacity, but daily use produces far less)
+// and the loader caps memory and SD I/O time at boot.
+// ============================================================================
+
+#define MECK_DM_LOAD_CAP 2000
+
+static void load_persisted_dms_into_rings() {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+
+    // Heap-allocate the record buffer from PSRAM — 2000 records of 320
+    // bytes is 640 KB which would blow any stack and is too big for
+    // the LVGL task's regular heap. PSRAM is fine for transient buffers.
+    P4MsgFileRecord* recs = (P4MsgFileRecord*)heap_caps_calloc(
+        MECK_DM_LOAD_CAP, sizeof(P4MsgFileRecord), MALLOC_CAP_SPIRAM);
+    if (!recs) {
+        printf("load_persisted_dms_into_rings: PSRAM alloc failed\n");
+        return;
+    }
+
+    int loaded = mesh->loadDMRecords(recs, MECK_DM_LOAD_CAP);
+    if (loaded <= 0) {
+        free(recs);
+        return;
+    }
+    printf("load_persisted_dms_into_rings: loaded %d records from SD\n", loaded);
+
+    // Build a contact lookup table indexed by the 4-byte pub_key prefix
+    // so the demux is O(R+C) not O(R*C). R=records (up to 2000),
+    // C=contacts (up to 2000 here); the naive nested-loop pass would
+    // be 4M memcmps. The lookup table is two parallel PSRAM arrays:
+    // hashes[i] holds the 4-byte prefix, idx[i] holds the contact_idx.
+    // Linear scan over hashes[] is fast (4-byte memcmp, contiguous
+    // memory), and the contact count is the bound rather than the
+    // record count.
+    int num_contacts = mesh->getNumContacts();
+    uint32_t* hashes = (uint32_t*)heap_caps_calloc(
+        num_contacts > 0 ? num_contacts : 1, sizeof(uint32_t),
+        MALLOC_CAP_SPIRAM);
+    int* idx_table = (int*)heap_caps_calloc(
+        num_contacts > 0 ? num_contacts : 1, sizeof(int),
+        MALLOC_CAP_SPIRAM);
+    if (!hashes || !idx_table) {
+        printf("load_persisted_dms_into_rings: PSRAM alloc for lookup failed\n");
+        if (hashes) free(hashes);
+        if (idx_table) free(idx_table);
+        free(recs);
+        return;
+    }
+    {
+        ContactInfo ci;
+        for (int c = 0; c < num_contacts; c++) {
+            if (!mesh->getContactByIdx((uint32_t)c, ci)) continue;
+            memcpy(&hashes[c], ci.id.pub_key, sizeof(uint32_t));
+            idx_table[c] = c;
+        }
+    }
+
+    int demuxed = 0;
+    int dropped = 0;
+    for (int r = 0; r < loaded; r++) {
+        const P4MsgFileRecord& rec = recs[r];
+        if ((rec.flags & 0x01) == 0) continue;
+        if (rec.channel_idx != 0xFF) continue;
+
+        // Linear scan of the prefix table. Could be replaced with a
+        // hash map for O(1) but at 2000 contacts the linear scan is
+        // already < 1ms per record on the P4.
+        uint32_t target = 0;
+        memcpy(&target, &rec.dm_peer_hash, sizeof(target));
+        int contact_idx = -1;
+        for (int c = 0; c < num_contacts; c++) {
+            if (hashes[c] == target) {
+                contact_idx = idx_table[c];
+                break;
+            }
+        }
+        if (contact_idx < 0) {
+            dropped++;
+            continue;
+        }
+
+        DMMessage m = {};
+        m.timestamp    = rec.timestamp;
+        m.outgoing     = (rec.flags & P4_DM_FLAG_OUTGOING) != 0;
+        m.path_len     = rec.path_len;
+        m.snr_x4       = rec.snr_x4;
+        m.expected_ack = 0;
+        m.acked        = (rec.flags & P4_DM_FLAG_ACKED) != 0;
+        // file_offset stays 0: the loader doesn't track per-record
+        // offsets and a loaded outgoing DM doesn't need to be rewritten
+        // (no live ACK table entry exists post-reboot, so no new ACK
+        // will match to trigger a rewrite).
+        m.file_offset      = 0;
+        m.persisted_acked  = m.acked;  // on-disk and RAM match at load time
+        m.from_disk        = true;
+        strncpy(m.text, rec.text, sizeof(m.text) - 1);
+        m.text[sizeof(m.text) - 1] = '\0';
+        dm_ring_append(contact_idx, m);
+        demuxed++;
+    }
+
+    // Clear unread on every ring — startup is "user has seen what's
+    // there", same as how channel-message loads don't mark unread.
+    // Without this the home screen would show every persisted DM as
+    // unread on each boot, which would be intrusive.
+    for (int c = 0; c < MAX_CONTACTS; c++) {
+        dm_ring_clear_unread(c);
+    }
+
+    printf("load_persisted_dms_into_rings: demuxed=%d dropped=%d\n",
+           demuxed, dropped);
+    free(hashes);
+    free(idx_table);
+    free(recs);
+}
+
+// ============================================================================
 // DM receive dispatcher
 // ----------------------------------------------------------------------------
 // Invoked by meck_drain_pending_dms (on the LVGL task). Looks up the
@@ -5377,8 +5673,35 @@ static void meck_dm_recv_dispatch(const uint8_t* from_pub_key,
     m.snr_x4       = snr_x4;
     m.expected_ack = 0;
     m.acked        = false;
+    m.file_offset  = 0;
+    m.persisted_acked = false;
+    m.from_disk    = false;
     strncpy(m.text, text, sizeof(m.text) - 1);
     m.text[sizeof(m.text) - 1] = '\0';
+
+    // Persist to /sdcard/meshcore/dms.bin so the message survives a
+    // reboot. P4MsgFileRecord layout shared with the channel store —
+    // we populate channel_idx=0xFF (the DM convention) and dm_peer_hash
+    // = first 4 bytes of the sender's pub_key. flags = valid bit only
+    // (not outgoing, not acked — incoming DMs are immutable once
+    // received).
+    P4MsgFileRecord rec = {};
+    rec.timestamp     = sender_timestamp;
+    memcpy(&rec.dm_peer_hash, from_pub_key, sizeof(rec.dm_peer_hash));
+    rec.channel_idx   = 0xFF;
+    rec.path_len      = path_len;
+    rec.snr_x4        = snr_x4;
+    rec.flags         = P4_DM_FLAG_VALID;
+    rec.heard_count   = 0;             // unused for received DMs
+    memset(rec.path, 0, sizeof(rec.path));
+    strncpy(rec.text, text, sizeof(rec.text) - 1);
+    rec.text[sizeof(rec.text) - 1] = '\0';
+    uint32_t saved_offset = 0;
+    if (!mesh->saveDMRecord(rec, &saved_offset)) {
+        printf("meck_dm_recv_dispatch: SD save failed for DM from %s\n", from_name);
+    }
+    m.file_offset = saved_offset;
+
     dm_ring_append(contact_idx, m);
 
     // Live re-render if this DM is for the conversation currently open.
@@ -5537,6 +5860,13 @@ extern "C" void meck_ui_init() {
     // so they're not silently lost.
     meck_register_dm_recv_callback(meck_dm_recv_dispatch);
     meck_register_dm_sent_callback(meck_dm_sent_dispatch);
+
+    // Hydrate per-contact DM rings from /sdcard/meshcore/dms.bin. Runs
+    // after the mesh + contacts are loaded so the pub_key prefix demux
+    // can find matching contacts. Must run BEFORE the LVGL task starts
+    // dispatching events so partial state isn't visible to a user
+    // already tapping through to the inbox.
+    load_persisted_dms_into_rings();
 
     _lock_release(&lvgl_api_lock);
 

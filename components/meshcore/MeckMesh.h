@@ -274,6 +274,31 @@ struct P4ChannelMessage {
 #define P4_MSG_FILE_VERSION         2
 #define P4_MSG_FILE_VERSION_MIN     1  // oldest accepted on load (in-place upgraded on first write)
 
+// DM persistence shares the P4MsgFileRecord layout (320 bytes per
+// record, dm_peer_hash + channel_idx=0xFF fields populated) but lives
+// in /sdcard/meshcore/dms.bin under a distinct magic so the two stores
+// can be told apart on disk.
+//
+// Flags layout (v2):
+//   bit 0 = valid
+//   bit 1 = is_outgoing  (v2+ only; v1 implicitly received)
+//   bit 2 = is_acked     (v2+ only; meaningful only when is_outgoing=1)
+//   bits 3-7 = reserved (zero)
+//
+// v2 records outgoing DMs alongside received ones. Status of outgoing
+// DMs ("Delivered" vs "Sent") is rebuilt across reboot from the
+// is_acked bit. No migration from v1: on schema mismatch the file is
+// renamed to .bak (handled by the data store) — losing any v1 DM
+// history was the deliberate choice for v0.3.4.
+#define P4_DM_FILE_MAGIC            0x4D43444DU  // 'MCDM' little-endian
+#define P4_DM_FILE_VERSION          2
+
+// Flag bit positions for DM records. Channel records use only bit 0
+// (valid); DMs additionally use bits 1 and 2.
+#define P4_DM_FLAG_VALID        0x01
+#define P4_DM_FLAG_OUTGOING     0x02
+#define P4_DM_FLAG_ACKED        0x04
+
 struct __attribute__((packed)) P4MsgFileRecord {
     uint32_t timestamp;
     uint32_t dm_peer_hash;       // reserved (0) — DM persistence pending
@@ -2043,6 +2068,55 @@ public:
             }
         }
         return false;
+    }
+
+    // UI bridge: persist one DM record to /sdcard/meshcore/dms.bin.
+    // The caller (MeckUI's meck_dm_recv_dispatch for incoming, the
+    // on_send_clicked echo path for outgoing) builds the P4MsgFileRecord
+    // with channel_idx=0xFF, dm_peer_hash = first 4 bytes of the peer's
+    // pub_key, and flags populated per P4_DM_FLAG_*. Returns true on
+    // success. The record layout is shared with the channel store
+    // (P4MsgFileRecord), but the magic and version differ so the two
+    // files can be told apart on disk.
+    //
+    // out_offset (optional): if non-null, receives the byte offset
+    // within dms.bin at which the record was written. The UI stores
+    // this on the in-memory DMMessage so a later acked-state change
+    // can be rewritten in place via rewriteDMRecord without scanning
+    // the file.
+    bool saveDMRecord(const P4MsgFileRecord& rec, uint32_t* out_offset = nullptr) {
+        if (!_store) return false;
+        return _store->appendDMRecord(P4_DM_FILE_MAGIC,
+                                      P4_DM_FILE_VERSION,
+                                      sizeof(P4MsgFileRecord),
+                                      &rec,
+                                      out_offset);
+    }
+
+    // UI bridge: rewrite an existing DM record in place at a known
+    // file offset. Used when an ACK arrives for an outgoing DM and
+    // the in-RAM message transitions from acked=false to acked=true:
+    // the UI rebuilds the P4MsgFileRecord with P4_DM_FLAG_ACKED set
+    // and calls this to persist the change.
+    bool rewriteDMRecord(uint32_t file_offset, const P4MsgFileRecord& rec) {
+        if (!_store) return false;
+        return _store->rewriteDMRecord(P4_DM_FILE_MAGIC,
+                                       P4_DM_FILE_VERSION,
+                                       file_offset,
+                                       sizeof(P4MsgFileRecord),
+                                       &rec);
+    }
+
+    // UI bridge: load up to max_records persisted DM records on boot.
+    // The UI then walks each record and demultiplexes by dm_peer_hash
+    // into the appropriate per-contact ring. Returns the count loaded.
+    int loadDMRecords(P4MsgFileRecord* out, int max_records) {
+        if (!_store) return 0;
+        return _store->loadDMRecords(P4_DM_FILE_MAGIC,
+                                     P4_DM_FILE_VERSION,
+                                     sizeof(P4MsgFileRecord),
+                                     out,
+                                     max_records);
     }
 
 protected:
