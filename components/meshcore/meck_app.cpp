@@ -56,6 +56,12 @@ extern "C" void meck_tables_end_outgoing()   { g_mesh_tables.endMarkingOurOutgoi
 extern "C" bool meck_app_init() {
     printf("meck_app_init: starting\n");
 
+    // 0. BQ27220 fuel gauge calibration. LilyGo's main.cpp already wrote
+    //    design_capacity=1000 via the wrapper's minimal path; this runs
+    //    the full TI procedure to force FCC recalculation. Self-gated, so
+    //    after the first successful run it returns in milliseconds.
+    meck_battery_calibrate();
+
     // 1. NVS / DataStore
     if (!g_dataStore.begin()) {
         printf("meck_app_init: dataStore.begin() failed\n");

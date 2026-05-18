@@ -53,10 +53,6 @@ extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
                                           const P4ChannelMessage* msg);
 extern "C" void meck_apply_pending_save();
 
-// Sets SKY13453 VCTL to a known antenna port (default HIGH = antenna A).
-// Should be called once at boot during meck_radio_attach.
-extern "C" void meck_set_antenna_default();
-
 // ---- Boot button (ESP32-P4 strapping pin, direct GPIO) ----
 //
 // PIN_BOOT_BTN (GPIO 35) doubles as the BOOT-0 strapping pin used by the
@@ -84,6 +80,27 @@ extern "C" uint16_t meck_battery_remaining_mah();
 extern "C" uint16_t meck_battery_full_charge_mah();
 extern "C" uint16_t meck_battery_time_to_empty_min();
 extern "C" uint8_t  meck_battery_pct_from_voltage(uint16_t mv);
+
+// ---- Battery calibration (BQ27220 fuel gauge, full TI procedure) ----
+//
+// LilyGo's main.cpp calls BQ27220->set_design_capacity(1000) on every boot
+// via the Cpp_Bus_Driver wrapper, but the wrapper's minimal implementation
+// skips several steps the TI TRM (SLUUBD4) requires for the change to take
+// effect: it doesn't write Design Energy at 0x92A1, it exits CFG_UPDATE
+// with 0x0092 (no REINIT) instead of 0x0091, and it doesn't issue a SEAL
+// or RESET. The chip's reported FCC therefore stays pinned at the factory
+// 3000 mAh until a full charge/discharge cycle triggers a natural relearn,
+// which is why meck_battery_full_charge_mah() keeps logging
+// "chip FCC=3000 > design=1000, capping" on every boot.
+//
+// meck_battery_calibrate() runs the full procedure proven on T-Deck Pro:
+// Unseal + Full Access, Enter CFG_UPDATE, write Design Energy / Qmax /
+// stored FCC via MAC differential checksum, Exit with REINIT, Seal, RESET.
+// Self-gated: returns immediately when DC is correct and FCC is already
+// inside [target-100, target+100]. The first run after this lands takes
+// about 2 seconds because of the post-RESET settling delay; later boots
+// short-circuit at the FCC band check and return in milliseconds.
+extern "C" void meck_battery_calibrate();
 
 // ---- GPS readout (L76K module owned by main.cpp) ----
 //
@@ -117,7 +134,3 @@ extern "C" {
     };
     void meck_gps_get_snapshot(MeckGpsSnapshot *out);
 }
-
-// Sets SKY13453 VCTL to a known antenna port (HIGH = RF1 internal, default).
-// Should be called once at boot during meck_radio_attach.
-extern "C" void meck_set_antenna_default();

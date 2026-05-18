@@ -19,6 +19,8 @@
 #include "t_display_p4_config.h"
 #include "esp_random.h"
 #include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <stdio.h>
 
 // LilyGo's main.cpp defines `auto SX1262 = std::make_unique<...>(...)` at
@@ -38,7 +40,6 @@ P4SX1262Radio radio_driver;
 
 bool meck_radio_attach() {
     printf("meck_radio_attach() — wrapping LilyGo's already-running SX1262\n");
-    meck_set_antenna_default();
 
     // Apply MeshCore's preset (overwrites LilyGo's demo SF9/125kHz/920MHz)
     radio_set_params(LORA_FREQ_DEFAULT, LORA_BW_DEFAULT,
@@ -163,23 +164,6 @@ extern "C" void radio_apply_pending_reconfig() {
     radio_set_params(freq, bw, sf, cr);
     radio_set_tx_power(tx);
     printf("radio_apply_pending_reconfig: done\n");
-}
-
-// ============================================================================
-// SKY13453 antenna selection
-// VCTL HIGH = antenna A (internal/PCB)
-// VCTL LOW  = antenna B (external/SMA)
-// LilyGo's main.cpp configures the pin as OUTPUT but never writes a value,
-// so without this the state at boot is undefined and TX may go to the wrong
-// port. Standalone sx1262_lora_send_receive example sets it HIGH, so we do
-// the same.
-// ============================================================================
-extern "C" void meck_set_antenna_default() {
-    extern std::unique_ptr<Cpp_Bus_Driver::Xl95x5> XL9535;
-    if (XL9535) {
-        XL9535->pin_write(XL9535_SKY13453_VCTL, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
-        printf("meck_set_antenna_default: VCTL=HIGH (antenna A)\n");
-    }
 }
 
 // ============================================================================
@@ -398,10 +382,324 @@ extern "C" uint8_t meck_battery_pct_from_voltage(uint16_t mv) {
 }
 
 // ============================================================================
-// SKY13453 antenna selection
-// VCTL HIGH = RF1 (internal/PCB antenna, LilyGo factory default)
-// VCTL LOW  = RF2 (external/SMA)
-// LilyGo configures the pin as OUTPUT but never writes a value, so without
-// this the boot state is undefined and TX may go to a disconnected port.
-// Will become a Settings toggle in a follow-up turn.
+// BQ27220 full TI calibration procedure (battery design capacity / FCC fix)
+// ----------------------------------------------------------------------------
+// Why this exists:
+//
+//   LilyGo's main.cpp calls BQ27220->set_design_capacity(1000) on every boot
+//   via the Cpp_Bus_Driver wrapper. That wrapper writes the Design Capacity
+//   data-memory cell but skips several steps the TI TRM (SLUUBD4) requires
+//   for the change to actually take effect on FCC:
+//
+//     - No Design Energy write at 0x92A1 (FCC math uses both DC and DE)
+//     - Exits CFG_UPDATE with 0x0092 instead of 0x0091 (no REINIT, so the
+//       Impedance Track algorithm never re-runs against the new values)
+//     - No Seal, no RESET
+//     - No fix for Qmax (0x9106) or stored FCC reference (0x929D), which
+//       the T-Deck Pro fleet found are the actual culprits when DC is set
+//       correctly but the chip's reported FCC stays pinned at the factory
+//       3000 mAh.
+//
+//   The visible symptom is meck_battery_full_charge_mah() logging
+//   "chip FCC=3000 > design=1000, capping" on every boot, plus chip-side
+//   SoC% and time-to-empty being computed against the wrong baseline.
+//
+// What this does:
+//
+//   Runs the full TI procedure proven on the T-Deck Pro fleet:
+//     1. Read DC and FCC. If DC matches target and FCC is inside the band
+//        [target-100, target+100], return immediately. Self-gated /
+//        idempotent.
+//     2. Unseal (0x0414, 0x3672) + Full Access (0xFFFF, 0xFFFF). Belt and
+//        braces - harmless if the chip is already unsealed, which it is
+//        after LilyGo's set_design_capacity returns.
+//     3. Enter CFG_UPDATE (0x0090) and poll OperationStatus for the
+//        CFGUPMODE bit (bit 10, mask 0x0400).
+//     4. Write Design Capacity (if wrong), Design Energy, Qmax Cell 0,
+//        and stored FCC reference via MAC differential checksum. Each
+//        write is idempotent: bq_dm_write16 short-circuits when the
+//        target value is already in place.
+//     5. Exit CFG_UPDATE with REINIT (0x0091) - the wrapper's missing
+//        piece. This triggers the Impedance Track algorithm to recompute
+//        FCC against the new data-memory values.
+//     6. SEAL (0x0030).
+//     7. RESET (0x0041) with a 2-second settling delay. Forces the gauge
+//        to fully reinitialise; without this RESET, IT can retain its
+//        previously learned FCC until a full charge/discharge cycle
+//        naturally triggers a relearn.
+//
+// I2C access:
+//
+//   BQ27220_IIC_Bus is the Hardware_Iic_1 wrapper LilyGo's main.cpp creates
+//   for the BQ27220 device (bus shared with XL9535 via set_bus_handle, see
+//   main.cpp:5742). Its public write/read/write_read methods give raw byte
+//   transactions to address 0x55 - exactly what the MAC procedure needs,
+//   on the existing bus handle. No parallel i2c driver instance, no fight
+//   for the bus.
 // ============================================================================
+
+extern std::shared_ptr<Cpp_Bus_Driver::Hardware_Iic_1> BQ27220_IIC_Bus;
+
+// Data-memory addresses (TI SLUUBD4 Table 1-10)
+static constexpr uint16_t kBqAddrDesignCapacity = 0x929F;  // Gas Gauging
+static constexpr uint16_t kBqAddrDesignEnergy   = 0x92A1;  // Gas Gauging
+static constexpr uint16_t kBqAddrStoredFCC      = 0x929D;  // Gas Gauging
+static constexpr uint16_t kBqAddrQmaxCell0      = 0x9106;  // IT Cfg
+
+// Standard registers
+static constexpr uint8_t kBqRegControl      = 0x00;
+static constexpr uint8_t kBqRegOpStatus     = 0x3A;
+static constexpr uint8_t kBqRegMACAddress   = 0x3E;
+static constexpr uint8_t kBqRegMACDataStart = 0x40;  // through 0x5F
+static constexpr uint8_t kBqRegMACDataSum   = 0x60;
+static constexpr uint8_t kBqRegMACDataLen   = 0x61;
+
+// Control subcommands
+static constexpr uint16_t kBqSubUnseal1    = 0x0414;
+static constexpr uint16_t kBqSubUnseal2    = 0x3672;
+static constexpr uint16_t kBqSubFullAccess = 0xFFFF;
+static constexpr uint16_t kBqSubEnterCfg   = 0x0090;
+static constexpr uint16_t kBqSubExitReinit = 0x0091;
+static constexpr uint16_t kBqSubExitOnly   = 0x0092;
+static constexpr uint16_t kBqSubSeal       = 0x0030;
+static constexpr uint16_t kBqSubReset      = 0x0041;
+
+// OperationStatus CFGUPMODE bit
+static constexpr uint16_t kBqOpStatusCfgUpdate = 0x0400;  // bit 10
+
+// FCC acceptance band around design capacity.
+static constexpr uint16_t kBqFccBand = 100;
+
+// Nominal LiPo cell voltage used to compute target Design Energy from
+// Design Capacity (DE_mWh = DC_mAh * 3.7).
+static constexpr uint16_t kBqDesignMv = 3700;
+
+// Read a single byte from a BQ27220 register.
+static uint8_t bq_read8(uint8_t reg) {
+    uint8_t data = 0;
+    if (!BQ27220_IIC_Bus->write_read(&reg, 1, &data, 1)) return 0;
+    return data;
+}
+
+// Read a 16-bit little-endian value from a BQ27220 register.
+static uint16_t bq_read16(uint8_t reg) {
+    uint8_t data[2] = {0};
+    if (!BQ27220_IIC_Bus->write_read(&reg, 1, data, 2)) return 0;
+    return ((uint16_t)data[1] << 8) | data[0];
+}
+
+// Write a 16-bit subcommand to the Control register (0x00). Little-endian.
+static bool bq_write_control(uint16_t subcmd) {
+    uint8_t buf[3] = {
+        kBqRegControl,
+        (uint8_t)(subcmd & 0xFF),
+        (uint8_t)((subcmd >> 8) & 0xFF)
+    };
+    return BQ27220_IIC_Bus->write(buf, 3);
+}
+
+// Differential-checksum write of a 16-bit value to a data-memory address.
+// Mirrors the writeDM16 lambda inside TDeckBoard::configureFuelGauge.
+// Idempotent: reads the current value first and returns success without
+// touching anything if it already matches new_val.
+//
+// Must be called while the chip is unsealed and in CFG_UPDATE mode.
+// Data memory stores values big-endian (MSB at 0x40, LSB at 0x41).
+static bool bq_dm_write16(uint16_t addr, uint16_t new_val) {
+    // 1. Select the data-memory address by writing little-endian to 0x3E/0x3F.
+    {
+        uint8_t sel[3] = {
+            kBqRegMACAddress,
+            (uint8_t)(addr & 0xFF),
+            (uint8_t)((addr >> 8) & 0xFF)
+        };
+        if (!BQ27220_IIC_Bus->write(sel, 3)) {
+            printf("meck_battery_calibrate: [0x%04X] select fail\n",
+                   (unsigned)addr);
+            return false;
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // 2. Read current MSB, LSB, checksum, length.
+    uint8_t old_msb  = bq_read8(kBqRegMACDataStart);
+    uint8_t old_lsb  = bq_read8(kBqRegMACDataStart + 1);
+    uint8_t old_chk  = bq_read8(kBqRegMACDataSum);
+    uint8_t data_len = bq_read8(kBqRegMACDataLen);
+    uint16_t old_val = ((uint16_t)old_msb << 8) | old_lsb;
+
+    if (old_val == new_val) {
+        printf("meck_battery_calibrate: [0x%04X] already %u, skip\n",
+               (unsigned)addr, (unsigned)new_val);
+        return true;
+    }
+
+    // 3. Differential checksum (matches T-Deck Pro writeDM16 lambda).
+    uint8_t new_msb = (new_val >> 8) & 0xFF;
+    uint8_t new_lsb = new_val & 0xFF;
+    uint8_t temp    = (uint8_t)(255 - old_chk - old_msb - old_lsb);
+    uint8_t new_chk = (uint8_t)(255 - ((temp + new_msb + new_lsb) & 0xFF));
+
+    printf("meck_battery_calibrate: [0x%04X] %u -> %u\n",
+           (unsigned)addr, (unsigned)old_val, (unsigned)new_val);
+
+    // 4. Write address + two data bytes in one transaction.
+    {
+        uint8_t wr[5] = {
+            kBqRegMACAddress,
+            (uint8_t)(addr & 0xFF),
+            (uint8_t)((addr >> 8) & 0xFF),
+            new_msb,
+            new_lsb
+        };
+        if (!BQ27220_IIC_Bus->write(wr, 5)) {
+            printf("meck_battery_calibrate: [0x%04X] data write fail\n",
+                   (unsigned)addr);
+            return false;
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // 5. Write checksum and length. Both must land before the chip commits
+    //    the new data-memory value.
+    {
+        uint8_t chk[3] = {kBqRegMACDataSum, new_chk, data_len};
+        if (!BQ27220_IIC_Bus->write(chk, 3)) {
+            printf("meck_battery_calibrate: [0x%04X] checksum write fail\n",
+                   (unsigned)addr);
+            return false;
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    return true;
+}
+
+extern "C" void meck_battery_calibrate() {
+    if (!BQ27220 || !BQ27220_IIC_Bus) {
+        printf("meck_battery_calibrate: fuel gauge not available, skipping\n");
+        return;
+    }
+
+    const uint16_t target_dc = MECK_BATTERY_DESIGN_MAH;
+    const uint16_t target_de =
+        (uint16_t)(((uint32_t)target_dc * kBqDesignMv) / 1000);
+
+    uint16_t dc  = BQ27220->get_design_capacity();
+    uint16_t fcc = BQ27220->get_full_charge_capacity();
+    printf("meck_battery_calibrate: start DC=%u FCC=%u "
+           "(target DC=%u DE=%u mWh)\n",
+           (unsigned)dc, (unsigned)fcc,
+           (unsigned)target_dc, (unsigned)target_de);
+
+    // Self-gate: if DC matches and FCC is inside the band, nothing to do.
+    const uint16_t fcc_lo =
+        (target_dc > kBqFccBand) ? (uint16_t)(target_dc - kBqFccBand) : 0;
+    const uint16_t fcc_hi = (uint16_t)(target_dc + kBqFccBand);
+    if (dc == target_dc && fcc >= fcc_lo && fcc <= fcc_hi) {
+        printf("meck_battery_calibrate: DC correct and FCC inside [%u..%u], "
+               "no action\n",
+               (unsigned)fcc_lo, (unsigned)fcc_hi);
+        return;
+    }
+
+    printf("meck_battery_calibrate: remediation required\n");
+
+    // Diagnostic: log starting OperationStatus and decode the SEC field
+    // (bits [2:1] of the low byte): 11=Sealed, 10=Unsealed, 01=Full Access.
+    // If we time out below this tells us whether the chip even reached
+    // unsealed state.
+    uint16_t op_start = bq_read16(kBqRegOpStatus);
+    uint8_t  sec_start = (uint8_t)((op_start & 0x0006) >> 1);
+    printf("meck_battery_calibrate: pre-unseal OperationStatus=0x%04X SEC=%u\n",
+           (unsigned)op_start, (unsigned)sec_start);
+
+    // Unseal + Full Access. Idempotent - safe even if the chip is already
+    // unsealed after LilyGo's set_design_capacity call. Capture each write's
+    // return value so we can tell if any I2C transaction NACKed.
+    bool w_unseal1 = bq_write_control(kBqSubUnseal1);    vTaskDelay(pdMS_TO_TICKS(2));
+    bool w_unseal2 = bq_write_control(kBqSubUnseal2);    vTaskDelay(pdMS_TO_TICKS(2));
+    bool w_full1   = bq_write_control(kBqSubFullAccess); vTaskDelay(pdMS_TO_TICKS(2));
+    bool w_full2   = bq_write_control(kBqSubFullAccess); vTaskDelay(pdMS_TO_TICKS(2));
+    printf("meck_battery_calibrate: unseal writes ok=%d,%d full-access ok=%d,%d\n",
+           w_unseal1, w_unseal2, w_full1, w_full2);
+
+    uint16_t op_after_unseal = bq_read16(kBqRegOpStatus);
+    uint8_t  sec_after_unseal = (uint8_t)((op_after_unseal & 0x0006) >> 1);
+    printf("meck_battery_calibrate: post-unseal OperationStatus=0x%04X SEC=%u\n",
+           (unsigned)op_after_unseal, (unsigned)sec_after_unseal);
+
+    // Enter CFG_UPDATE and poll OperationStatus for CFGUPMODE bit (0x0400).
+    // TRM says this can take up to 1 second; we allow 50 x 20 ms = 1000 ms.
+    bool w_enter = bq_write_control(kBqSubEnterCfg);
+    printf("meck_battery_calibrate: ENTER_CFG_UPDATE write ok=%d\n", w_enter);
+    bool cfg_ready = false;
+    uint16_t op_last = 0;
+    for (int i = 0; i < 50; i++) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        op_last = bq_read16(kBqRegOpStatus);
+        if (op_last & kBqOpStatusCfgUpdate) {
+            cfg_ready = true;
+            printf("meck_battery_calibrate: CFG_UPDATE entered "
+                   "(OperationStatus=0x%04X after %d ms)\n",
+                   (unsigned)op_last, (i + 1) * 20);
+            break;
+        }
+    }
+    if (!cfg_ready) {
+        uint8_t sec_last = (uint8_t)((op_last & 0x0006) >> 1);
+        printf("meck_battery_calibrate: ERROR timeout entering CFG_UPDATE, "
+               "last OperationStatus=0x%04X SEC=%u, aborting\n",
+               (unsigned)op_last, (unsigned)sec_last);
+        bq_write_control(kBqSubExitOnly);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        bq_write_control(kBqSubSeal);
+        return;
+    }
+
+    // Write all four data-memory cells. Each call is idempotent so if any
+    // happens to already match, it just logs "skip" and moves on.
+    if (dc != target_dc) {
+        // LilyGo's wrapper either failed, or hasn't run yet. Write DC ourselves.
+        bq_dm_write16(kBqAddrDesignCapacity, target_dc);
+    }
+    bq_dm_write16(kBqAddrDesignEnergy, target_de);
+    bq_dm_write16(kBqAddrQmaxCell0,    target_dc);
+    bq_dm_write16(kBqAddrStoredFCC,    target_dc);
+
+    // Exit CFG_UPDATE with REINIT. This is the wrapper's missing piece -
+    // 0x0091 forces IT to reinit with the new data-memory values, where the
+    // wrapper's 0x0092 just exits CFG_UPDATE without telling IT to recompute.
+    bq_write_control(kBqSubExitReinit);
+    printf("meck_battery_calibrate: EXIT_CFG_UPDATE_REINIT sent, "
+           "waiting 200 ms\n");
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // SEAL before RESET so the gauge comes back up locked the way it shipped.
+    bq_write_control(kBqSubSeal);
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // RESET forces a full gauge reinit. Without this, IT can retain its
+    // previously learned FCC (typically 3000 mAh from factory) until a real
+    // charge/discharge cycle triggers a relearn. With it, FCC should
+    // recompute immediately against the new DC/DE/Qmax. 2-second delay
+    // matches T-Deck Pro; the gauge needs that long to stabilise before
+    // reads are trustworthy.
+    printf("meck_battery_calibrate: RESET (forces FCC recalculation)\n");
+    bq_write_control(kBqSubReset);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // Verify final state.
+    uint16_t new_dc  = BQ27220->get_design_capacity();
+    uint16_t new_fcc = BQ27220->get_full_charge_capacity();
+    printf("meck_battery_calibrate: end DC=%u FCC=%u\n",
+           (unsigned)new_dc, (unsigned)new_fcc);
+
+    if (new_fcc > (uint16_t)(target_dc + kBqFccBand)) {
+        // RESET didn't fix FCC. Typically resolves after one real
+        // charge/discharge cycle. The software clamp in
+        // meck_battery_full_charge_mah() still ensures correct display.
+        printf("meck_battery_calibrate: WARNING FCC still stale at %u - "
+               "software clamp active\n", (unsigned)new_fcc);
+    }
+}

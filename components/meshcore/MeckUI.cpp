@@ -2241,7 +2241,7 @@ static void create_page_recent(lv_obj_t *page) {
     meck_set_font(lbl_recent_list, &meck_montserrat_16, 0);
     lv_label_set_long_mode(lbl_recent_list, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_recent_list, SCREEN_WIDTH - 40);
-    lv_obj_align(lbl_recent_list, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
+    lv_obj_align(lbl_recent_list, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 80);
 
     home_attach_clock_battery(page, 1);
 }
@@ -2263,7 +2263,7 @@ static void create_page_radio(lv_obj_t *page) {
     meck_set_font(lbl_radio_detail, &meck_montserrat_18, 0);
     lv_label_set_long_mode(lbl_radio_detail, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_radio_detail, SCREEN_WIDTH - 40);
-    lv_obj_align(lbl_radio_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
+    lv_obj_align(lbl_radio_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 80);
 
     update_radio_detail_label();
 
@@ -2368,7 +2368,7 @@ static void create_page_battery(lv_obj_t *page) {
     meck_set_font(lbl_battery_detail, &meck_montserrat_18, 0);
     lv_label_set_long_mode(lbl_battery_detail, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_battery_detail, SCREEN_WIDTH - 40);
-    lv_obj_align(lbl_battery_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
+    lv_obj_align(lbl_battery_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 80);
 
     home_attach_clock_battery(page, 5);
 }
@@ -4152,14 +4152,12 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         uint8_t pct = 0;
         lv_color_t col = lv_color_white();
         if (available) {
-            // Use voltage-derived percentage until the BQ27220's chip-side
-            // calibration (Design Capacity in flash) is fixed. LilyGo's
-            // factory FCC=3000 mAh causes pct_from_chip to read ~100% for
-            // most of the discharge curve on the actual 1000 mAh cell;
-            // pct_from_voltage tracks the real voltage and is closer to
-            // reality. Battery Gauge detail tile still shows both for
-            // diagnostics.
-            pct = meck_battery_pct_from_voltage(meck_battery_voltage_mv());
+            // Chip-based SoC via the BQ27220's coulomb counter. Trustworthy
+            // post-calibration (see meck_battery_calibrate() in target.cpp);
+            // before calibration landed this used pct_from_voltage as a
+            // stopgap. Battery Gauge detail tile still shows raw voltage as
+            // a cross-check.
+            pct = meck_battery_pct_from_chip();
             if      (pct >= 70) col = lv_palette_main(LV_PALETTE_GREEN);
             else if (pct >= 40) col = lv_palette_main(LV_PALETTE_ORANGE);
             else if (pct >= 20) col = lv_palette_main(LV_PALETTE_YELLOW);
@@ -4198,7 +4196,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 
     // Battery tile: refresh every tick. Voltage is authoritative; if the
     // BQ27220's reported SoC disagrees with the voltage curve by more than
-    // 15 points, surface it so the user can decide what to trust.
+    // 30 points, surface it so the user can decide what to trust.
     if (lbl_battery_detail) {
         if (!meck_battery_available()) {
             lv_label_set_text(lbl_battery_detail, "BQ27220 not detected");
@@ -4229,19 +4227,19 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 
             int diff = (int)pct_chip - (int)pct_volts;
             if (diff < 0) diff = -diff;
-            const char* trust_note = (diff > 15)
+            const char* trust_note = (diff > 30)
                 ? "\nNote: BQ27220 SoC disagrees with voltage,\ncell calibration may need attention."
                 : "";
 
             char buf[512];
             snprintf(buf, sizeof(buf),
-                "Voltage:    %u mV (~%u%%)\n"
+                "Voltage:    %u mV\n"
                 "Charge:     %u%%  [BQ27220]\n"
                 "Current:    %s%d mA  (%s)\n"
                 "Chip temp:  %d C\n\n"
                 "Remaining:  %u / %u mAh\n"
                 "Time empty: %s%s",
-                (unsigned)mv,           (unsigned)pct_volts,
+                (unsigned)mv,
                 (unsigned)pct_chip,
                 ma > 0 ? "+" : "",      (int)ma,        current_label,
                 (int)temp_c,
