@@ -1007,6 +1007,76 @@ public:
         return true;
     }
 
+    // Request a page of the repeater's neighbour list
+    // (REQ_TYPE_GET_NEIGHBOURS). Unlike the text-mode `neighbors` CLI
+    // command (which is hard-capped at ~8 entries by the repeater's
+    // reply buffer), this binary form supports pagination: the caller
+    // requests count entries starting from offset, the repeater
+    // responds with the total it has plus up to count entries from
+    // the requested offset, and the UI iterates until it has the lot.
+    //
+    // Request payload layout (matches upstream MyMesh.cpp's parser):
+    //   [0]    req_type      = REQ_TYPE_GET_NEIGHBOURS
+    //   [1]    request_version (0)
+    //   [2]    count          (max entries to return in this page)
+    //   [3-4]  offset         (little-endian)
+    //   [5]    order_by       (0=newest..oldest, 1=oldest..newest,
+    //                          2=strongest..weakest, 3=weakest..strongest)
+    //   [6]    pubkey_prefix_length (bytes of pubkey to include per entry)
+    //   [7-10] random uniqueness blob (zeros are fine; sendRequest's
+    //          tag at bytes 0-3 already provides packet-hash uniqueness)
+    bool uiSendNeighboursRequest(int contact_idx,
+                                  uint8_t count,
+                                  uint16_t offset,
+                                  uint8_t order_by,
+                                  uint8_t pubkey_prefix_length,
+                                  uint32_t& est_timeout_ms) {
+        if (contact_idx < 0) return false;
+
+        ContactInfo contact;
+        if (!getContactByIdx((uint32_t)contact_idx, contact)) {
+            printf("Meck: uiNeighbours idx %d not found\n", contact_idx);
+            return false;
+        }
+
+        ContactInfo* recipient = lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: uiNeighbours pub_key lookup failed for idx %d\n", contact_idx);
+            return false;
+        }
+
+        uint8_t req[11] = {};
+        req[0] = REQ_TYPE_GET_NEIGHBOURS;
+        req[1] = 0;  // request_version
+        req[2] = count;
+        memcpy(&req[3], &offset, 2);
+        req[5] = order_by;
+        req[6] = pubkey_prefix_length;
+        // req[7..10] left as zeros; sendRequest's tag prefix supplies
+        // packet uniqueness on its own.
+
+        uint32_t tag = 0;
+        est_timeout_ms = 0;
+        int result = sendRequest(*recipient, req, sizeof(req), tag, est_timeout_ms);
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: uiNeighbours to %s FAILED\n", recipient->name);
+            est_timeout_ms = 0;
+            return false;
+        }
+
+        _pending_neighbours_tag = tag;
+        _pending_neighbours_offset = offset;
+        _pending_neighbours_prefix_len = pubkey_prefix_length;
+        printf("Meck: uiNeighbours to %s (%s) tag=0x%08X count=%u offset=%u "
+               "order=%u prefix_len=%u timeout=%ums\n",
+               recipient->name,
+               result == MSG_SEND_SENT_FLOOD ? "flood" : "direct",
+               (unsigned)tag, (unsigned)count, (unsigned)offset,
+               (unsigned)order_by, (unsigned)pubkey_prefix_length,
+               (unsigned)est_timeout_ms);
+        return true;
+    }
+
     // Tear down the active admin session. Called when switching to a
     // different repeater's login, when the user backs out of the admin
     // screen, or before initiating a fresh login. Clears the
@@ -1023,6 +1093,9 @@ public:
         _pending_login_pk = 0;
         _pending_status_tag = 0;
         _pending_telemetry_tag = 0;
+        _pending_neighbours_tag = 0;
+        _pending_neighbours_offset = 0;
+        _pending_neighbours_prefix_len = 0;
         _cli_response_pending = false;
         _last_cli_sent_ms = 0;
         _last_cli_timeout_ms = 0;
@@ -1076,6 +1149,28 @@ public:
         int      contact_idx;
     };
 
+    // ---- Neighbours response (REQ_TYPE_GET_NEIGHBOURS) ----
+    // Each request returns one page of up to MECK_NEIGHBOURS_MAX_PAGE
+    // entries plus the total count of neighbours on the repeater. The
+    // UI iterates with incrementing offset until it has received
+    // total_count entries. Per-entry layout matches the wire format
+    // (4-byte pubkey prefix + 4-byte heard_seconds_ago + 1-byte snr*4),
+    // sized for prefix_length=4 which is what the UI requests.
+    static constexpr int MECK_NEIGHBOURS_MAX_PAGE = 14;
+    struct NeighbourEntry {
+        uint8_t  prefix[4];          // first 4 bytes of pubkey
+        uint32_t secs_ago;           // heard_seconds_ago from RTC at reply time
+        int8_t   snr_x4;             // SNR * 4 (divide by 4.0 for dB)
+    };
+    struct PendingAdminNeighbours {
+        bool          valid;
+        uint16_t      total_count;   // total neighbours on the repeater
+        uint16_t      page_count;    // entries in this page (≤ MECK_NEIGHBOURS_MAX_PAGE)
+        uint16_t      offset;        // offset this page was requested with
+        NeighbourEntry entries[MECK_NEIGHBOURS_MAX_PAGE];
+        int           contact_idx;
+    };
+
     bool drainPendingAdminLogin(PendingAdminLogin& out) {
         xSemaphoreTake(_mutex, portMAX_DELAY);
         bool ok = false;
@@ -1126,6 +1221,20 @@ public:
             _pending_admin_telemetry[_pending_admin_telemetry_tail].valid = false;
             _pending_admin_telemetry_tail = (_pending_admin_telemetry_tail + 1) % P4_PENDING_ADMIN_RING;
             _pending_admin_telemetry_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    bool drainPendingAdminNeighbours(PendingAdminNeighbours& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_admin_neighbours_count > 0) {
+            out = _pending_admin_neighbours[_pending_admin_neighbours_tail];
+            _pending_admin_neighbours[_pending_admin_neighbours_tail].valid = false;
+            _pending_admin_neighbours_tail = (_pending_admin_neighbours_tail + 1) % P4_PENDING_ADMIN_RING;
+            _pending_admin_neighbours_count--;
             ok = true;
         }
         xSemaphoreGive(_mutex);
@@ -2327,9 +2436,89 @@ protected:
             return;
         }
 
+        // ---- Neighbours response (REQ_TYPE_GET_NEIGHBOURS) ----
+        // Matched by tag. Wire layout after the 4-byte tag prefix:
+        //   [4-5]  total_count   (uint16_t, total neighbours on repeater)
+        //   [6-7]  results_count (uint16_t, entries in this page)
+        //   [8..]  results_count entries, each of:
+        //            prefix_len bytes pubkey prefix
+        //            4 bytes heard_seconds_ago (uint32_t)
+        //            1 byte snr*4 (int8_t)
+        // prefix_len is whatever the request specified; the UI always
+        // requests 4 bytes, so we expect entries of 9 bytes each.
+        if (_pending_neighbours_tag != 0 && tag == _pending_neighbours_tag) {
+            _pending_neighbours_tag = 0;
+
+            if (len < 8) {
+                printf("Meck: neighbours response too short (got %u, need >=8)\n",
+                       (unsigned)len);
+                return;
+            }
+
+            uint16_t total_count = 0, results_count = 0;
+            memcpy(&total_count,   &data[4], 2);
+            memcpy(&results_count, &data[6], 2);
+
+            uint8_t prefix_len = _pending_neighbours_prefix_len;
+            uint16_t requested_offset = _pending_neighbours_offset;
+            int entry_size = prefix_len + 4 + 1;
+            int entries_room = (len > 8) ? ((len - 8) / entry_size) : 0;
+
+            if (results_count > entries_room) {
+                printf("Meck: neighbours response truncated "
+                       "(claimed=%u room=%d)\n",
+                       (unsigned)results_count, entries_room);
+                results_count = (uint16_t)entries_room;
+            }
+            if (results_count > MECK_NEIGHBOURS_MAX_PAGE) {
+                printf("Meck: neighbours response over page cap (%u > %d)\n",
+                       (unsigned)results_count, MECK_NEIGHBOURS_MAX_PAGE);
+                results_count = MECK_NEIGHBOURS_MAX_PAGE;
+            }
+
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            PendingAdminNeighbours& slot =
+                _pending_admin_neighbours[_pending_admin_neighbours_head];
+            slot.valid = true;
+            slot.total_count = total_count;
+            slot.page_count  = results_count;
+            slot.offset      = requested_offset;
+            slot.contact_idx = _admin_contact_idx;
+            const uint8_t* p = &data[8];
+            for (uint16_t i = 0; i < results_count; i++) {
+                NeighbourEntry& e = slot.entries[i];
+                // Copy up to 4 bytes of prefix, zero-pad if the request
+                // asked for fewer (defensive: UI always requests 4).
+                memset(e.prefix, 0, sizeof(e.prefix));
+                uint8_t pcopy = (prefix_len < (uint8_t)sizeof(e.prefix))
+                                ? prefix_len : (uint8_t)sizeof(e.prefix);
+                memcpy(e.prefix, p, pcopy);
+                p += prefix_len;
+                memcpy(&e.secs_ago, p, 4);
+                p += 4;
+                e.snr_x4 = (int8_t)*p;
+                p += 1;
+            }
+            _pending_admin_neighbours_head =
+                (_pending_admin_neighbours_head + 1) % P4_PENDING_ADMIN_RING;
+            if (_pending_admin_neighbours_count < P4_PENDING_ADMIN_RING) {
+                _pending_admin_neighbours_count++;
+            } else {
+                _pending_admin_neighbours_tail =
+                    (_pending_admin_neighbours_tail + 1) % P4_PENDING_ADMIN_RING;
+            }
+            xSemaphoreGive(_mutex);
+
+            printf("Meck: neighbours response from %s: total=%u page=%u offset=%u\n",
+                   contact.name,
+                   (unsigned)total_count, (unsigned)results_count,
+                   (unsigned)requested_offset);
+            return;
+        }
+
         // Unmatched response. Could be a late reply from a torn-down
         // session, or a response type we don't handle yet (ACL list,
-        // neighbours binary, owner info). Log and ignore.
+        // owner info). Log and ignore.
         printf("Meck: unmatched contact response from %s, tag=0x%08X, len=%u\n",
                contact.name, (unsigned)tag, (unsigned)len);
     }
@@ -2945,6 +3134,16 @@ private:
     uint32_t _pending_status_tag    = 0;
     uint32_t _pending_telemetry_tag = 0;
 
+    // ---- Neighbours pagination state ----
+    // _pending_neighbours_tag matches REQ_TYPE_GET_NEIGHBOURS replies
+    // the same way _pending_status_tag matches status replies. The
+    // _offset and _prefix_len fields are remembered from the most
+    // recent send so the response parser knows where to place the
+    // page and how many bytes of pubkey it'll find per entry.
+    uint32_t _pending_neighbours_tag        = 0;
+    uint16_t _pending_neighbours_offset     = 0;
+    uint8_t  _pending_neighbours_prefix_len = 0;
+
     // ---- CLI command bookkeeping ----
     // CLI replies don't carry a tag we can match against. Instead we
     // gate onCommandDataRecv on _cli_response_pending, which is set
@@ -2979,6 +3178,11 @@ private:
     int _pending_admin_telemetry_head  = 0;
     int _pending_admin_telemetry_tail  = 0;
     int _pending_admin_telemetry_count = 0;
+
+    PendingAdminNeighbours _pending_admin_neighbours[P4_PENDING_ADMIN_RING] = {};
+    int _pending_admin_neighbours_head  = 0;
+    int _pending_admin_neighbours_tail  = 0;
+    int _pending_admin_neighbours_count = 0;
 
     // ---- Self-echo dedup ----
     // When we send a channel message, the dispatcher hands the packet to the

@@ -128,6 +128,7 @@ static void meck_task(void* arg) {
         meck_apply_pending_admin_status();
         meck_apply_pending_admin_cli();
         meck_apply_pending_admin_telemetry();
+        meck_apply_pending_admin_neighbours();
         meck_apply_pending_save();
         if (g_the_mesh) {
             g_the_mesh->loop();
@@ -351,6 +352,13 @@ static char          g_admin_cli_command[160] = {};
 static volatile bool g_admin_telemetry_pending     = false;
 static volatile int  g_admin_telemetry_contact_idx = -1;
 
+static volatile bool     g_admin_neighbours_pending             = false;
+static volatile int      g_admin_neighbours_contact_idx         = -1;
+static volatile uint8_t  g_admin_neighbours_count               = 0;
+static volatile uint16_t g_admin_neighbours_offset              = 0;
+static volatile uint8_t  g_admin_neighbours_order_by            = 0;
+static volatile uint8_t  g_admin_neighbours_pubkey_prefix_length = 0;
+
 // ---- Send-result notification slot (one-deep, shared across all types) ----
 // Populated by meck_apply_pending_admin_* after each send attempt; drained
 // by meck_drain_pending_admin_responses on the LVGL task. If two send
@@ -368,6 +376,7 @@ static meck_admin_login_cb_t       g_admin_login_cb       = nullptr;
 static meck_admin_status_cb_t      g_admin_status_cb      = nullptr;
 static meck_admin_cli_cb_t         g_admin_cli_cb         = nullptr;
 static meck_admin_telemetry_cb_t   g_admin_telemetry_cb   = nullptr;
+static meck_admin_neighbours_cb_t  g_admin_neighbours_cb  = nullptr;
 
 // ---- Send-queue producers (called by LVGL task) ----
 
@@ -400,6 +409,23 @@ extern "C" void meck_request_admin_telemetry(int contact_idx) {
     g_admin_telemetry_contact_idx = contact_idx;
     g_admin_telemetry_pending = true;
     printf("meck_request_admin_telemetry: queued contact[%d]\n", contact_idx);
+}
+
+extern "C" void meck_request_admin_neighbours(int contact_idx,
+                                              uint8_t count,
+                                              uint16_t offset,
+                                              uint8_t order_by,
+                                              uint8_t pubkey_prefix_length) {
+    g_admin_neighbours_contact_idx          = contact_idx;
+    g_admin_neighbours_count                = count;
+    g_admin_neighbours_offset               = offset;
+    g_admin_neighbours_order_by             = order_by;
+    g_admin_neighbours_pubkey_prefix_length = pubkey_prefix_length;
+    g_admin_neighbours_pending              = true;
+    printf("meck_request_admin_neighbours: queued contact[%d] count=%u "
+           "offset=%u order=%u prefix_len=%u\n",
+           contact_idx, (unsigned)count, (unsigned)offset,
+           (unsigned)order_by, (unsigned)pubkey_prefix_length);
 }
 
 // Helper: record a send-result for the LVGL task to pick up on next drain.
@@ -495,15 +521,43 @@ extern "C" void meck_apply_pending_admin_telemetry() {
            contact_idx, (unsigned)est_timeout);
 }
 
+extern "C" void meck_apply_pending_admin_neighbours() {
+    if (!g_admin_neighbours_pending) return;
+    g_admin_neighbours_pending = false;
+    if (!g_the_mesh) {
+        admin_post_send_result(MECK_ADMIN_REQ_NEIGHBOURS, false, 0);
+        return;
+    }
+
+    int      contact_idx = g_admin_neighbours_contact_idx;
+    uint8_t  count       = g_admin_neighbours_count;
+    uint16_t offset      = g_admin_neighbours_offset;
+    uint8_t  order_by    = g_admin_neighbours_order_by;
+    uint8_t  prefix_len  = g_admin_neighbours_pubkey_prefix_length;
+    uint32_t est_timeout = 0;
+    bool ok = g_the_mesh->uiSendNeighboursRequest(contact_idx, count, offset,
+                                                   order_by, prefix_len,
+                                                   est_timeout);
+
+    admin_post_send_result(MECK_ADMIN_REQ_NEIGHBOURS, ok, est_timeout);
+    printf(">>> %s admin neighbours request to contact[%d] count=%u offset=%u "
+           "order=%u prefix_len=%u, est_timeout=%ums\n",
+           ok ? "Sent" : "FAILED",
+           contact_idx, (unsigned)count, (unsigned)offset,
+           (unsigned)order_by, (unsigned)prefix_len,
+           (unsigned)est_timeout);
+}
+
 extern "C" void meck_admin_clear_session() {
     if (!g_the_mesh) return;
     g_the_mesh->clearAdminSession();
     // Also wipe any pending requests so a stale queue can't trigger
     // sends to a contact the UI thinks it's no longer admin'd on.
-    g_admin_login_pending     = false;
-    g_admin_status_pending    = false;
-    g_admin_cli_pending       = false;
-    g_admin_telemetry_pending = false;
+    g_admin_login_pending      = false;
+    g_admin_status_pending     = false;
+    g_admin_cli_pending        = false;
+    g_admin_telemetry_pending  = false;
+    g_admin_neighbours_pending = false;
     memset(g_admin_login_password, 0, sizeof(g_admin_login_password));
     printf("meck_admin_clear_session: cleared\n");
 }
@@ -533,6 +587,11 @@ extern "C" void meck_register_admin_cli_callback(meck_admin_cli_cb_t cb) {
 extern "C" void meck_register_admin_telemetry_callback(meck_admin_telemetry_cb_t cb) {
     g_admin_telemetry_cb = cb;
     printf("meck_register_admin_telemetry_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+extern "C" void meck_register_admin_neighbours_callback(meck_admin_neighbours_cb_t cb) {
+    g_admin_neighbours_cb = cb;
+    printf("meck_register_admin_neighbours_callback: %s\n", cb ? "registered" : "cleared");
 }
 
 // ---- Response drain (LVGL task, called from ui_update_timer_cb) ----
@@ -604,6 +663,36 @@ extern "C" void meck_drain_pending_admin_responses() {
             } else {
                 printf("meck_drain_pending_admin_responses: no telemetry callback, "
                        "dropping response contact=%d\n", r.contact_idx);
+            }
+        }
+    }
+
+    // Neighbours responses. The PendingAdminNeighbours.entries field is
+    // a NeighbourEntry struct array on Meck's side, but the C-API
+    // exposes the page as a packed byte blob (prefix[4] + secs_ago[4]
+    // + snr[1] per entry = 9 bytes) so callers don't need to depend
+    // on Meck's internal struct layout. Pack on the way out.
+    {
+        Meck::PendingAdminNeighbours r;
+        while (g_the_mesh->drainPendingAdminNeighbours(r)) {
+            if (g_admin_neighbours_cb) {
+                uint8_t packed[Meck::MECK_NEIGHBOURS_MAX_PAGE * 9];
+                uint8_t* p = packed;
+                for (uint16_t i = 0; i < r.page_count; i++) {
+                    const Meck::NeighbourEntry& e = r.entries[i];
+                    memcpy(p, e.prefix, 4); p += 4;
+                    memcpy(p, &e.secs_ago, 4); p += 4;
+                    *p = (uint8_t)e.snr_x4; p += 1;
+                }
+                g_admin_neighbours_cb(r.total_count, r.page_count, r.offset,
+                                      packed, r.contact_idx);
+            } else {
+                printf("meck_drain_pending_admin_responses: no neighbours callback, "
+                       "dropping response contact=%d total=%u page=%u offset=%u\n",
+                       r.contact_idx,
+                       (unsigned)r.total_count,
+                       (unsigned)r.page_count,
+                       (unsigned)r.offset);
             }
         }
     }

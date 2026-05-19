@@ -123,10 +123,11 @@ extern "C" void meck_drain_pending_dm_sends();
 // must copy anything it wants to retain.
 
 typedef enum {
-    MECK_ADMIN_REQ_LOGIN     = 0,
-    MECK_ADMIN_REQ_STATUS    = 1,
-    MECK_ADMIN_REQ_CLI       = 2,
-    MECK_ADMIN_REQ_TELEMETRY = 3,
+    MECK_ADMIN_REQ_LOGIN      = 0,
+    MECK_ADMIN_REQ_STATUS     = 1,
+    MECK_ADMIN_REQ_CLI        = 2,
+    MECK_ADMIN_REQ_TELEMETRY  = 3,
+    MECK_ADMIN_REQ_NEIGHBOURS = 4,
 } meck_admin_req_type_t;
 
 // Send-result callback: fires after every admin send attempt.
@@ -167,6 +168,20 @@ typedef void (*meck_admin_telemetry_cb_t)(const uint8_t* lpp,
                                            uint32_t clock_tag,
                                            int contact_idx);
 
+// Neighbours: one page of the repeater's neighbour list. total_count is
+// the total number of neighbours the repeater has; page_count is how
+// many are in this `entries` blob. offset is the offset this page was
+// requested with (so the caller can correlate when iterating).
+// entries is a packed blob of `page_count` records, each laid out as
+// 4 bytes pubkey prefix + 4 bytes seconds-ago + 1 byte SNR*4. The
+// pointer is only valid for the duration of the callback — copy out
+// anything you want to retain.
+typedef void (*meck_admin_neighbours_cb_t)(uint16_t total_count,
+                                            uint16_t page_count,
+                                            uint16_t offset,
+                                            const uint8_t* entries,
+                                            int contact_idx);
+
 // Send-side: LVGL queues, meck_task drains. Each request type has its
 // own pending slot; calling the same request twice in a row before the
 // drain runs overwrites the first request.
@@ -174,11 +189,17 @@ extern "C" void meck_request_admin_login(int contact_idx, const char* password);
 extern "C" void meck_request_admin_status(int contact_idx);
 extern "C" void meck_request_admin_cli(int contact_idx, const char* command);
 extern "C" void meck_request_admin_telemetry(int contact_idx);
+extern "C" void meck_request_admin_neighbours(int contact_idx,
+                                              uint8_t count,
+                                              uint16_t offset,
+                                              uint8_t order_by,
+                                              uint8_t pubkey_prefix_length);
 
 extern "C" void meck_apply_pending_admin_login();
 extern "C" void meck_apply_pending_admin_status();
 extern "C" void meck_apply_pending_admin_cli();
 extern "C" void meck_apply_pending_admin_telemetry();
+extern "C" void meck_apply_pending_admin_neighbours();
 
 // Tear down the active admin session from the LVGL side. Mirrors
 // Meck::clearAdminSession but callable from UI without needing to
@@ -192,6 +213,7 @@ extern "C" void meck_register_admin_login_callback(meck_admin_login_cb_t cb);
 extern "C" void meck_register_admin_status_callback(meck_admin_status_cb_t cb);
 extern "C" void meck_register_admin_cli_callback(meck_admin_cli_cb_t cb);
 extern "C" void meck_register_admin_telemetry_callback(meck_admin_telemetry_cb_t cb);
+extern "C" void meck_register_admin_neighbours_callback(meck_admin_neighbours_cb_t cb);
 
 // Drain all four response rings and invoke registered callbacks. Called
 // from ui_update_timer_cb on the LVGL task. Cheap when nothing is

@@ -605,6 +605,25 @@ static lv_obj_t *scr_admin_setting_placeholder  = NULL;
 static lv_obj_t *lbl_admin_setting_placeholder_title = NULL;
 static lv_obj_t *lbl_admin_setting_placeholder_body  = NULL;
 
+// Firmware Info subpage — sends "ver" CLI command on entry and on
+// Refresh, parses the "<version> (Build: <date>)" reply from upstream
+// CommonCLI.cpp into two labels.
+static lv_obj_t *scr_admin_fw_info             = NULL;
+static lv_obj_t *lbl_admin_fw_info_status      = NULL;
+static lv_obj_t *lbl_admin_fw_info_version     = NULL;
+static lv_obj_t *lbl_admin_fw_info_build       = NULL;
+static lv_obj_t *btn_admin_fw_info_refresh     = NULL;
+
+// Neighbours subpage — uses the binary REQ_TYPE_GET_NEIGHBOURS path
+// (rather than the text CLI 'neighbors' command which the repeater
+// caps at ~8 entries). Paginated: on entry/Refresh we request
+// offset=0, then iterate with each dispatch until we've received
+// the full neighbour list reported by the first response.
+static lv_obj_t *scr_admin_neighbours          = NULL;
+static lv_obj_t *lbl_admin_neighbours_status   = NULL;
+static lv_obj_t *obj_admin_neighbours_scroll   = NULL;
+static lv_obj_t *btn_admin_neighbours_refresh  = NULL;
+
 // Cached most-recent status response, populated by the dispatch
 // callback. Re-rendered on subpage entry and on refresh.
 // last_update == 0 means "never received yet" (show placeholder text).
@@ -619,6 +638,28 @@ static bool           g_admin_status_in_flight   = false;
 // subpage disable themselves while their flag is set.
 static bool           g_admin_send_advert_in_flight = false;
 static bool           g_admin_cmd_in_flight         = false;
+static bool           g_admin_fw_in_flight          = false;
+
+// Firmware Info send timestamp — used by the 500ms ui_update_timer_cb
+// to time out a stuck "Refreshing..." after MECK_ADMIN_FW_TIMEOUT_MS.
+static unsigned long  g_admin_fw_sent_ms            = 0;
+#define MECK_ADMIN_FW_TIMEOUT_MS 20000
+
+// ---- Neighbours pagination state ----
+// _in_flight is true from the first page request until either the last
+// page lands, a send failure surfaces, or the timeout elapses. The
+// pagination accumulator tracks how many entries have been rendered
+// vs how many the repeater claimed in the first page, so we know
+// when to stop iterating.
+static bool          g_admin_neighbours_in_flight        = false;
+static unsigned long g_admin_neighbours_sent_ms          = 0;
+static uint16_t      g_admin_neighbours_total            = 0;
+static uint16_t      g_admin_neighbours_received         = 0;
+static uint16_t      g_admin_neighbours_next_offset      = 0;
+#define MECK_ADMIN_NEIGHBOURS_PAGE_SIZE    10
+#define MECK_ADMIN_NEIGHBOURS_PREFIX_LEN   4
+#define MECK_ADMIN_NEIGHBOURS_ORDER_BY     0   // 0 = newest to oldest
+#define MECK_ADMIN_NEIGHBOURS_TIMEOUT_MS   20000
 
 // Which contact the login screen is currently targeting (set on entry
 // from on_contact_admin_tap, used by the submit handler and callbacks).
@@ -769,6 +810,24 @@ static void create_admin_setting_placeholder_screen();
 static void admin_settings_rebuild_list();
 static void on_admin_setting_row_tap(lv_event_t *e);
 static void on_admin_setting_back(lv_event_t *e);
+static void create_admin_fw_info_screen();
+static void admin_fw_info_request();
+static void admin_fw_info_parse_and_render(const char* response);
+static void on_admin_fw_info_refresh_tap(lv_event_t *e);
+static void on_admin_fw_info_back(lv_event_t *e);
+static void create_admin_neighbours_screen();
+static void admin_neighbours_request_first_page();
+static void admin_neighbours_request_next_page();
+static void admin_neighbours_dispatch(uint16_t total_count,
+                                       uint16_t page_count,
+                                       uint16_t offset,
+                                       const uint8_t* entries,
+                                       int contact_idx);
+static void admin_neighbours_append_row(const uint8_t* prefix,
+                                         uint32_t secs_ago,
+                                         int8_t snr_x4);
+static void on_admin_neighbours_refresh_tap(lv_event_t *e);
+static void on_admin_neighbours_back(lv_event_t *e);
 static void on_admin_cmd_send_tap(lv_event_t *e);
 static void on_admin_cmd_input_focused(lv_event_t *e);
 static void on_admin_cmd_input_defocused(lv_event_t *e);
@@ -5395,6 +5454,54 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         }
     }
 
+    // Firmware Info timeout: if a "ver" request has been in flight for
+    // longer than MECK_ADMIN_FW_TIMEOUT_MS without a dispatch, surface
+    // a red timeout message and re-enable the Refresh button.
+    if (g_admin_fw_in_flight) {
+        unsigned long now = (unsigned long)esp_log_timestamp();
+        if ((now - g_admin_fw_sent_ms) > MECK_ADMIN_FW_TIMEOUT_MS) {
+            printf("Admin: fw info request timed out after %ums\n",
+                   (unsigned)MECK_ADMIN_FW_TIMEOUT_MS);
+            g_admin_fw_in_flight = false;
+            if (lbl_admin_fw_info_status) {
+                lv_label_set_text(lbl_admin_fw_info_status,
+                                  "Request timed out. Tap Refresh to retry.");
+                lv_obj_set_style_text_color(lbl_admin_fw_info_status,
+                                            lv_palette_main(LV_PALETTE_RED), 0);
+            }
+            if (btn_admin_fw_info_refresh) {
+                lv_obj_clear_state(btn_admin_fw_info_refresh, LV_STATE_DISABLED);
+            }
+        }
+    }
+
+    // Neighbours timeout: the in-flight flag stays true across the
+    // multi-page pagination, so the timer resets at every dispatch
+    // (admin_neighbours_dispatch updates _sent_ms before sending the
+    // next page). If a page is silently lost, the elapsed time since
+    // the last successful dispatch hits the threshold and we abort
+    // with whatever entries have already been rendered.
+    if (g_admin_neighbours_in_flight) {
+        unsigned long now = (unsigned long)esp_log_timestamp();
+        if ((now - g_admin_neighbours_sent_ms) > MECK_ADMIN_NEIGHBOURS_TIMEOUT_MS) {
+            printf("Admin: neighbours request timed out after %ums "
+                   "(received=%u/%u)\n",
+                   (unsigned)MECK_ADMIN_NEIGHBOURS_TIMEOUT_MS,
+                   (unsigned)g_admin_neighbours_received,
+                   (unsigned)g_admin_neighbours_total);
+            g_admin_neighbours_in_flight = false;
+            if (lbl_admin_neighbours_status) {
+                lv_label_set_text(lbl_admin_neighbours_status,
+                                  "Request timed out. Tap Refresh to retry.");
+                lv_obj_set_style_text_color(lbl_admin_neighbours_status,
+                                            lv_palette_main(LV_PALETTE_RED), 0);
+            }
+            if (btn_admin_neighbours_refresh) {
+                lv_obj_clear_state(btn_admin_neighbours_refresh, LV_STATE_DISABLED);
+            }
+        }
+    }
+
     // Home title: show the user's chosen node name. Refreshed every tick so
     // a rename in Settings shows up without needing to rebuild the screen.
     // Font is sized to the name length so long names stay on screen without
@@ -6367,6 +6474,8 @@ static void on_admin_home_back(lv_event_t *e) {
     g_admin_status_in_flight   = false;
     g_admin_send_advert_in_flight = false;
     g_admin_cmd_in_flight         = false;
+    g_admin_fw_in_flight          = false;
+    g_admin_neighbours_in_flight  = false;
     if (scr_contact_detail) lv_screen_load(scr_contact_detail);
 }
 
@@ -6677,6 +6786,39 @@ static void meck_admin_send_result_dispatch(meck_admin_req_type_t type,
                 lv_obj_clear_state(btn_admin_cmd_send, LV_STATE_DISABLED);
             }
         }
+        if (!success && g_admin_fw_in_flight) {
+            g_admin_fw_in_flight = false;
+            if (lbl_admin_fw_info_status) {
+                lv_label_set_text(lbl_admin_fw_info_status,
+                                  "Send failed. Tap Refresh to retry.");
+                lv_obj_set_style_text_color(lbl_admin_fw_info_status,
+                                            lv_palette_main(LV_PALETTE_RED), 0);
+            }
+            if (btn_admin_fw_info_refresh) {
+                lv_obj_clear_state(btn_admin_fw_info_refresh, LV_STATE_DISABLED);
+            }
+        }
+        return;
+    }
+
+    if (type == MECK_ADMIN_REQ_NEIGHBOURS) {
+        if (!success) {
+            g_admin_neighbours_in_flight = false;
+            if (lbl_admin_neighbours_status) {
+                lv_label_set_text(lbl_admin_neighbours_status,
+                                  "Send failed. Tap Refresh to retry.");
+                lv_obj_set_style_text_color(lbl_admin_neighbours_status,
+                                            lv_palette_main(LV_PALETTE_RED), 0);
+            }
+            if (btn_admin_neighbours_refresh) {
+                lv_obj_clear_state(btn_admin_neighbours_refresh, LV_STATE_DISABLED);
+            }
+        }
+        // success: leave g_admin_neighbours_in_flight=true and the
+        // yellow status text until the response arrives. If this was
+        // a mid-pagination send (not the first page), the
+        // accumulator state is preserved and the next response will
+        // continue appending.
         return;
     }
 
@@ -6788,6 +6930,41 @@ static void meck_admin_login_dispatch(bool success, uint8_t is_admin,
         lv_obj_clear_state(btn_admin_cmd_send, LV_STATE_DISABLED);
     }
 
+    // Reset Firmware Info subpage on fresh login. Clear in-flight flag
+    // and blank out the cached values so a re-entry triggers a fresh
+    // "ver" request rather than displaying the previous repeater's
+    // values.
+    g_admin_fw_in_flight = false;
+    if (lbl_admin_fw_info_status) {
+        lv_label_set_text(lbl_admin_fw_info_status, "");
+    }
+    if (lbl_admin_fw_info_version) {
+        lv_label_set_text(lbl_admin_fw_info_version, "");
+    }
+    if (lbl_admin_fw_info_build) {
+        lv_label_set_text(lbl_admin_fw_info_build, "");
+    }
+    if (btn_admin_fw_info_refresh) {
+        lv_obj_clear_state(btn_admin_fw_info_refresh, LV_STATE_DISABLED);
+    }
+
+    // Reset Neighbours subpage on fresh login. Clear pagination state
+    // and the list contents so a re-entry triggers a fresh request
+    // rather than displaying the previous repeater's neighbours.
+    g_admin_neighbours_in_flight   = false;
+    g_admin_neighbours_total       = 0;
+    g_admin_neighbours_received    = 0;
+    g_admin_neighbours_next_offset = 0;
+    if (lbl_admin_neighbours_status) {
+        lv_label_set_text(lbl_admin_neighbours_status, "");
+    }
+    if (obj_admin_neighbours_scroll) {
+        lv_obj_clean(obj_admin_neighbours_scroll);
+    }
+    if (btn_admin_neighbours_refresh) {
+        lv_obj_clear_state(btn_admin_neighbours_refresh, LV_STATE_DISABLED);
+    }
+
     if (scr_admin_home) lv_screen_load(scr_admin_home);
 }
 
@@ -6881,6 +7058,20 @@ static void meck_admin_cli_dispatch(const char* response, int contact_idx) {
         admin_cmd_add_entry(last_cmd, response ? response : "(no reply)", false);
         if (btn_admin_cmd_send) {
             lv_obj_clear_state(btn_admin_cmd_send, LV_STATE_DISABLED);
+        }
+        return;
+    }
+
+    if (g_admin_fw_in_flight) {
+        // Firmware Info flow — response format is from upstream
+        // CommonCLI.cpp's `ver` handler:
+        //   sprintf(reply, "%s (Build: %s)", firmwareVer, buildDate);
+        // admin_fw_info_parse_and_render splits it into the two
+        // labels.
+        g_admin_fw_in_flight = false;
+        admin_fw_info_parse_and_render(response ? response : "");
+        if (btn_admin_fw_info_refresh) {
+            lv_obj_clear_state(btn_admin_fw_info_refresh, LV_STATE_DISABLED);
         }
         return;
     }
@@ -7590,6 +7781,28 @@ static void on_admin_setting_row_tap(lv_event_t *e) {
 
     printf("Admin Settings: '%s' tapped\n", name);
 
+    // Firmware Info has its own dedicated subpage. Auto-send "ver" on
+    // entry so the user doesn't have to tap Refresh to see the values.
+    if (strcmp(name, "Firmware Info") == 0) {
+        if (scr_admin_fw_info) {
+            lv_screen_load(scr_admin_fw_info);
+            admin_fw_info_request();
+        }
+        return;
+    }
+
+    // Neighbours uses the binary REQ_TYPE_GET_NEIGHBOURS path to
+    // retrieve the repeater's full neighbour list (paginated), rather
+    // than the text CLI 'neighbors' command which is hard-capped at
+    // ~8 entries by the repeater's reply buffer. Guest-visible.
+    if (strcmp(name, "Neighbours") == 0) {
+        if (scr_admin_neighbours) {
+            lv_screen_load(scr_admin_neighbours);
+            admin_neighbours_request_first_page();
+        }
+        return;
+    }
+
     if (lbl_admin_setting_placeholder_title) {
         lv_label_set_text(lbl_admin_setting_placeholder_title, name);
     }
@@ -7606,6 +7819,602 @@ static void on_admin_setting_row_tap(lv_event_t *e) {
     if (scr_admin_setting_placeholder) {
         lv_screen_load(scr_admin_setting_placeholder);
     }
+}
+
+// ---- Firmware Info subpage ----
+//
+// Sends the "ver" CLI command (handled upstream by CommonCLI.cpp's
+// `} else if (memcmp(command, "ver", 3) == 0) {` branch). The reply
+// format is "<version> (Build: <date>)" with no trailing newline.
+// admin_fw_info_parse_and_render splits it into the version and build
+// labels.
+
+static void create_admin_fw_info_screen() {
+    scr_admin_fw_info = lv_obj_create(NULL);
+    lock_screen_scroll(scr_admin_fw_info);
+    lv_obj_set_style_bg_color(scr_admin_fw_info, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_admin_fw_info, 16,
+                                &meck_montserrat_22, 30);
+
+    // Back button — returns to Settings menu list (not Admin home,
+    // which is where on_admin_subpage_back goes). Mirrors the
+    // placeholder subpage scaffolding for the same reason.
+    lv_obj_t* btn_back = lv_button_create(scr_admin_fw_info);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t* bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_admin_fw_info_back,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Title — short to clear the camera punch-hole.
+    lv_obj_t* title = lv_label_create(scr_admin_fw_info);
+    lv_label_set_text(title, "Firmware Info");
+    lv_obj_set_style_text_color(title,
+                                lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Refresh button — top-right under the header. Mirrors Status's
+    // layout. No icon (LV_SYMBOL_REFRESH renders as tofu in our font
+    // glyph set).
+    btn_admin_fw_info_refresh = lv_button_create(scr_admin_fw_info);
+    lv_obj_set_size(btn_admin_fw_info_refresh, 160, 60);
+    lv_obj_align(btn_admin_fw_info_refresh, LV_ALIGN_TOP_RIGHT, -10, 30);
+    lv_obj_set_style_bg_color(btn_admin_fw_info_refresh,
+                              lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_admin_fw_info_refresh, 8, 0);
+    lv_obj_t* refresh_lbl = lv_label_create(btn_admin_fw_info_refresh);
+    lv_label_set_text(refresh_lbl, "Refresh");
+    lv_obj_set_style_text_color(refresh_lbl, lv_color_white(), 0);
+    meck_set_font(refresh_lbl, &meck_montserrat_18, 0);
+    lv_obj_center(refresh_lbl);
+    lv_obj_add_event_cb(btn_admin_fw_info_refresh,
+                        on_admin_fw_info_refresh_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Status line — "Refreshing..." / timeout / send-failed text.
+    // Sits under the title row, mirrors the Status subpage's
+    // lbl_admin_status_updated.
+    lbl_admin_fw_info_status = lv_label_create(scr_admin_fw_info);
+    lv_label_set_text(lbl_admin_fw_info_status, "");
+    lv_obj_set_style_text_color(lbl_admin_fw_info_status,
+                                lv_color_make(180, 180, 180), 0);
+    meck_set_font(lbl_admin_fw_info_status, &meck_montserrat_16, 0);
+    lv_obj_align(lbl_admin_fw_info_status, LV_ALIGN_TOP_LEFT, 20, 110);
+
+    // "Version" caption.
+    lv_obj_t* cap_version = lv_label_create(scr_admin_fw_info);
+    lv_label_set_text(cap_version, "Version");
+    lv_obj_set_style_text_color(cap_version,
+                                lv_color_make(150, 150, 150), 0);
+    meck_set_font(cap_version, &meck_montserrat_18, 0);
+    lv_obj_align(cap_version, LV_ALIGN_TOP_LEFT, 20, 160);
+
+    // Version value label — populated from the parsed response.
+    lbl_admin_fw_info_version = lv_label_create(scr_admin_fw_info);
+    lv_label_set_text(lbl_admin_fw_info_version, "");
+    lv_obj_set_style_text_color(lbl_admin_fw_info_version,
+                                lv_color_white(), 0);
+    meck_set_font(lbl_admin_fw_info_version, &meck_montserrat_24, 0);
+    lv_label_set_long_mode(lbl_admin_fw_info_version,
+                           LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_admin_fw_info_version, SCREEN_WIDTH - 40);
+    lv_obj_align(lbl_admin_fw_info_version, LV_ALIGN_TOP_LEFT, 20, 190);
+
+    // "Build" caption.
+    lv_obj_t* cap_build = lv_label_create(scr_admin_fw_info);
+    lv_label_set_text(cap_build, "Build");
+    lv_obj_set_style_text_color(cap_build,
+                                lv_color_make(150, 150, 150), 0);
+    meck_set_font(cap_build, &meck_montserrat_18, 0);
+    lv_obj_align(cap_build, LV_ALIGN_TOP_LEFT, 20, 260);
+
+    // Build value label — populated from the parsed response.
+    lbl_admin_fw_info_build = lv_label_create(scr_admin_fw_info);
+    lv_label_set_text(lbl_admin_fw_info_build, "");
+    lv_obj_set_style_text_color(lbl_admin_fw_info_build,
+                                lv_color_white(), 0);
+    meck_set_font(lbl_admin_fw_info_build, &meck_montserrat_24, 0);
+    lv_label_set_long_mode(lbl_admin_fw_info_build,
+                           LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_admin_fw_info_build, SCREEN_WIDTH - 40);
+    lv_obj_align(lbl_admin_fw_info_build, LV_ALIGN_TOP_LEFT, 20, 290);
+}
+
+// Send "ver" to the logged-in repeater. Sets the in-flight flag,
+// stamps the send timestamp for timeout polling, disables Refresh
+// while in flight, and clears the value labels so stale text from a
+// previous fetch doesn't linger during the round-trip.
+static void admin_fw_info_request() {
+    if (g_admin_login_contact_idx < 0) return;
+    if (g_admin_fw_in_flight) return;  // debounce
+
+    printf("Admin: fw info request for contact[%d]\n",
+           g_admin_login_contact_idx);
+
+    g_admin_fw_in_flight = true;
+    g_admin_fw_sent_ms   = (unsigned long)esp_log_timestamp();
+
+    if (lbl_admin_fw_info_status) {
+        lv_label_set_text(lbl_admin_fw_info_status, "Refreshing...");
+        lv_obj_set_style_text_color(lbl_admin_fw_info_status,
+                                    lv_palette_main(LV_PALETTE_YELLOW), 0);
+    }
+    if (lbl_admin_fw_info_version) {
+        lv_label_set_text(lbl_admin_fw_info_version, "");
+    }
+    if (lbl_admin_fw_info_build) {
+        lv_label_set_text(lbl_admin_fw_info_build, "");
+    }
+    if (btn_admin_fw_info_refresh) {
+        lv_obj_add_state(btn_admin_fw_info_refresh, LV_STATE_DISABLED);
+    }
+
+    meck_request_admin_cli(g_admin_login_contact_idx, "ver");
+}
+
+// Parse upstream CommonCLI's `ver` reply:
+//   sprintf(reply, "%s (Build: %s)", firmwareVer, buildDate);
+// Splits on the literal " (Build: " separator and the trailing ")".
+// If the reply doesn't match this shape, fall back to displaying the
+// whole raw response in the Version label with a yellow note in the
+// status line so the user can see what arrived.
+static void admin_fw_info_parse_and_render(const char* response) {
+    if (!lbl_admin_fw_info_version || !lbl_admin_fw_info_build ||
+        !lbl_admin_fw_info_status) {
+        return;
+    }
+
+    if (!response || !response[0]) {
+        lv_label_set_text(lbl_admin_fw_info_version, "(no reply)");
+        lv_label_set_text(lbl_admin_fw_info_build, "");
+        lv_label_set_text(lbl_admin_fw_info_status,
+                          "Empty reply from repeater.");
+        lv_obj_set_style_text_color(lbl_admin_fw_info_status,
+                                    lv_palette_main(LV_PALETTE_YELLOW), 0);
+        return;
+    }
+
+    const char* sep = strstr(response, " (Build: ");
+    const char* end = response + strlen(response);
+    bool has_trailing_paren = (end > response && *(end - 1) == ')');
+
+    if (sep && has_trailing_paren) {
+        // Version: response[0..sep)
+        char version[64];
+        size_t vlen = (size_t)(sep - response);
+        if (vlen >= sizeof(version)) vlen = sizeof(version) - 1;
+        memcpy(version, response, vlen);
+        version[vlen] = '\0';
+
+        // Build: sep + strlen(" (Build: ") .. end-1 (drop closing ')')
+        const char* bstart = sep + strlen(" (Build: ");
+        size_t blen = (size_t)(end - 1 - bstart);
+        char build[64];
+        if (blen >= sizeof(build)) blen = sizeof(build) - 1;
+        memcpy(build, bstart, blen);
+        build[blen] = '\0';
+
+        lv_label_set_text(lbl_admin_fw_info_version, version);
+        lv_label_set_text(lbl_admin_fw_info_build, build);
+        lv_label_set_text(lbl_admin_fw_info_status, "");
+        lv_obj_set_style_text_color(lbl_admin_fw_info_status,
+                                    lv_color_make(180, 180, 180), 0);
+    } else {
+        // Unexpected format. Surface the raw reply rather than silently
+        // failing, so the user (and field debugging) can see what was
+        // received.
+        lv_label_set_text(lbl_admin_fw_info_version, response);
+        lv_label_set_text(lbl_admin_fw_info_build, "");
+        lv_label_set_text(lbl_admin_fw_info_status,
+                          "Unexpected reply format.");
+        lv_obj_set_style_text_color(lbl_admin_fw_info_status,
+                                    lv_palette_main(LV_PALETTE_YELLOW), 0);
+    }
+}
+
+static void on_admin_fw_info_refresh_tap(lv_event_t *e) {
+    admin_fw_info_request();
+}
+
+// Back from Firmware Info → Settings menu list (not Admin home, which
+// is where on_admin_subpage_back goes — Firmware Info is reached via
+// Settings, so back should return there).
+static void on_admin_fw_info_back(lv_event_t *e) {
+    if (scr_admin_settings) lv_screen_load(scr_admin_settings);
+}
+
+// ---- Neighbours subpage ----
+//
+// Uses the binary REQ_TYPE_GET_NEIGHBOURS protocol (upstream MyMesh.cpp
+// line ~279) with pagination. The CLI 'neighbors' command is hard-
+// capped at ~8 entries by the repeater's 134-byte reply buffer; this
+// binary form returns the total count plus a page of entries per
+// request, so we iterate with incrementing offset until we have the
+// whole list. MECK_ADMIN_NEIGHBOURS_PAGE_SIZE=10 leaves headroom in
+// the 130-byte results buffer at MECK_ADMIN_NEIGHBOURS_PREFIX_LEN=4
+// (9 bytes per entry, 90 bytes used).
+//
+// Per-entry display format (per E's spec):
+//   <name> (XXXX) <±N.Ndb> <Ns/m/h/d ago>      (name resolved)
+//   <XXXXXXXX> <±N.Ndb> <Ns/m/h/d ago>          (name not resolved)
+// where XXXX is the first 2 hex bytes of the prefix (4 chars), and
+// XXXXXXXX is the full 4-byte prefix as hex (8 chars). Emoji and
+// other non-Latin-1 characters are stripped from names via
+// strip_unrenderable (the same helper used by the contacts list)
+// so resolved names don't render with tofu boxes.
+
+static void create_admin_neighbours_screen() {
+    scr_admin_neighbours = lv_obj_create(NULL);
+    lock_screen_scroll(scr_admin_neighbours);
+    lv_obj_set_style_bg_color(scr_admin_neighbours, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_admin_neighbours, 17,
+                                &meck_montserrat_22, 30);
+
+    // Back button — returns to Settings menu list. Mirrors the
+    // placeholder/fw_info scaffolding for the same reason: Neighbours
+    // is reached via Settings, so back should return there (not Admin
+    // home, which is where on_admin_subpage_back goes).
+    lv_obj_t* btn_back = lv_button_create(scr_admin_neighbours);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t* bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_admin_neighbours_back,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Title.
+    lv_obj_t* title = lv_label_create(scr_admin_neighbours);
+    lv_label_set_text(title, "Neighbours");
+    lv_obj_set_style_text_color(title,
+                                lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Refresh button — top-right under the header.
+    btn_admin_neighbours_refresh = lv_button_create(scr_admin_neighbours);
+    lv_obj_set_size(btn_admin_neighbours_refresh, 160, 60);
+    lv_obj_align(btn_admin_neighbours_refresh, LV_ALIGN_TOP_RIGHT, -10, 30);
+    lv_obj_set_style_bg_color(btn_admin_neighbours_refresh,
+                              lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_admin_neighbours_refresh, 8, 0);
+    lv_obj_t* refresh_lbl = lv_label_create(btn_admin_neighbours_refresh);
+    lv_label_set_text(refresh_lbl, "Refresh");
+    lv_obj_set_style_text_color(refresh_lbl, lv_color_white(), 0);
+    meck_set_font(refresh_lbl, &meck_montserrat_18, 0);
+    lv_obj_center(refresh_lbl);
+    lv_obj_add_event_cb(btn_admin_neighbours_refresh,
+                        on_admin_neighbours_refresh_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Status line — "Refreshing...", "N neighbours", timeout text, etc.
+    lbl_admin_neighbours_status = lv_label_create(scr_admin_neighbours);
+    lv_label_set_text(lbl_admin_neighbours_status, "");
+    lv_obj_set_style_text_color(lbl_admin_neighbours_status,
+                                lv_color_make(180, 180, 180), 0);
+    meck_set_font(lbl_admin_neighbours_status, &meck_montserrat_16, 0);
+    lv_obj_align(lbl_admin_neighbours_status, LV_ALIGN_TOP_LEFT, 20, 110);
+
+    // Scrollable list container — rows appended one per entry as
+    // pages arrive.
+    obj_admin_neighbours_scroll = lv_obj_create(scr_admin_neighbours);
+    lv_obj_set_size(obj_admin_neighbours_scroll,
+                    SCREEN_WIDTH - 40, SCREEN_HEIGHT - 240);
+    lv_obj_set_pos(obj_admin_neighbours_scroll, 20, 150);
+    lv_obj_set_style_bg_color(obj_admin_neighbours_scroll,
+                              lv_color_make(10, 10, 15), 0);
+    lv_obj_set_style_border_width(obj_admin_neighbours_scroll, 0, 0);
+    lv_obj_set_style_radius(obj_admin_neighbours_scroll, 8, 0);
+    lv_obj_set_style_pad_all(obj_admin_neighbours_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_admin_neighbours_scroll, LV_DIR_VER);
+    lv_obj_set_flex_flow(obj_admin_neighbours_scroll, LV_FLEX_FLOW_COLUMN);
+}
+
+// Start a fresh paginated retrieval: clear list/state, set in-flight,
+// send offset=0. Used by both subpage entry and the Refresh button.
+static void admin_neighbours_request_first_page() {
+    if (g_admin_login_contact_idx < 0) return;
+    if (g_admin_neighbours_in_flight) return;   // debounce
+
+    printf("Admin: neighbours request_first_page for contact[%d]\n",
+           g_admin_login_contact_idx);
+
+    g_admin_neighbours_in_flight   = true;
+    g_admin_neighbours_sent_ms     = (unsigned long)esp_log_timestamp();
+    g_admin_neighbours_total       = 0;
+    g_admin_neighbours_received    = 0;
+    g_admin_neighbours_next_offset = 0;
+
+    if (obj_admin_neighbours_scroll) {
+        lv_obj_clean(obj_admin_neighbours_scroll);
+    }
+    if (lbl_admin_neighbours_status) {
+        lv_label_set_text(lbl_admin_neighbours_status, "Refreshing...");
+        lv_obj_set_style_text_color(lbl_admin_neighbours_status,
+                                    lv_palette_main(LV_PALETTE_YELLOW), 0);
+    }
+    if (btn_admin_neighbours_refresh) {
+        lv_obj_add_state(btn_admin_neighbours_refresh, LV_STATE_DISABLED);
+    }
+
+    meck_request_admin_neighbours(g_admin_login_contact_idx,
+                                   MECK_ADMIN_NEIGHBOURS_PAGE_SIZE,
+                                   0,
+                                   MECK_ADMIN_NEIGHBOURS_ORDER_BY,
+                                   MECK_ADMIN_NEIGHBOURS_PREFIX_LEN);
+}
+
+// Send the next page during an active pagination. Called from the
+// dispatch handler when received < total. Updates _sent_ms so the
+// timeout clock resets at every successful round-trip.
+static void admin_neighbours_request_next_page() {
+    if (g_admin_login_contact_idx < 0) return;
+    if (!g_admin_neighbours_in_flight) return;  // cancelled mid-flight
+
+    printf("Admin: neighbours request_next_page offset=%u\n",
+           (unsigned)g_admin_neighbours_next_offset);
+
+    g_admin_neighbours_sent_ms = (unsigned long)esp_log_timestamp();
+    meck_request_admin_neighbours(g_admin_login_contact_idx,
+                                   MECK_ADMIN_NEIGHBOURS_PAGE_SIZE,
+                                   g_admin_neighbours_next_offset,
+                                   MECK_ADMIN_NEIGHBOURS_ORDER_BY,
+                                   MECK_ADMIN_NEIGHBOURS_PREFIX_LEN);
+}
+
+// Resolve a 4-byte pubkey prefix against the contact list. Iterates
+// via getContactByIdx so we don't depend on whether
+// BaseChatMesh::lookupContactByPubKey is public or protected — every
+// other path in MeckUI uses getContactByIdx. Linear scan is fine
+// given typical contact-list sizes (low hundreds) and the fact that
+// this only runs at paginated-render time, never on hot paths.
+//
+// Returns true and fills name_out with up to name_sz bytes of the
+// matching contact's name (already stripped of unrenderable
+// codepoints and leading whitespace) if a match is found. Returns
+// false if no contact matches.
+static bool admin_neighbours_resolve_prefix(const uint8_t* prefix,
+                                              char* name_out,
+                                              size_t name_sz) {
+    if (!prefix || !name_out || name_sz == 0) return false;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return false;
+
+    // getNumContacts isn't an established UI accessor here, so use
+    // getContactByIdx with an unbounded loop and bail on first miss.
+    // Caps at 1024 as a sanity ceiling.
+    for (uint32_t i = 0; i < 1024; i++) {
+        ContactInfo ci;
+        if (!mesh->getContactByIdx(i, ci)) break;
+        if (memcmp(ci.id.pub_key, prefix, 4) == 0) {
+            // Strip emoji / non-Latin-1 codepoints into a stack buffer
+            // first, then trim leading whitespace before writing to
+            // name_out. Many node names are prefixed with an emoji
+            // followed by a space (e.g. "🌱 Petersham"); after
+            // stripping we get " Petersham" which needs the leading
+            // space removed.
+            char tmp[64];
+            strip_unrenderable(ci.name, tmp, sizeof(tmp));
+            const char* p = tmp;
+            while (*p == ' ' || *p == '\t') p++;
+            strncpy(name_out, p, name_sz - 1);
+            name_out[name_sz - 1] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
+// Format SNR*4 as a dB string with one fractional digit when the value
+// doesn't divide evenly. Mirrors upstream parseNeighborResponse's
+// approach: snr_x4 / 4 for the integer part, ((|snr_x4| % 4) * 10) / 4
+// for the fractional part. -21 → "-5.2dB", -20 → "-5dB".
+static void admin_neighbours_format_snr(int8_t snr_x4,
+                                          char* out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    if (snr_x4 % 4 == 0) {
+        snprintf(out, out_sz, "%ddB", snr_x4 / 4);
+    } else {
+        int int_part  = snr_x4 / 4;
+        int frac_part = ((abs((int)snr_x4) % 4) * 10) / 4;
+        snprintf(out, out_sz, "%d.%ddB", int_part, frac_part);
+    }
+}
+
+// Format seconds-ago as a compact relative time. Coarse but consistent
+// across magnitudes: secs / mins / hours / days. No upstream
+// formatRelativeTime dependency (the upstream helper isn't in scope
+// here).
+static void admin_neighbours_format_time(uint32_t secs_ago,
+                                           char* out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    if (secs_ago < 60) {
+        snprintf(out, out_sz, "%us ago", (unsigned)secs_ago);
+    } else if (secs_ago < 3600) {
+        snprintf(out, out_sz, "%um ago", (unsigned)(secs_ago / 60));
+    } else if (secs_ago < 86400) {
+        snprintf(out, out_sz, "%uh ago", (unsigned)(secs_ago / 3600));
+    } else {
+        snprintf(out, out_sz, "%ud ago", (unsigned)(secs_ago / 86400));
+    }
+}
+
+// Append one row to the scrollable list. Each row is a single label
+// whose text is the formatted line. Rows wrap if a long name pushes
+// the line past the container width.
+static void admin_neighbours_append_row(const uint8_t* prefix,
+                                         uint32_t secs_ago,
+                                         int8_t snr_x4) {
+    if (!obj_admin_neighbours_scroll) return;
+
+    char snr_str[12];
+    admin_neighbours_format_snr(snr_x4, snr_str, sizeof(snr_str));
+
+    char time_str[24];
+    admin_neighbours_format_time(secs_ago, time_str, sizeof(time_str));
+
+    // Line buffer: name(64) + 2-byte hex prefix(4) + parens + SNR + time
+    // + separators, comfortably under 160.
+    char line[160];
+    char name[64];
+    if (admin_neighbours_resolve_prefix(prefix, name, sizeof(name)) &&
+        name[0] != '\0') {
+        // "Name (3601) -5dB 2m ago"
+        snprintf(line, sizeof(line),
+                 "%s (%02X%02X) %s %s",
+                 name, prefix[0], prefix[1], snr_str, time_str);
+    } else {
+        // "<3601aabb> -5dB 2m ago"
+        snprintf(line, sizeof(line),
+                 "<%02X%02X%02X%02X> %s %s",
+                 prefix[0], prefix[1], prefix[2], prefix[3],
+                 snr_str, time_str);
+    }
+
+    lv_obj_t* lbl = lv_label_create(obj_admin_neighbours_scroll);
+    lv_label_set_text(lbl, line);
+    lv_obj_set_style_text_color(lbl, lv_color_make(220, 220, 220), 0);
+    meck_set_font(lbl, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl, SCREEN_WIDTH - 80);
+}
+
+// Dispatch handler for REQ_TYPE_GET_NEIGHBOURS responses (registered
+// via meck_register_admin_neighbours_callback in meck_ui_init). Runs
+// on the LVGL task. `entries` is a packed byte blob of 9-byte records
+// (4 prefix + 4 secs_ago + 1 snr*4) per the C-API contract in
+// target.h.
+static void admin_neighbours_dispatch(uint16_t total_count,
+                                       uint16_t page_count,
+                                       uint16_t offset,
+                                       const uint8_t* entries,
+                                       int contact_idx) {
+    printf("Admin: neighbours dispatch total=%u page=%u offset=%u contact=%d "
+           "(state: in_flight=%d total=%u received=%u next_offset=%u)\n",
+           (unsigned)total_count, (unsigned)page_count, (unsigned)offset,
+           contact_idx,
+           g_admin_neighbours_in_flight ? 1 : 0,
+           (unsigned)g_admin_neighbours_total,
+           (unsigned)g_admin_neighbours_received,
+           (unsigned)g_admin_neighbours_next_offset);
+
+    // If the user navigated away mid-pagination, on_admin_neighbours_back
+    // cleared the in-flight flag. Late-arriving pages should not append
+    // rows to a hidden list or trigger more requests.
+    if (!g_admin_neighbours_in_flight) {
+        printf("Admin: neighbours dispatch dropped (not in flight)\n");
+        return;
+    }
+
+    // First page (offset==0) seeds the expected total.
+    if (offset == 0) {
+        g_admin_neighbours_total = total_count;
+    }
+
+    // Append entries from this page.
+    if (entries && page_count > 0) {
+        const uint8_t* p = entries;
+        for (uint16_t i = 0; i < page_count; i++) {
+            uint8_t  prefix[4];
+            uint32_t secs_ago;
+            int8_t   snr_x4;
+            memcpy(prefix, p, 4); p += 4;
+            memcpy(&secs_ago, p, 4); p += 4;
+            snr_x4 = (int8_t)*p; p += 1;
+            admin_neighbours_append_row(prefix, secs_ago, snr_x4);
+            g_admin_neighbours_received++;
+        }
+    }
+
+    g_admin_neighbours_next_offset = g_admin_neighbours_received;
+
+    // Decide what to do next.
+    bool more_expected = (g_admin_neighbours_received < g_admin_neighbours_total);
+    bool repeater_stalled = (page_count == 0 && more_expected);
+
+    if (repeater_stalled) {
+        // We asked for more, but the repeater returned an empty page
+        // while still claiming there are more entries. Stop here and
+        // show what we have.
+        printf("Admin: neighbours pagination stalled at %u/%u\n",
+               (unsigned)g_admin_neighbours_received,
+               (unsigned)g_admin_neighbours_total);
+        g_admin_neighbours_in_flight = false;
+        if (lbl_admin_neighbours_status) {
+            char buf[64];
+            snprintf(buf, sizeof(buf),
+                     "Partial: %u of %u neighbours",
+                     (unsigned)g_admin_neighbours_received,
+                     (unsigned)g_admin_neighbours_total);
+            lv_label_set_text(lbl_admin_neighbours_status, buf);
+            lv_obj_set_style_text_color(lbl_admin_neighbours_status,
+                                        lv_palette_main(LV_PALETTE_YELLOW), 0);
+        }
+        if (btn_admin_neighbours_refresh) {
+            lv_obj_clear_state(btn_admin_neighbours_refresh, LV_STATE_DISABLED);
+        }
+        return;
+    }
+
+    if (more_expected) {
+        // Update status line with progress and request the next page.
+        if (lbl_admin_neighbours_status) {
+            char buf[64];
+            snprintf(buf, sizeof(buf),
+                     "Loading %u of %u...",
+                     (unsigned)g_admin_neighbours_received,
+                     (unsigned)g_admin_neighbours_total);
+            lv_label_set_text(lbl_admin_neighbours_status, buf);
+        }
+        admin_neighbours_request_next_page();
+        return;
+    }
+
+    // Done.
+    g_admin_neighbours_in_flight = false;
+    if (lbl_admin_neighbours_status) {
+        char buf[48];
+        if (g_admin_neighbours_total == 0) {
+            snprintf(buf, sizeof(buf), "No neighbours");
+        } else if (g_admin_neighbours_total == 1) {
+            snprintf(buf, sizeof(buf), "1 neighbour");
+        } else {
+            snprintf(buf, sizeof(buf), "%u neighbours",
+                     (unsigned)g_admin_neighbours_total);
+        }
+        lv_label_set_text(lbl_admin_neighbours_status, buf);
+        lv_obj_set_style_text_color(lbl_admin_neighbours_status,
+                                    lv_palette_main(LV_PALETTE_GREEN), 0);
+    }
+    if (btn_admin_neighbours_refresh) {
+        lv_obj_clear_state(btn_admin_neighbours_refresh, LV_STATE_DISABLED);
+    }
+}
+
+static void on_admin_neighbours_refresh_tap(lv_event_t *e) {
+    admin_neighbours_request_first_page();
+}
+
+// Back from Neighbours → Settings menu list. Also clears the
+// in-flight flag so any late-arriving pages get dropped by the
+// dispatcher rather than appended to a hidden list or kicking off
+// more next-page requests. The repeater may still send pages we'd
+// asked for; admin_neighbours_dispatch's early-return on
+// !g_admin_neighbours_in_flight handles that.
+static void on_admin_neighbours_back(lv_event_t *e) {
+    g_admin_neighbours_in_flight = false;
+    if (scr_admin_settings) lv_screen_load(scr_admin_settings);
 }
 
 // Rebuild the rows in obj_admin_settings_list. Called from
@@ -7739,6 +8548,8 @@ static void create_admin_home_screen() {
     create_admin_cmd_screen();
     create_admin_settings_screen();
     create_admin_setting_placeholder_screen();
+    create_admin_fw_info_screen();
+    create_admin_neighbours_screen();
 }
 
 extern "C" void meck_ui_init() {
@@ -7835,6 +8646,7 @@ extern "C" void meck_ui_init() {
     meck_register_admin_login_callback(meck_admin_login_dispatch);
     meck_register_admin_status_callback(meck_admin_status_dispatch);
     meck_register_admin_cli_callback(meck_admin_cli_dispatch);
+    meck_register_admin_neighbours_callback(admin_neighbours_dispatch);
 
     // Hydrate per-contact DM rings from /sdcard/meshcore/dms.bin. Runs
     // after the mesh + contacts are loaded so the pub_key prefix demux
