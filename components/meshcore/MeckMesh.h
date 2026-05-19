@@ -73,6 +73,71 @@ extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
 // it would re-forward its own packets indefinitely.
 // ============================================================================
 
+// ============================================================================
+// Repeater Admin protocol — over-the-mesh request types
+// ----------------------------------------------------------------------------
+// Mirrors the constants in upstream simple_repeater's MyMesh.cpp. These are
+// the request-type bytes sent inside REQ packets via sendRequest() and
+// matched inside the repeater's handleRequest() dispatcher. The repeater's
+// reply prefixes the 4-byte response with the request's sender_timestamp
+// (acting as a correlation tag), followed by a request-specific binary
+// payload — for REQ_TYPE_GET_STATUS that's a 56-byte RepeaterStats struct,
+// for REQ_TYPE_GET_TELEMETRY_DATA it's a CayenneLPP buffer, etc.
+//
+// FIRMWARE_VER_LEVEL is the protocol-capability byte the repeater returns
+// in the login response (byte 12). Used by the UI to gate UI features that
+// require newer repeater firmware (e.g. owner.info command requires >= 2).
+// ============================================================================
+#define REQ_TYPE_GET_STATUS         0x01
+#define REQ_TYPE_KEEP_ALIVE         0x02
+#define REQ_TYPE_GET_TELEMETRY_DATA 0x03
+#define REQ_TYPE_GET_ACCESS_LIST    0x05
+#define REQ_TYPE_GET_NEIGHBOURS     0x06
+#define REQ_TYPE_GET_OWNER_INFO     0x07
+
+// Login response byte 4: RESP_SERVER_LOGIN_OK (0) indicates success;
+// any other value indicates failure. Mirrors upstream simple_repeater.
+#define RESP_SERVER_LOGIN_OK        0
+
+// ============================================================================
+// RepeaterStats — payload format for REQ_TYPE_GET_STATUS responses
+// ----------------------------------------------------------------------------
+// 56-byte struct verbatim from upstream simple_repeater's MyMesh.h. The
+// repeater memcpy's this directly into bytes 4..59 of its reply (after the
+// 4-byte tag prefix), so wire format must match exactly. The packed
+// attribute defends against any padding the ESP32-P4 RISC-V toolchain
+// might insert between the uint16_t / int16_t fields and the following
+// uint32_t fields — without packed, a strict alignment pass could
+// produce a 60-byte layout and the deserialisation would silently shift.
+//
+// sizeof(RepeaterStats) is asserted to be 56 at compile time in the
+// Meck class implementation to catch any drift.
+// ============================================================================
+struct RepeaterStats {
+    uint16_t batt_milli_volts;
+    uint16_t curr_tx_queue_len;
+    int16_t  noise_floor;
+    int16_t  last_rssi;
+    uint32_t n_packets_recv;
+    uint32_t n_packets_sent;
+    uint32_t total_air_time_secs;
+    uint32_t total_up_time_secs;
+    uint32_t n_sent_flood;
+    uint32_t n_sent_direct;
+    uint32_t n_recv_flood;
+    uint32_t n_recv_direct;
+    uint16_t err_events;
+    int16_t  last_snr;   // multiplied by 4 — divide for actual dB
+    uint16_t n_direct_dups;
+    uint16_t n_flood_dups;
+    uint32_t total_rx_air_time_secs;
+    uint32_t n_recv_errors;
+} __attribute__((packed));
+
+static_assert(sizeof(RepeaterStats) == 56,
+              "RepeaterStats wire format must be exactly 56 bytes — "
+              "padding has been introduced somewhere");
+
 class P4MeshTables : public SimpleMeshTables {
 public:
     // Flag toggled around our own sendChannelMessage call. While true,
@@ -158,6 +223,12 @@ class P4RTCClock : public mesh::RTCClock {
     // The parser is constexpr-friendly but kept as a static helper for
     // clarity rather than constexpr-correctness; the resulting epoch is
     // computed once in the constructor and stored.
+    //
+    // Public so other code (e.g. the sync threshold in onAdvertRecv,
+    // and isClockSynced below) can derive expressions like
+    // "build epoch minus 7 days" without duplicating the macro/fallback
+    // logic.
+public:
     static uint32_t compileTimeEpoch() {
 #ifdef MECK_BUILD_EPOCH
         return (uint32_t)MECK_BUILD_EPOCH;
@@ -194,7 +265,6 @@ class P4RTCClock : public mesh::RTCClock {
 #endif
     }
 
-public:
     P4RTCClock() : RTCClock() {
         base_time = compileTimeEpoch();
         accumulator = 0;
@@ -708,6 +778,354 @@ public:
             _pending_dm_recv[_pending_dm_tail].valid = false;
             _pending_dm_tail = (_pending_dm_tail + 1) % P4_PENDING_DM_RING;
             _pending_dm_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    // =====================================================================
+    // Repeater Admin — over-the-mesh login + status + CLI + telemetry
+    // ---------------------------------------------------------------------
+    // Four UI-callable methods, each a thin wrapper around the inherited
+    // BaseChatMesh send primitives (sendLogin / sendCommandData /
+    // sendRequest). They populate the matching pending-tag handle so the
+    // overridden onContactResponse / onCommandDataRecv can route the
+    // matching reply back into a pending-response ring, where the LVGL
+    // task drains it on its periodic tick.
+    //
+    // None of these methods should be called from the LVGL task directly
+    // — they touch the radio path. The UI-side caller (target.h /
+    // meck_app.cpp, piece 2) queues each request and the meck_task
+    // drains the queue between mesh.loop() iterations. Same SPI-race
+    // avoidance as the DM and channel send paths.
+    //
+    // Single-session policy: only one admin session is active at a time.
+    // Calling uiLoginToRepeater for a new contact while a session is
+    // already live tears the prior session down (clears _admin_*
+    // members and the pending tags). This matches the upstream UITask
+    // behaviour and means the UI doesn't have to track multiple
+    // simultaneous sessions.
+    // =====================================================================
+
+    // Initiate a login to a repeater/room-server. Forces flood routing
+    // for the login itself (mirroring upstream MyMesh::uiLoginToRepeater)
+    // because a stale direct path is a common cause of login failure on
+    // a mobile or recently-rebooted repeater. The contact's existing
+    // out_path is preserved across the call.
+    //
+    // For ADV_TYPE_ROOM contacts, resets sync_since so the room server
+    // re-syncs all posts to us. Mirrors upstream behaviour.
+    //
+    // On success the caller's est_timeout_ms is populated with the
+    // mesh-layer estimate for the round trip. Returns false on
+    // contact-lookup failure or MSG_SEND_FAILED.
+    bool uiLoginToRepeater(int contact_idx, const char* password,
+                           uint32_t& est_timeout_ms) {
+        if (!password) return false;
+        if (contact_idx < 0) return false;
+
+        ContactInfo contact;
+        if (!getContactByIdx((uint32_t)contact_idx, contact)) {
+            printf("Meck: uiLogin idx %d not found\n", contact_idx);
+            return false;
+        }
+
+        ContactInfo* recipient = lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: uiLogin pub_key lookup failed for idx %d\n", contact_idx);
+            return false;
+        }
+
+        // Save the existing out_path so we can restore it after the
+        // login attempt regardless of outcome. The flood routing forced
+        // here is only meant to cover the round-trip of this one
+        // request; subsequent admin requests will use whatever path the
+        // contact has at that point (which may itself be refreshed if
+        // the repeater's login response included a new path).
+        uint8_t save_out_path_len = recipient->out_path_len;
+        recipient->out_path_len = OUT_PATH_UNKNOWN;
+
+        // Room-server-specific: reset sync_since so the server pushes
+        // every post we don't already have. Upstream MyMesh.cpp does
+        // the same thing inside uiLoginToRepeater.
+        if (recipient->type == ADV_TYPE_ROOM) {
+            recipient->sync_since = 0;
+        }
+
+        est_timeout_ms = 0;
+        int result = sendLogin(*recipient, password, est_timeout_ms);
+
+        // Restore the original out_path so non-login traffic to this
+        // contact (subsequent admin commands, DMs, etc.) keeps using
+        // whatever path is current. The login machinery internally
+        // updates recipient->out_path on a successful flood round-trip
+        // anyway, so restoring our saved copy is correct here.
+        recipient->out_path_len = save_out_path_len;
+
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: uiLogin to %s FAILED\n", recipient->name);
+            est_timeout_ms = 0;
+            return false;
+        }
+
+        // Tear down any previous session and start a new one. The
+        // login response is matched by contact pub_key prefix (mirrors
+        // upstream's _admin_contact_idx + pending_login matching),
+        // not by tag — sendLogin doesn't return a tag.
+        clearAdminSession();
+        memcpy(&_pending_login_pk, recipient->id.pub_key, 4);
+        _admin_contact_idx = contact_idx;
+
+        printf("Meck: uiLogin to %s sent (flood), timeout=%ums, pending_pk=0x%08X\n",
+               recipient->name, (unsigned)est_timeout_ms, (unsigned)_pending_login_pk);
+        return true;
+    }
+
+    // Request the repeater's status block (REQ_TYPE_GET_STATUS). The
+    // response is a 4-byte tag + 56-byte RepeaterStats. Tag is captured
+    // in _pending_status_tag so onContactResponse can match the reply.
+    //
+    // Allowed for both guest and admin sessions — the repeater itself
+    // permits status reads for guests. Caller is responsible for
+    // gating UI availability if needed.
+    bool uiSendStatusRequest(int contact_idx, uint32_t& est_timeout_ms) {
+        if (contact_idx < 0) return false;
+
+        ContactInfo contact;
+        if (!getContactByIdx((uint32_t)contact_idx, contact)) {
+            printf("Meck: uiStatus idx %d not found\n", contact_idx);
+            return false;
+        }
+
+        ContactInfo* recipient = lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: uiStatus pub_key lookup failed for idx %d\n", contact_idx);
+            return false;
+        }
+
+        uint32_t tag = 0;
+        est_timeout_ms = 0;
+        int result = sendRequest(*recipient, REQ_TYPE_GET_STATUS, tag, est_timeout_ms);
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: uiStatus to %s FAILED\n", recipient->name);
+            est_timeout_ms = 0;
+            return false;
+        }
+
+        _pending_status_tag = tag;
+        printf("Meck: uiStatus to %s (%s) tag=0x%08X timeout=%ums\n",
+               recipient->name,
+               result == MSG_SEND_SENT_FLOOD ? "flood" : "direct",
+               (unsigned)tag, (unsigned)est_timeout_ms);
+        return true;
+    }
+
+    // Send a CLI text command to the repeater (e.g. "neighbors", "get
+    // radio", "set tx 20"). CLI responses come back via
+    // onCommandDataRecv as text — they don't share the tag-matching
+    // mechanism used by binary requests. The UI matches the response
+    // simply by checking _admin_contact_idx against the sender at
+    // dispatch time.
+    bool uiSendCliCommand(int contact_idx, const char* command,
+                          uint32_t& est_timeout_ms) {
+        if (!command) return false;
+        if (contact_idx < 0) return false;
+
+        ContactInfo contact;
+        if (!getContactByIdx((uint32_t)contact_idx, contact)) {
+            printf("Meck: uiCli idx %d not found\n", contact_idx);
+            return false;
+        }
+
+        ContactInfo* recipient = lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: uiCli pub_key lookup failed for idx %d\n", contact_idx);
+            return false;
+        }
+
+        uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+        est_timeout_ms = 0;
+        int result = sendCommandData(*recipient, timestamp, 0, command, est_timeout_ms);
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: uiCli to %s FAILED: %s\n", recipient->name, command);
+            est_timeout_ms = 0;
+            return false;
+        }
+
+        // CLI command tracking — we don't have a tag to match the
+        // response against, so we just associate the most recent
+        // outgoing CLI command's send time. Multiple in-flight CLI
+        // commands aren't supported (and the UI is single-screen so
+        // there shouldn't be any anyway).
+        _last_cli_sent_ms = millis();
+        _last_cli_timeout_ms = est_timeout_ms;
+        _cli_response_pending = true;
+
+        _admin_contact_idx = contact_idx;
+        printf("Meck: uiCli to %s (%s) timeout=%ums: %s\n",
+               recipient->name,
+               result == MSG_SEND_SENT_FLOOD ? "flood" : "direct",
+               (unsigned)est_timeout_ms, command);
+        return true;
+    }
+
+    // Request the repeater's telemetry data (REQ_TYPE_GET_TELEMETRY_DATA).
+    // Response payload is a CayenneLPP buffer — variable-length, parsed
+    // by the UI side. Common fields: voltage (type 0x74), temperature
+    // (type 0x67). Some repeater builds include additional sensor
+    // values; most don't.
+    bool uiSendTelemetryRequest(int contact_idx, uint32_t& est_timeout_ms) {
+        if (contact_idx < 0) return false;
+
+        ContactInfo contact;
+        if (!getContactByIdx((uint32_t)contact_idx, contact)) {
+            printf("Meck: uiTelem idx %d not found\n", contact_idx);
+            return false;
+        }
+
+        ContactInfo* recipient = lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: uiTelem pub_key lookup failed for idx %d\n", contact_idx);
+            return false;
+        }
+
+        uint32_t tag = 0;
+        est_timeout_ms = 0;
+        int result = sendRequest(*recipient, REQ_TYPE_GET_TELEMETRY_DATA, tag, est_timeout_ms);
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: uiTelem to %s FAILED\n", recipient->name);
+            est_timeout_ms = 0;
+            return false;
+        }
+
+        _pending_telemetry_tag = tag;
+        printf("Meck: uiTelem to %s (%s) tag=0x%08X timeout=%ums\n",
+               recipient->name,
+               result == MSG_SEND_SENT_FLOOD ? "flood" : "direct",
+               (unsigned)tag, (unsigned)est_timeout_ms);
+        return true;
+    }
+
+    // Tear down the active admin session. Called when switching to a
+    // different repeater's login, when the user backs out of the admin
+    // screen, or before initiating a fresh login. Clears the
+    // _admin_contact_idx and all pending tags so stale responses (e.g.
+    // a status reply that arrives after the user left the screen)
+    // don't fire UI callbacks against a session that's no longer
+    // active.
+    void clearAdminSession() {
+        _admin_contact_idx = -1;
+        _admin_is_admin = false;
+        _admin_permissions = 0;
+        _admin_fw_ver_level = 0;
+        _admin_clock_at_login = 0;
+        _pending_login_pk = 0;
+        _pending_status_tag = 0;
+        _pending_telemetry_tag = 0;
+        _cli_response_pending = false;
+        _last_cli_sent_ms = 0;
+        _last_cli_timeout_ms = 0;
+    }
+
+    int getAdminContactIdx() const { return _admin_contact_idx; }
+    bool isAdminSessionActive() const { return _admin_contact_idx >= 0; }
+
+    // =====================================================================
+    // Pending admin response rings — drained by the LVGL task
+    // ---------------------------------------------------------------------
+    // Same shape as PendingDMRecv. onContactResponse / onCommandDataRecv
+    // (mesh task context) fill these; the LVGL task drains them on its
+    // periodic tick via the four drain methods below.
+    //
+    // Each ring is small (size 2) because admin responses are
+    // single-shot and the LVGL task drains within a frame or two. The
+    // ring exists mainly to absorb a response that lands between two
+    // LVGL ticks, not to buffer bursts.
+    // =====================================================================
+    static constexpr int P4_PENDING_ADMIN_RING = 2;
+
+    struct PendingAdminLogin {
+        bool     valid;
+        bool     success;
+        uint8_t  is_admin;          // login response byte 6 (1 = admin, 0 = guest)
+        uint8_t  permissions;       // login response byte 7
+        uint8_t  fw_ver_level;      // login response byte 12
+        uint32_t clock_tag;         // bytes 0..3 of login response — "Clock · At Login"
+        int      contact_idx;       // contact this login was for
+    };
+
+    struct PendingAdminStatus {
+        bool          valid;
+        RepeaterStats stats;
+        uint32_t      clock_tag;    // bytes 0..3 of response — used as a refreshed clock readout
+        int           contact_idx;
+    };
+
+    struct PendingAdminCli {
+        bool valid;
+        char text[256];             // CLI replies are usually short; truncate at 256 with NUL
+        int  contact_idx;
+    };
+
+    struct PendingAdminTelemetry {
+        bool     valid;
+        uint8_t  lpp[160];          // CayenneLPP buffer; cap at 160 (telemetry is small)
+        uint8_t  lpp_len;
+        uint32_t clock_tag;
+        int      contact_idx;
+    };
+
+    bool drainPendingAdminLogin(PendingAdminLogin& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_admin_login_count > 0) {
+            out = _pending_admin_login[_pending_admin_login_tail];
+            _pending_admin_login[_pending_admin_login_tail].valid = false;
+            _pending_admin_login_tail = (_pending_admin_login_tail + 1) % P4_PENDING_ADMIN_RING;
+            _pending_admin_login_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    bool drainPendingAdminStatus(PendingAdminStatus& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_admin_status_count > 0) {
+            out = _pending_admin_status[_pending_admin_status_tail];
+            _pending_admin_status[_pending_admin_status_tail].valid = false;
+            _pending_admin_status_tail = (_pending_admin_status_tail + 1) % P4_PENDING_ADMIN_RING;
+            _pending_admin_status_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    bool drainPendingAdminCli(PendingAdminCli& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_admin_cli_count > 0) {
+            out = _pending_admin_cli[_pending_admin_cli_tail];
+            _pending_admin_cli[_pending_admin_cli_tail].valid = false;
+            _pending_admin_cli_tail = (_pending_admin_cli_tail + 1) % P4_PENDING_ADMIN_RING;
+            _pending_admin_cli_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    bool drainPendingAdminTelemetry(PendingAdminTelemetry& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_admin_telemetry_count > 0) {
+            out = _pending_admin_telemetry[_pending_admin_telemetry_tail];
+            _pending_admin_telemetry[_pending_admin_telemetry_tail].valid = false;
+            _pending_admin_telemetry_tail = (_pending_admin_telemetry_tail + 1) % P4_PENDING_ADMIN_RING;
+            _pending_admin_telemetry_count--;
             ok = true;
         }
         xSemaphoreGive(_mutex);
@@ -1449,7 +1867,11 @@ public:
     void setAdvertEnabled(bool en) { _advert_enabled = en; }
     bool isAdvertEnabled() const { return _advert_enabled; }
     const mesh::LocalIdentity& getIdentity() const { return self_id; }
-    bool isClockSynced() const { return _rtc_ref.getCurrentTime() > 1750000000; }
+    bool isClockSynced() const {
+        // Mirrors the SYNC_THRESHOLD computation in onAdvertRecv:
+        // build epoch minus 7 days. Self-maintaining.
+        return _rtc_ref.getCurrentTime() > (P4RTCClock::compileTimeEpoch() - 7U * 86400U);
+    }
 
 protected:
     // ---- BaseChatMesh pure virtual overrides ----
@@ -1606,8 +2028,86 @@ protected:
         xSemaphoreGive(_mutex);
     }
 
+    // ---- onCommandDataRecv ----
+    //
+    // Fires when a TXT_TYPE_CLI_DATA packet arrives from a contact —
+    // i.e. a CLI response from a repeater we sent a command to via
+    // uiSendCliCommand. We don't have a tag to correlate the response
+    // against (CLI replies don't carry one), so we use the simpler
+    // model: if the sender is the active admin contact and we have a
+    // CLI command pending, the text is a CLI response.
+    //
+    // The contact comparison is by pub_key prefix rather than struct
+    // identity — the `from` reference here points into the live
+    // contact table, but so does the result of getContactByIdx in
+    // uiSendCliCommand. Comparing the first 4 bytes of pub_key is
+    // cheap and matches upstream's matching style.
+    //
+    // Runs on the mesh task, so the LVGL-facing state push is via the
+    // _pending_admin_cli ring (drained by the LVGL task).
     void onCommandDataRecv(const ContactInfo& from, mesh::Packet* pkt,
                             uint32_t sender_timestamp, const char* text) override {
+        // Entry log — fires for every CLI text response we receive, before
+        // any admin-session filtering. Lets us tell "packet arrived but
+        // we're not admin'd" apart from "packet never arrived".
+        printf("Meck: onCommandDataRecv from %s ts=%u text=\"%.40s%s\" "
+               "(admin_idx=%d cli_pending=%d)\n",
+               from.name, (unsigned)sender_timestamp,
+               text ? text : "",
+               (text && strlen(text) > 40) ? "..." : "",
+               _admin_contact_idx, _cli_response_pending ? 1 : 0);
+
+        if (_admin_contact_idx < 0) {
+            // No active admin session — discard. Could be a stale reply
+            // from a session we tore down, or a CLI reply from a
+            // contact other than the one we're admin'd on.
+            return;
+        }
+        if (!_cli_response_pending) {
+            // No outstanding CLI request — also discard.
+            return;
+        }
+
+        // Sender match: compare the first 4 bytes of pub_key against
+        // the live admin contact's pub_key. If the admin contact has
+        // changed under us (shouldn't happen given single-session
+        // policy, but defensive) the comparison fails and we drop.
+        ContactInfo admin_contact;
+        if (!getContactByIdx((uint32_t)_admin_contact_idx, admin_contact)) {
+            return;
+        }
+        if (memcmp(from.id.pub_key, admin_contact.id.pub_key, 4) != 0) {
+            return;
+        }
+
+        // Clear the pending flag — this consumes the in-flight CLI
+        // request. Subsequent CLI replies from this contact without
+        // an intervening uiSendCliCommand will be dropped, which is
+        // correct (we have no way to know what they're a reply to).
+        _cli_response_pending = false;
+
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        PendingAdminCli& slot = _pending_admin_cli[_pending_admin_cli_head];
+        slot.valid = true;
+        slot.contact_idx = _admin_contact_idx;
+        strncpy(slot.text, text ? text : "", sizeof(slot.text) - 1);
+        slot.text[sizeof(slot.text) - 1] = '\0';
+        _pending_admin_cli_head = (_pending_admin_cli_head + 1) % P4_PENDING_ADMIN_RING;
+        if (_pending_admin_cli_count < P4_PENDING_ADMIN_RING) {
+            _pending_admin_cli_count++;
+        } else {
+            // Ring full — head wrapped past tail. Drop oldest unread by
+            // advancing tail. Two-deep ring shouldn't ever hit this
+            // unless the LVGL task is fully stalled, but the policy is
+            // consistent with the DM ring.
+            _pending_admin_cli_tail = (_pending_admin_cli_tail + 1) % P4_PENDING_ADMIN_RING;
+            printf("Meck: pending admin CLI ring full, dropping oldest\n");
+        }
+        xSemaphoreGive(_mutex);
+
+        printf("Meck: CLI response from %s: %.80s%s\n",
+               from.name, text ? text : "",
+               text && strlen(text) > 80 ? "..." : "");
     }
 
     void onSignedMessageRecv(const ContactInfo& from, mesh::Packet* pkt,
@@ -1625,15 +2125,214 @@ protected:
         return 10000 + ((pkt_airtime_millis * 4 + 1000) * (hops + 1));
     }
 
-    void onSendTimeout() override {}
+    void onSendTimeout() override {
+        printf("Meck: onSendTimeout\n");
+    }
 
     uint8_t onContactRequest(const ContactInfo& contact, uint32_t sender_timestamp,
                               const uint8_t* data, uint8_t len, uint8_t* reply) override {
+        uint8_t req_type = (data && len > 0) ? data[0] : 0xFF;
+        printf("Meck: onContactRequest from %s req_type=0x%02X len=%u (not handled)\n",
+               contact.name, (unsigned)req_type, (unsigned)len);
         return 0;
     }
 
+    // ---- onContactResponse ----
+    //
+    // Fires when a binary response packet arrives from a contact. The
+    // first 4 bytes are the response tag (the request's sender_timestamp
+    // echoed back by the responder); the remaining bytes are the
+    // request-type-specific payload.
+    //
+    // We dispatch three response types here:
+    //   - Login response: matched by contact pub_key prefix against
+    //     _pending_login_pk. sendLogin doesn't return a tag we can use
+    //     for matching, so this is the only correlation we have.
+    //   - Status response: matched by tag against _pending_status_tag.
+    //     Payload is RepeaterStats (56 bytes) at offset 4.
+    //   - Telemetry response: matched by tag against _pending_telemetry_tag.
+    //     Payload is a CayenneLPP buffer at offset 4, variable length.
+    //
+    // Anything that doesn't match falls through silently.
     void onContactResponse(const ContactInfo& contact,
-                            const uint8_t* data, uint8_t len) override {}
+                            const uint8_t* data, uint8_t len) override {
+        // Diagnostic entry log — fires for every response we get, with the
+        // first 4 bytes of the contact pub_key, the response length, and
+        // whichever pending handles are currently armed. Lets us tell
+        // "callback never fired" apart from "callback fired but
+        // mismatched" in the field.
+        uint32_t cpk = 0;
+        if (len >= 0) memcpy(&cpk, contact.id.pub_key, 4);
+        printf("Meck: onContactResponse from %s contact_pk=0x%08X len=%u "
+               "pending(login=0x%08X status=0x%08X telem=0x%08X)\n",
+               contact.name, (unsigned)cpk, (unsigned)len,
+               (unsigned)_pending_login_pk,
+               (unsigned)_pending_status_tag,
+               (unsigned)_pending_telemetry_tag);
+
+        if (!data || len < 4) return;
+
+        uint32_t tag;
+        memcpy(&tag, data, 4);
+
+        // ---- Login response ----
+        // Matched by pub_key prefix. The 4-byte tag here is the
+        // repeater's getCurrentTimeUnique() at the moment it processed
+        // our login — the "Clock · At Login" value.
+        if (_pending_login_pk != 0 &&
+            memcmp(&_pending_login_pk, contact.id.pub_key, 4) == 0) {
+
+            // Clear pending FIRST so any subsequent response (e.g. a
+            // late retransmit) can't double-dispatch.
+            _pending_login_pk = 0;
+
+            bool success = false;
+            uint8_t is_admin = 0;
+            uint8_t permissions = 0;
+            uint8_t fw_ver_level = 0;
+
+            if (len >= 5 && data[4] == RESP_SERVER_LOGIN_OK) {
+                success = true;
+                // byte 5 is legacy keep-alive (ignored)
+                if (len >= 7) is_admin = data[6];
+                if (len >= 8) permissions = data[7];
+                // bytes 8..11 are a random uniqueness blob (ignored)
+                if (len >= 13) fw_ver_level = data[12];
+            }
+
+            // Cache session state in the Meck instance so
+            // get-style queries (isAdminSessionActive,
+            // getAdminContactIdx) report correct values immediately,
+            // not after the LVGL drain completes. The pending ring
+            // is just for the UI callback dispatch.
+            if (success) {
+                _admin_is_admin = (is_admin != 0);
+                _admin_permissions = permissions;
+                _admin_fw_ver_level = fw_ver_level;
+                _admin_clock_at_login = tag;
+            } else {
+                // Login failed — tear down the session that
+                // uiLoginToRepeater started. The contact_idx stays
+                // valid in the pending entry so the UI can still
+                // attribute the failure to the correct contact.
+                _admin_contact_idx = -1;
+            }
+
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            PendingAdminLogin& slot = _pending_admin_login[_pending_admin_login_head];
+            slot.valid = true;
+            slot.success = success;
+            slot.is_admin = is_admin;
+            slot.permissions = permissions;
+            slot.fw_ver_level = fw_ver_level;
+            slot.clock_tag = tag;
+            // Contact index — the post-success _admin_contact_idx, or
+            // the pre-clear value for failures. Look it up by pub_key
+            // since we cleared on failure above.
+            int cidx = -1;
+            for (int i = 0; i < getNumContacts(); i++) {
+                ContactInfo ci;
+                if (getContactByIdx((uint32_t)i, ci) &&
+                    memcmp(ci.id.pub_key, contact.id.pub_key, PUB_KEY_SIZE) == 0) {
+                    cidx = i;
+                    break;
+                }
+            }
+            slot.contact_idx = cidx;
+            _pending_admin_login_head = (_pending_admin_login_head + 1) % P4_PENDING_ADMIN_RING;
+            if (_pending_admin_login_count < P4_PENDING_ADMIN_RING) {
+                _pending_admin_login_count++;
+            } else {
+                _pending_admin_login_tail = (_pending_admin_login_tail + 1) % P4_PENDING_ADMIN_RING;
+            }
+            xSemaphoreGive(_mutex);
+
+            printf("Meck: login response from %s: success=%d is_admin=%u perms=0x%02X fw_ver=%u\n",
+                   contact.name, success ? 1 : 0,
+                   (unsigned)is_admin, (unsigned)permissions, (unsigned)fw_ver_level);
+            return;
+        }
+
+        // ---- Status response ----
+        // Matched by tag. Payload is RepeaterStats (56 bytes) at
+        // data[4..59]. Reject anything that doesn't match the
+        // expected size — the wire format is fixed, so a mismatch
+        // means either firmware skew on the repeater side or a
+        // mid-flight protocol change we haven't caught up to.
+        if (_pending_status_tag != 0 && tag == _pending_status_tag) {
+            _pending_status_tag = 0;
+
+            if (len < 4 + sizeof(RepeaterStats)) {
+                printf("Meck: status response too short (got %u, need %u)\n",
+                       (unsigned)len, (unsigned)(4 + sizeof(RepeaterStats)));
+                return;
+            }
+
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            PendingAdminStatus& slot = _pending_admin_status[_pending_admin_status_head];
+            slot.valid = true;
+            memcpy(&slot.stats, &data[4], sizeof(RepeaterStats));
+            slot.clock_tag = tag;
+            slot.contact_idx = _admin_contact_idx;
+            _pending_admin_status_head = (_pending_admin_status_head + 1) % P4_PENDING_ADMIN_RING;
+            if (_pending_admin_status_count < P4_PENDING_ADMIN_RING) {
+                _pending_admin_status_count++;
+            } else {
+                _pending_admin_status_tail = (_pending_admin_status_tail + 1) % P4_PENDING_ADMIN_RING;
+            }
+            xSemaphoreGive(_mutex);
+
+            printf("Meck: status response from %s: batt=%u uptime=%u qlen=%u\n",
+                   contact.name,
+                   (unsigned)slot.stats.batt_milli_volts,
+                   (unsigned)slot.stats.total_up_time_secs,
+                   (unsigned)slot.stats.curr_tx_queue_len);
+            return;
+        }
+
+        // ---- Telemetry response ----
+        // Matched by tag. Payload is CayenneLPP at data[4..len-1].
+        // The buffer length isn't fixed — repeaters with few sensors
+        // return short payloads, ones with many sensors longer. Cap
+        // at our PendingAdminTelemetry.lpp buffer size.
+        if (_pending_telemetry_tag != 0 && tag == _pending_telemetry_tag) {
+            _pending_telemetry_tag = 0;
+
+            uint8_t lpp_len = (len > 4) ? (uint8_t)(len - 4) : 0;
+            if (lpp_len > sizeof(PendingAdminTelemetry::lpp)) {
+                printf("Meck: telemetry response truncated (%u → %u)\n",
+                       (unsigned)lpp_len, (unsigned)sizeof(PendingAdminTelemetry::lpp));
+                lpp_len = sizeof(PendingAdminTelemetry::lpp);
+            }
+
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            PendingAdminTelemetry& slot = _pending_admin_telemetry[_pending_admin_telemetry_head];
+            slot.valid = true;
+            slot.clock_tag = tag;
+            slot.contact_idx = _admin_contact_idx;
+            slot.lpp_len = lpp_len;
+            if (lpp_len > 0) {
+                memcpy(slot.lpp, &data[4], lpp_len);
+            }
+            _pending_admin_telemetry_head = (_pending_admin_telemetry_head + 1) % P4_PENDING_ADMIN_RING;
+            if (_pending_admin_telemetry_count < P4_PENDING_ADMIN_RING) {
+                _pending_admin_telemetry_count++;
+            } else {
+                _pending_admin_telemetry_tail = (_pending_admin_telemetry_tail + 1) % P4_PENDING_ADMIN_RING;
+            }
+            xSemaphoreGive(_mutex);
+
+            printf("Meck: telemetry response from %s: %u LPP bytes\n",
+                   contact.name, (unsigned)lpp_len);
+            return;
+        }
+
+        // Unmatched response. Could be a late reply from a torn-down
+        // session, or a response type we don't handle yet (ACL list,
+        // neighbours binary, owner info). Log and ignore.
+        printf("Meck: unmatched contact response from %s, tag=0x%08X, len=%u\n",
+               contact.name, (unsigned)tag, (unsigned)len);
+    }
 
     // ---- Advert handling (update recent heard + clock sync) ----
 
@@ -1651,7 +2350,12 @@ protected:
         //   forward drift; bump again well before 2031).
         const uint32_t MIN_VALID = 1730419200U;
         const uint32_t MAX_VALID = 1956528000U;
-        const uint32_t SYNC_THRESHOLD = 1750000000U;  // matches isClockSynced()
+        // Threshold: build epoch minus 7 days. Builds flashed within
+        // a week of compilation are "already synced" and ignore peer
+        // adverts. Older builds (e.g. a binary flashed weeks after
+        // it was compiled) fall below threshold and accept the first
+        // valid advert. Self-maintaining — no manual bumps needed.
+        const uint32_t SYNC_THRESHOLD = P4RTCClock::compileTimeEpoch() - 7U * 86400U;
         uint32_t our_time = _rtc_ref.getCurrentTime();
         bool synced = our_time >= SYNC_THRESHOLD;
         if (timestamp < MIN_VALID || timestamp >= MAX_VALID) {
@@ -1809,12 +2513,23 @@ protected:
         }
     }
 
-    void onContactPathUpdated(const ContactInfo& contact) override {}
-    bool onContactPathRecv(ContactInfo& from, uint8_t* in_path, uint8_t in_path_len,
-                            uint8_t* out_path, uint8_t out_path_len,
-                            uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override {
-        return true;
+    void onContactPathUpdated(const ContactInfo& contact) override {
+        printf("Meck: onContactPathUpdated for %s, new out_path_len=%u\n",
+               contact.name,
+               contact.out_path_len == OUT_PATH_UNKNOWN
+                   ? 0 : (contact.out_path_len & 0x3F));
     }
+
+    // NOTE: do NOT override onContactPathRecv here. The base class
+    // implementation in BaseChatMesh updates the contact's out_path,
+    // fires onContactPathUpdated, processes any piggybacked ACK, and
+    // dispatches any piggybacked PAYLOAD_TYPE_RESPONSE via
+    // onContactResponse. An earlier no-op override silently swallowed
+    // every path-update packet — DMs and channel messages were
+    // unaffected (different code paths), but flood-then-direct path
+    // optimisation and ALL anon-request responses (login, region list,
+    // owner info, clock query) were broken because the response is
+    // delivered as an "extra" payload inside the path-return packet.
 
     // PAYLOAD_TYPE_CONTROL (0x0B) handler. The base Mesh class delivers
     // control packets here for application-level processing. We use it
@@ -2208,6 +2923,62 @@ private:
     };
     ExpectedAckEntry _expected_ack_table[EXPECTED_ACK_TABLE_SIZE] = {};
     int _next_ack_idx = 0;
+
+    // ---- Repeater Admin session state ----
+    // Lifetime: from a successful uiLoginToRepeater through to the back
+    // button or a fresh login on a different contact. Cleared by
+    // clearAdminSession() on session end or login failure.
+    int      _admin_contact_idx     = -1;
+    bool     _admin_is_admin        = false;
+    uint8_t  _admin_permissions     = 0;
+    uint8_t  _admin_fw_ver_level    = 0;
+    uint32_t _admin_clock_at_login  = 0;
+
+    // ---- Pending correlation handles for in-flight admin requests ----
+    // _pending_login_pk holds the first 4 bytes of the contact pub_key
+    // we're waiting on a login response from (mirrors upstream MyMesh's
+    // matching approach since sendLogin doesn't return a tag).
+    // _pending_status_tag and _pending_telemetry_tag hold the tag
+    // returned by sendRequest. All three are cleared on dispatch in
+    // onContactResponse so a late retransmit can't double-dispatch.
+    uint32_t _pending_login_pk      = 0;
+    uint32_t _pending_status_tag    = 0;
+    uint32_t _pending_telemetry_tag = 0;
+
+    // ---- CLI command bookkeeping ----
+    // CLI replies don't carry a tag we can match against. Instead we
+    // gate onCommandDataRecv on _cli_response_pending, which is set
+    // true by uiSendCliCommand and cleared on first matching reply.
+    // _last_cli_sent_ms / _last_cli_timeout_ms are for the UI to drive
+    // the "Sending..." countdown — Meck itself doesn't use them.
+    bool          _cli_response_pending = false;
+    unsigned long _last_cli_sent_ms     = 0;
+    uint32_t      _last_cli_timeout_ms  = 0;
+
+    // ---- Pending admin response rings ----
+    // Same producer (mesh task) / consumer (LVGL task) model as the DM
+    // ring. Sized 2: admin responses are single-shot and the LVGL drain
+    // runs every 500ms, so the ring just absorbs a response that lands
+    // between two LVGL ticks rather than buffering bursts.
+    PendingAdminLogin     _pending_admin_login    [P4_PENDING_ADMIN_RING] = {};
+    int _pending_admin_login_head  = 0;
+    int _pending_admin_login_tail  = 0;
+    int _pending_admin_login_count = 0;
+
+    PendingAdminStatus    _pending_admin_status   [P4_PENDING_ADMIN_RING] = {};
+    int _pending_admin_status_head  = 0;
+    int _pending_admin_status_tail  = 0;
+    int _pending_admin_status_count = 0;
+
+    PendingAdminCli       _pending_admin_cli      [P4_PENDING_ADMIN_RING] = {};
+    int _pending_admin_cli_head  = 0;
+    int _pending_admin_cli_tail  = 0;
+    int _pending_admin_cli_count = 0;
+
+    PendingAdminTelemetry _pending_admin_telemetry[P4_PENDING_ADMIN_RING] = {};
+    int _pending_admin_telemetry_head  = 0;
+    int _pending_admin_telemetry_tail  = 0;
+    int _pending_admin_telemetry_count = 0;
 
     // ---- Self-echo dedup ----
     // When we send a channel message, the dispatcher hands the packet to the

@@ -90,6 +90,114 @@ typedef void (*meck_dm_sent_cb_t)(int contact_idx,
 extern "C" void meck_register_dm_sent_callback(meck_dm_sent_cb_t cb);
 extern "C" void meck_drain_pending_dm_sends();
 
+// ---- Repeater Admin bridge (LVGL <-> mesh task) ----
+//
+// Same threading model as the DM bridges: LVGL queues requests via
+// meck_request_admin_*; meck_task drains via meck_apply_pending_admin_*
+// at the top of its loop and invokes the appropriate Meck::ui*
+// method. Responses arrive on meck_task (inside onContactResponse /
+// onCommandDataRecv) which fills per-type pending rings inside Meck;
+// the LVGL task drains those rings via meck_drain_pending_admin_responses
+// and dispatches each entry to the matching registered callback.
+//
+// Single-session policy is enforced by Meck (calling uiLoginToRepeater
+// for a new contact tears down the prior session). The bridge here is
+// fire-and-forget: the LVGL task doesn't need to track which contact a
+// queued request was for — each response carries the contact_idx.
+//
+// Four request types: login (needs password), status (parameter-free),
+// CLI (needs command string), telemetry (parameter-free). One-deep
+// queue each. If the user double-taps the second tap overwrites the
+// first pending entry (consistent with the DM send queue).
+//
+// Send-result callback: fires after every admin-send-attempt on the
+// LVGL task with the request type, success flag, and est_timeout_ms.
+// Used by the UI for two things:
+//   - immediate failure UI when the send itself failed (contact
+//     unreachable, MSG_SEND_FAILED) so the user doesn't sit in
+//     "Sending..." forever
+//   - sizing a countdown timer for the response-pending state
+//
+// Response callbacks: fire once a matching response lands. The data
+// pointed to is only valid for the duration of the callback — the UI
+// must copy anything it wants to retain.
+
+typedef enum {
+    MECK_ADMIN_REQ_LOGIN     = 0,
+    MECK_ADMIN_REQ_STATUS    = 1,
+    MECK_ADMIN_REQ_CLI       = 2,
+    MECK_ADMIN_REQ_TELEMETRY = 3,
+} meck_admin_req_type_t;
+
+// Send-result callback: fires after every admin send attempt.
+typedef void (*meck_admin_send_result_cb_t)(meck_admin_req_type_t type,
+                                            bool success,
+                                            uint32_t est_timeout_ms);
+
+// Response callbacks — one per response type.
+//
+// Login: success indicates whether the repeater accepted the password.
+// is_admin distinguishes admin (1) from guest (0). permissions is the
+// raw permissions byte. fw_ver_level gates UI features that require
+// newer repeater firmware (e.g. owner.info on >= 2). clock_tag is the
+// repeater's clock at login time (use as "Clock · At Login"
+// display). contact_idx identifies which repeater the result belongs
+// to.
+typedef void (*meck_admin_login_cb_t)(bool success, uint8_t is_admin,
+                                       uint8_t permissions,
+                                       uint8_t fw_ver_level,
+                                       uint32_t clock_tag,
+                                       int contact_idx);
+
+// Status: full 56-byte RepeaterStats copy. clock_tag is the response
+// timestamp (refreshed clock readout on each request).
+struct RepeaterStats;  // forward-decl, defined in MeckMesh.h
+typedef void (*meck_admin_status_cb_t)(const RepeaterStats* stats,
+                                        uint32_t clock_tag,
+                                        int contact_idx);
+
+// CLI: plain text response from a `neighbors` / `ver` / `get foo` /
+// etc. command. Up to 255 chars (truncated, NUL-terminated).
+typedef void (*meck_admin_cli_cb_t)(const char* response,
+                                     int contact_idx);
+
+// Telemetry: CayenneLPP buffer. Variable length, capped at 160 bytes.
+typedef void (*meck_admin_telemetry_cb_t)(const uint8_t* lpp,
+                                           uint8_t lpp_len,
+                                           uint32_t clock_tag,
+                                           int contact_idx);
+
+// Send-side: LVGL queues, meck_task drains. Each request type has its
+// own pending slot; calling the same request twice in a row before the
+// drain runs overwrites the first request.
+extern "C" void meck_request_admin_login(int contact_idx, const char* password);
+extern "C" void meck_request_admin_status(int contact_idx);
+extern "C" void meck_request_admin_cli(int contact_idx, const char* command);
+extern "C" void meck_request_admin_telemetry(int contact_idx);
+
+extern "C" void meck_apply_pending_admin_login();
+extern "C" void meck_apply_pending_admin_status();
+extern "C" void meck_apply_pending_admin_cli();
+extern "C" void meck_apply_pending_admin_telemetry();
+
+// Tear down the active admin session from the LVGL side. Mirrors
+// Meck::clearAdminSession but callable from UI without needing to
+// touch the mesh instance directly. Safe to call any time.
+extern "C" void meck_admin_clear_session();
+
+// Callback registration. The UI registers each callback once at boot
+// and routes internally by request type.
+extern "C" void meck_register_admin_send_result_callback(meck_admin_send_result_cb_t cb);
+extern "C" void meck_register_admin_login_callback(meck_admin_login_cb_t cb);
+extern "C" void meck_register_admin_status_callback(meck_admin_status_cb_t cb);
+extern "C" void meck_register_admin_cli_callback(meck_admin_cli_cb_t cb);
+extern "C" void meck_register_admin_telemetry_callback(meck_admin_telemetry_cb_t cb);
+
+// Drain all four response rings and invoke registered callbacks. Called
+// from ui_update_timer_cb on the LVGL task. Cheap when nothing is
+// queued (early return on empty ring).
+extern "C" void meck_drain_pending_admin_responses();
+
 // Deferred SD-save for channel messages. ring-write call sites enqueue;
 // meck_task drains via meck_apply_pending_save() and writes to SD without
 // blocking LVGL or message receive paths. ring_idx is the slot's position

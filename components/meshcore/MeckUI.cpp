@@ -71,7 +71,16 @@ extern "C" {
     extern const lv_font_t meck_montserrat_22;
     extern const lv_font_t meck_montserrat_24;
     extern const lv_font_t meck_montserrat_28;
+    extern const lv_font_t meck_montserrat_30;
+    extern const lv_font_t meck_montserrat_32;
 }
+
+// LVGL doesn't ship a LV_SYMBOL_LOCK in its standard set, but the
+// FontAwesome lock glyph (U+F023, "fa-lock") is included in the
+// meck_montserrat_* fonts. UTF-8 encoding of U+F023 = EF 80 A3.
+#ifndef LV_SYMBOL_LOCK
+#define LV_SYMBOL_LOCK "\xEF\x80\xA3"
+#endif
 
 // ----------------------------------------------------------------------------
 // Font scale registry — live re-style of every text object on toggle
@@ -99,22 +108,23 @@ static const lv_font_t* meck_font(const lv_font_t* base) {
     P4NodePrefs* prefs = mesh->getNodePrefs();
     if (!prefs || prefs->font_scale == 0) return base;
     if (prefs->font_scale == 1) {
-        // Larger: bump to next size; 28 is the ceiling.
+        // Larger: bump to next size. 32 is the ceiling.
         if (base == &meck_montserrat_14) return &meck_montserrat_16;
         if (base == &meck_montserrat_16) return &meck_montserrat_18;
         if (base == &meck_montserrat_18) return &meck_montserrat_22;
         if (base == &meck_montserrat_22) return &meck_montserrat_24;
         if (base == &meck_montserrat_24) return &meck_montserrat_28;
+        if (base == &meck_montserrat_28) return &meck_montserrat_30;
         return base;
     }
-    // font_scale == 2 (Extra Large): double-jump where possible. No font
-    // larger than 28 exists, so 24 and 28 share the same ceiling as the
-    // Larger step.
+    // font_scale == 2 (Extra Large): double-jump everywhere. New sizes
+    // 30 and 32 mean even 24 and 28 get a real second step now.
     if (base == &meck_montserrat_14) return &meck_montserrat_18;
     if (base == &meck_montserrat_16) return &meck_montserrat_22;
     if (base == &meck_montserrat_18) return &meck_montserrat_24;
     if (base == &meck_montserrat_22) return &meck_montserrat_28;
-    if (base == &meck_montserrat_24) return &meck_montserrat_28;
+    if (base == &meck_montserrat_24) return &meck_montserrat_30;
+    if (base == &meck_montserrat_28) return &meck_montserrat_32;
     return base;
 }
 
@@ -375,6 +385,12 @@ static lv_obj_t *scr_radio_picker  = NULL;
 static lv_obj_t *scr_channel_picker  = NULL;
 static lv_obj_t *obj_ch_picker_scroll = NULL;
 static lv_obj_t *lbl_picker_unread[8] = {};
+// Cached handle for the Direct Messages pseudo-row's unread badge. Set
+// when refresh_channel_picker constructs the row; read by
+// ui_update_timer_cb to update the badge text without a full picker
+// rebuild. Null when the picker hasn't been built yet (or has been
+// cleaned and not yet refreshed).
+static lv_obj_t *lbl_picker_dm_unread = NULL;
 static lv_obj_t *obj_ch_add_panel  = NULL;
 static lv_obj_t *ta_ch_add         = NULL;
 static lv_obj_t *kb_ch_add         = NULL;
@@ -515,6 +531,164 @@ static lv_obj_t *obj_discover_scroll  = NULL;
 static lv_obj_t *lbl_discover_status  = NULL;
 
 // ============================================================================
+// Repeater Admin state — piece 3
+// ----------------------------------------------------------------------------
+// Login screen state plus a temporary "logged-in" placeholder screen that
+// piece 4 will replace with the three-tab admin home (Status / Command
+// Line / Settings). For now the placeholder just confirms the session
+// landed and shows is_admin / clock_at_login so the user can verify the
+// protocol layer is working end-to-end.
+//
+// Password handling: characters are typed into the textarea normally,
+// each one displays as the typed char for ~1500ms before resolving to a
+// privacy dot. A separate raw-text buffer holds the actual password
+// (the textarea content gets masked on display). g_admin_pwd_reveal
+// is the "show full plaintext" eye-toggle override.
+//
+// Password cache: 8-slot LRU keyed by contact_idx. RAM-only — cleared on
+// reboot, no persistence to SD. Populated only after a successful login.
+// ============================================================================
+static lv_obj_t *scr_admin_login            = NULL;
+static lv_obj_t *scr_admin_home             = NULL;  // 3-tab logged-in home (piece 4)
+static lv_obj_t *btn_contact_admin          = NULL;  // visible only for ADV_TYPE_REPEATER/ROOM
+static lv_obj_t *btn_contact_dm             = NULL;  // visible only for ADV_TYPE_CHAT
+static lv_obj_t *lbl_admin_login_title      = NULL;
+static lv_obj_t *lbl_admin_login_subtitle   = NULL;
+static lv_obj_t *lbl_admin_login_status     = NULL;
+static lv_obj_t *ta_admin_password          = NULL;
+static lv_obj_t *kb_admin_password          = NULL;
+static lv_obj_t *btn_admin_password_eye     = NULL;
+static lv_obj_t *cb_admin_remember          = NULL;
+static lv_obj_t *btn_admin_login_submit     = NULL;
+static lv_obj_t *lbl_admin_login_submit     = NULL;
+
+// ---- Admin home (menu list) + subpage widgets ----
+// scr_admin_home is the menu list (banner + 4 row buttons). Each
+// row taps into a dedicated subpage screen; no banner on subpages.
+static lv_obj_t *obj_admin_banner           = NULL;
+static lv_obj_t *lbl_admin_banner           = NULL;
+// Subpage screens.
+static lv_obj_t *scr_admin_status           = NULL;
+static lv_obj_t *scr_admin_cmd              = NULL;
+static lv_obj_t *scr_admin_settings         = NULL;
+static lv_obj_t *scr_admin_send_advert      = NULL;
+// Status subpage widgets.
+static lv_obj_t *btn_admin_status_refresh   = NULL;
+static lv_obj_t *lbl_admin_status_refresh   = NULL;
+static lv_obj_t *lbl_admin_status_updated   = NULL;  // "Updated Ns ago" / "Refreshing..."
+static lv_obj_t *lbl_admin_status_body      = NULL;  // big multi-line label
+// Send Advert subpage widgets.
+static lv_obj_t *btn_admin_send_advert      = NULL;
+static lv_obj_t *lbl_admin_send_advert_status = NULL;
+static lv_obj_t *lbl_admin_send_advert_response = NULL;
+// Cmd Line subpage widgets (piece 6).
+//   obj_admin_cmd_scroll is the scrollback container; each entry is a
+//   pair of labels (the command typed, then the repeater's reply).
+//   ta_admin_cmd_input + kb_admin_cmd_input are the input controls.
+//   The keyboard slides up on textarea focus and the textarea + send
+//   button lift above it; same pattern as compose on the DM screen.
+#define ADMIN_CMD_MAX_LEN     100
+#define ADMIN_CMD_MAX_ENTRIES 50
+static lv_obj_t *obj_admin_cmd_scroll       = NULL;
+static lv_obj_t *ta_admin_cmd_input         = NULL;
+static lv_obj_t *kb_admin_cmd_input         = NULL;
+static lv_obj_t *btn_admin_cmd_send         = NULL;
+// Settings subpage widgets (piece 5).
+//   obj_admin_settings_list is the scroll container holding the rows.
+//   Rows are torn down and rebuilt on every screen entry so the visible
+//   set reflects the current session role (admin vs guest).
+static lv_obj_t *obj_admin_settings_list    = NULL;
+// Shared placeholder subpage for individual settings, reused for all
+// 10 settings until each is built out. The title and body labels are
+// reset on every entry to reflect which row was tapped.
+static lv_obj_t *scr_admin_setting_placeholder  = NULL;
+static lv_obj_t *lbl_admin_setting_placeholder_title = NULL;
+static lv_obj_t *lbl_admin_setting_placeholder_body  = NULL;
+
+// Cached most-recent status response, populated by the dispatch
+// callback. Re-rendered on subpage entry and on refresh.
+// last_update == 0 means "never received yet" (show placeholder text).
+static RepeaterStats  g_admin_last_status        = {};
+static unsigned long  g_admin_status_last_update = 0;
+static uint32_t       g_admin_status_clock_tag   = 0;
+static bool           g_admin_status_in_flight   = false;
+
+// In-flight flags for the two CLI-using subpages. The CLI dispatcher
+// (meck_admin_cli_dispatch) routes the reply to whichever one is set.
+// Only one can be in flight at a time — the textarea/buttons on each
+// subpage disable themselves while their flag is set.
+static bool           g_admin_send_advert_in_flight = false;
+static bool           g_admin_cmd_in_flight         = false;
+
+// Which contact the login screen is currently targeting (set on entry
+// from on_contact_admin_tap, used by the submit handler and callbacks).
+static int g_admin_login_contact_idx = -1;
+
+// Cached routing-mode badge string for the Login button. Set on screen
+// entry from the contact's current out_path_len.
+static bool g_admin_login_routing_direct = false;
+
+// Raw password buffer. The textarea displays either dots or a mix of
+// the most-recent-char-as-cleartext + dots (see reveal-then-dot
+// rendering). This buffer is the source of truth used by the submit
+// handler.
+#define MECK_ADMIN_PASSWORD_MAX 63
+static char g_admin_pwd_raw[MECK_ADMIN_PASSWORD_MAX + 1] = {};
+static int  g_admin_pwd_len = 0;
+
+// Reveal-then-dot bookkeeping. _last_char_ms is millis() of the most
+// recent keypress; the 500ms timer re-renders the masked display so
+// the last character resolves to a dot ~1500ms after it was typed.
+static unsigned long g_admin_pwd_last_char_ms = 0;
+static const uint32_t MECK_ADMIN_PWD_REVEAL_MS = 1500;
+
+// Set true while admin_render_password_masked is calling
+// lv_textarea_set_text. Any LV_EVENT_VALUE_CHANGED fired during that
+// programmatic update is OUR write, not a user keypress, and must NOT
+// re-enter the change handler — that path infinite-recurses and blows
+// the stack (the symptom that crashed the first admin-tap).
+static bool g_admin_pwd_render_in_progress = false;
+
+// Eye-toggle for full reveal. When true, the textarea displays the
+// raw password verbatim and bypasses the dot masking. Resets to false
+// on screen entry.
+static bool g_admin_pwd_reveal_all = false;
+
+// Login state machine. PASSWORD_ENTRY is the initial state; LOGGING_IN
+// is set on submit and cleared by either the response or a timeout.
+typedef enum {
+    ADMIN_STATE_IDLE = 0,
+    ADMIN_STATE_PASSWORD_ENTRY,
+    ADMIN_STATE_LOGGING_IN,
+    ADMIN_STATE_LOGGED_IN,
+} AdminUiState;
+static AdminUiState g_admin_ui_state = ADMIN_STATE_IDLE;
+
+// Submit-side bookkeeping for the LOGGING_IN countdown / timeout.
+static unsigned long g_admin_login_sent_ms      = 0;
+static uint32_t      g_admin_login_timeout_ms   = 0;
+
+// Captured session state from the most recent successful login.
+// Display values for the placeholder logged-in screen; piece 4's
+// admin home will read these too.
+static bool     g_admin_session_is_admin    = false;
+static uint8_t  g_admin_session_permissions = 0;
+static uint8_t  g_admin_session_fw_ver      = 0;
+static uint32_t g_admin_session_clock_tag   = 0;
+
+// Password cache — RAM-only, 8-slot LRU keyed by contact_idx.
+// Populated only after a successful login. On re-entry to the admin
+// login screen for a known-good contact, the cached password
+// pre-fills the textarea but the user must still tap Log In.
+#define MECK_ADMIN_PWD_CACHE_SIZE 8
+struct AdminPwdCacheEntry {
+    int  contact_idx;
+    char password[MECK_ADMIN_PASSWORD_MAX + 1];
+};
+static AdminPwdCacheEntry g_admin_pwd_cache[MECK_ADMIN_PWD_CACHE_SIZE] = {};
+static int g_admin_pwd_cache_count = 0;
+
+// ============================================================================
 // Forward declarations
 // ============================================================================
 
@@ -561,6 +735,47 @@ static void on_contact_delete(lv_event_t *e);
 static void on_contact_send_dm_tap(lv_event_t *e);
 static void on_contacts_screen_gesture(lv_event_t *e);
 static void on_filter_chip_tap(lv_event_t *e);
+
+// Repeater Admin — pieces 3 + 4
+static void create_admin_login_screen();
+static void create_admin_home_screen();
+static void on_contact_admin_tap(lv_event_t *e);
+static void on_admin_login_back(lv_event_t *e);
+static void on_admin_login_submit(lv_event_t *e);
+static void on_admin_password_textarea_change(lv_event_t *e);
+static void on_admin_password_focused(lv_event_t *e);
+static void on_admin_password_defocused(lv_event_t *e);
+static void on_admin_password_eye_tap(lv_event_t *e);
+static void on_admin_home_back(lv_event_t *e);
+static void on_admin_subpage_back(lv_event_t *e);
+static void on_admin_menu_status_tap(lv_event_t *e);
+static void on_admin_menu_cmd_tap(lv_event_t *e);
+static void on_admin_menu_settings_tap(lv_event_t *e);
+static void on_admin_menu_send_advert_tap(lv_event_t *e);
+static void on_admin_status_refresh_tap(lv_event_t *e);
+static void on_admin_send_advert_tap(lv_event_t *e);
+static void admin_render_password_masked();
+static void admin_login_show_status(const char* text, lv_color_t color);
+static void admin_pwd_cache_put(int contact_idx, const char* password);
+static const char* admin_pwd_cache_get(int contact_idx);
+static void admin_login_screen_enter(int contact_idx);
+static void admin_home_update_banner(bool is_admin, const char* contact_name);
+static void admin_render_status_body();
+static void create_admin_status_screen();
+static void create_admin_cmd_screen();
+static void create_admin_settings_screen();
+static void create_admin_send_advert_screen();
+static void create_admin_setting_placeholder_screen();
+static void admin_settings_rebuild_list();
+static void on_admin_setting_row_tap(lv_event_t *e);
+static void on_admin_setting_back(lv_event_t *e);
+static void on_admin_cmd_send_tap(lv_event_t *e);
+static void on_admin_cmd_input_focused(lv_event_t *e);
+static void on_admin_cmd_input_defocused(lv_event_t *e);
+static void on_admin_cmd_kb_event(lv_event_t *e);
+static void admin_cmd_add_entry(const char* cmd, const char* response,
+                                 bool is_error);
+static void admin_cmd_send_current();
 
 // Settings → Contacts sub-screen
 static void create_settings_contacts_screen();
@@ -1345,9 +1560,11 @@ static void meck_style_keyboard(lv_obj_t *kb) {
 // time the user opens any of them, without needing to navigate to the
 // compose flow first.
 static void meck_kb_restyle_all() {
-    if (kb_compose)  meck_style_keyboard(kb_compose);
-    if (kb_settings) meck_style_keyboard(kb_settings);
-    if (kb_ch_add)   meck_style_keyboard(kb_ch_add);
+    if (kb_compose)        meck_style_keyboard(kb_compose);
+    if (kb_settings)       meck_style_keyboard(kb_settings);
+    if (kb_ch_add)         meck_style_keyboard(kb_ch_add);
+    if (kb_admin_password) meck_style_keyboard(kb_admin_password);
+    if (kb_admin_cmd_input) meck_style_keyboard(kb_admin_cmd_input);
 }
 
 // ============================================================================
@@ -2496,6 +2713,21 @@ static void on_contact_tap(lv_event_t *e) {
         (unsigned long)ci.last_advert_timestamp);
 
     lv_label_set_text(lbl_contact_detail_body, buf);
+
+    // DM vs Admin button visibility — chat contacts get DM, repeaters
+    // and room servers get Admin. Both buttons share the same slot
+    // (right-aligned, 90 px below the top edge) so only one is visible
+    // at a time. ADV_TYPE_CHAT=1, ADV_TYPE_REPEATER=2, ADV_TYPE_ROOM=3.
+    bool show_admin = (ci.type == 2 || ci.type == 3);
+    if (btn_contact_dm) {
+        if (show_admin) lv_obj_add_flag(btn_contact_dm, LV_OBJ_FLAG_HIDDEN);
+        else            lv_obj_clear_flag(btn_contact_dm, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (btn_contact_admin) {
+        if (show_admin) lv_obj_clear_flag(btn_contact_admin, LV_OBJ_FLAG_HIDDEN);
+        else            lv_obj_add_flag(btn_contact_admin, LV_OBJ_FLAG_HIDDEN);
+    }
+
     if (scr_contact_detail) lv_screen_load(scr_contact_detail);
 }
 
@@ -3896,6 +4128,7 @@ static void refresh_channel_picker() {
 
     lv_obj_clean(obj_ch_picker_scroll);
     memset(lbl_picker_unread, 0, sizeof(lbl_picker_unread));
+    lbl_picker_dm_unread = NULL;
 
     int y = 5;
 
@@ -3929,6 +4162,9 @@ static void refresh_channel_picker() {
         lv_obj_align(lbl_dm_name, LV_ALIGN_LEFT_MID, 10, 0);
 
         // Total unread badge, mirroring the per-channel unread display.
+        // Label handle is cached into lbl_picker_dm_unread so the
+        // ui_update_timer_cb can refresh the text live as new DMs
+        // arrive without needing to rebuild the whole picker.
         int dm_unread = dm_total_unread();
         lv_obj_t *lbl_dm_unread = lv_label_create(btn_dm);
         if (dm_unread > 0) {
@@ -3939,6 +4175,7 @@ static void refresh_channel_picker() {
         lv_obj_set_style_text_color(lbl_dm_unread, lv_color_make(100, 255, 100), 0);
         meck_set_font(lbl_dm_unread, &meck_montserrat_18, 0);
         lv_obj_align(lbl_dm_unread, LV_ALIGN_RIGHT_MID, -10, 0);
+        lbl_picker_dm_unread = lbl_dm_unread;
 
         y += 85;
     }
@@ -4965,18 +5202,40 @@ static void create_contact_detail_screen() {
     // scr_messages itself. Positioned directly below the Fav button (not
     // left of Delete) so it clears the TFT camera punch-hole, which sits
     // along the top edge of the screen.
-    lv_obj_t *btn_dm = lv_button_create(scr_contact_detail);
-    lv_obj_set_size(btn_dm, 100, 70);
-    lv_obj_align(btn_dm, LV_ALIGN_TOP_RIGHT, -10, 90);
-    lv_obj_set_style_bg_color(btn_dm,
+    //
+    // DM and Admin share the same slot — DM shows for chat contacts,
+    // Admin shows for repeaters and room servers. The on_contact_tap
+    // handler flips visibility based on ci.type each time a contact is
+    // selected.
+    btn_contact_dm = lv_button_create(scr_contact_detail);
+    lv_obj_set_size(btn_contact_dm, 100, 70);
+    lv_obj_align(btn_contact_dm, LV_ALIGN_TOP_RIGHT, -10, 90);
+    lv_obj_set_style_bg_color(btn_contact_dm,
         lv_palette_darken(LV_PALETTE_CYAN, 2), 0);
-    lv_obj_set_style_radius(btn_dm, 8, 0);
-    lv_obj_t *dm_lbl = lv_label_create(btn_dm);
+    lv_obj_set_style_radius(btn_contact_dm, 8, 0);
+    lv_obj_t *dm_lbl = lv_label_create(btn_contact_dm);
     lv_label_set_text(dm_lbl, LV_SYMBOL_ENVELOPE " DM");
     lv_obj_set_style_text_color(dm_lbl, lv_color_white(), 0);
     meck_set_font(dm_lbl, &meck_montserrat_16, 0);
     lv_obj_center(dm_lbl);
-    lv_obj_add_event_cb(btn_dm, on_contact_send_dm_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn_contact_dm, on_contact_send_dm_tap, LV_EVENT_CLICKED, NULL);
+
+    // Admin — opens scr_admin_login for this contact. Shown only when
+    // ci.type is ADV_TYPE_REPEATER (2) or ADV_TYPE_ROOM (3). Hidden
+    // by default; on_contact_tap reveals it when appropriate.
+    btn_contact_admin = lv_button_create(scr_contact_detail);
+    lv_obj_set_size(btn_contact_admin, 100, 70);
+    lv_obj_align(btn_contact_admin, LV_ALIGN_TOP_RIGHT, -10, 90);
+    lv_obj_set_style_bg_color(btn_contact_admin,
+        lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_contact_admin, 8, 0);
+    lv_obj_t *adm_lbl = lv_label_create(btn_contact_admin);
+    lv_label_set_text(adm_lbl, LV_SYMBOL_SETTINGS " Admin");
+    lv_obj_set_style_text_color(adm_lbl, lv_color_white(), 0);
+    meck_set_font(adm_lbl, &meck_montserrat_16, 0);
+    lv_obj_center(adm_lbl);
+    lv_obj_add_event_cb(btn_contact_admin, on_contact_admin_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_contact_admin, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *scroll = lv_obj_create(scr_contact_detail);
     lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 180);
@@ -5102,6 +5361,39 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // expected_ack after a successful transmit, the UI thread picks it
     // up here and writes it onto the matching outgoing bubble.
     meck_drain_pending_dm_sends();
+    // Admin response drain — piece 2 bridge. Cheap when nothing is
+    // queued (early-return on empty rings).
+    meck_drain_pending_admin_responses();
+
+    // Admin login screen: reveal-then-dot re-render. Causes the
+    // most-recently-typed character to resolve to • once the reveal
+    // window has elapsed. Cheap — admin_render_password_masked
+    // short-circuits when the masked string hasn't changed.
+    if (scr_admin_login && lv_screen_active() == scr_admin_login) {
+        admin_render_password_masked();
+    }
+
+    // Admin login timeout: if we're in LOGGING_IN state and the
+    // response hasn't arrived within g_admin_login_timeout_ms, fall
+    // back to PASSWORD_ENTRY with a timeout message.
+    if (g_admin_ui_state == ADMIN_STATE_LOGGING_IN) {
+        unsigned long now = (unsigned long)esp_log_timestamp();
+        if (g_admin_login_timeout_ms > 0 &&
+            (now - g_admin_login_sent_ms) > g_admin_login_timeout_ms) {
+            printf("Admin: login timed out after %ums\n",
+                   (unsigned)g_admin_login_timeout_ms);
+            g_admin_ui_state = ADMIN_STATE_PASSWORD_ENTRY;
+            admin_login_show_status("Timed out. No response from repeater.",
+                                    lv_palette_main(LV_PALETTE_RED));
+            if (btn_admin_login_submit) {
+                lv_obj_clear_state(btn_admin_login_submit, LV_STATE_DISABLED);
+            }
+            // Tear down the meck-side pending state too, so a late
+            // response doesn't unexpectedly transition us back to
+            // LOGGED_IN. (clearAdminSession clears _pending_login_pk.)
+            meck_admin_clear_session();
+        }
+    }
 
     // Home title: show the user's chosen node name. Refreshed every tick so
     // a rename in Settings shows up without needing to rebuild the screen.
@@ -5339,6 +5631,21 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             } else {
                 lv_label_set_text(lbl_picker_unread[i], "");
             }
+        }
+    }
+
+    // Direct Messages pseudo-row badge — mirrors the per-channel pattern
+    // above but reads from the in-RAM DM rings rather than mesh unread
+    // counts. Gated on the label handle existing so it short-circuits
+    // before the picker has been built for the first time.
+    if (lbl_picker_dm_unread) {
+        int dm_unread = dm_total_unread();
+        if (dm_unread > 0) {
+            char tmp[16];
+            snprintf(tmp, sizeof(tmp), "%d new", dm_unread);
+            lv_label_set_text(lbl_picker_dm_unread, tmp);
+        } else {
+            lv_label_set_text(lbl_picker_dm_unread, "");
         }
     }
 
@@ -5776,6 +6083,1664 @@ static void meck_dm_sent_dispatch(int contact_idx,
            contact_idx);
 }
 
+// ============================================================================
+// Repeater Admin — piece 3
+// ----------------------------------------------------------------------------
+// Login screen, RAM-only password cache, reveal-then-dot textarea
+// rendering, plus a temporary "logged in" placeholder screen so the
+// login path can be exercised end-to-end before piece 4 builds the
+// real admin home.
+// ============================================================================
+
+// ---- Password cache (RAM-only, 8-slot LRU) ----
+
+static const char* admin_pwd_cache_get(int contact_idx) {
+    for (int i = 0; i < g_admin_pwd_cache_count; i++) {
+        if (g_admin_pwd_cache[i].contact_idx == contact_idx) {
+            return g_admin_pwd_cache[i].password;
+        }
+    }
+    return nullptr;
+}
+
+static void admin_pwd_cache_put(int contact_idx, const char* password) {
+    if (!password) return;
+    // Existing entry? Update in place.
+    for (int i = 0; i < g_admin_pwd_cache_count; i++) {
+        if (g_admin_pwd_cache[i].contact_idx == contact_idx) {
+            strncpy(g_admin_pwd_cache[i].password, password,
+                    sizeof(g_admin_pwd_cache[i].password) - 1);
+            g_admin_pwd_cache[i].password[sizeof(g_admin_pwd_cache[i].password) - 1] = '\0';
+            return;
+        }
+    }
+    // Fresh slot or LRU evict?
+    if (g_admin_pwd_cache_count < MECK_ADMIN_PWD_CACHE_SIZE) {
+        int slot = g_admin_pwd_cache_count++;
+        g_admin_pwd_cache[slot].contact_idx = contact_idx;
+        strncpy(g_admin_pwd_cache[slot].password, password,
+                sizeof(g_admin_pwd_cache[slot].password) - 1);
+        g_admin_pwd_cache[slot].password[sizeof(g_admin_pwd_cache[slot].password) - 1] = '\0';
+    } else {
+        // Shift everything down, evicting slot 0 (oldest). New entry
+        // lands in the last slot.
+        for (int i = 0; i < MECK_ADMIN_PWD_CACHE_SIZE - 1; i++) {
+            g_admin_pwd_cache[i] = g_admin_pwd_cache[i + 1];
+        }
+        int slot = MECK_ADMIN_PWD_CACHE_SIZE - 1;
+        g_admin_pwd_cache[slot].contact_idx = contact_idx;
+        strncpy(g_admin_pwd_cache[slot].password, password,
+                sizeof(g_admin_pwd_cache[slot].password) - 1);
+        g_admin_pwd_cache[slot].password[sizeof(g_admin_pwd_cache[slot].password) - 1] = '\0';
+    }
+}
+
+// ---- Password textarea rendering ----
+//
+// The textarea content always shows the masked view: cleartext for the
+// most-recently-typed char within MECK_ADMIN_PWD_REVEAL_MS, dots
+// elsewhere. The "raw" buffer (g_admin_pwd_raw) holds the actual
+// password. If the eye-toggle is on, the full plaintext is shown.
+static void admin_render_password_masked() {
+    if (!ta_admin_password) return;
+
+    // Build the display string. Falls into two paths:
+    //   - empty buffer → display = ""
+    //   - non-empty buffer → display = dots (with optional last-char
+    //     reveal), or full plaintext if Show/Hide is toggled on.
+    //
+    // Each • (U+2022) is 3 bytes in UTF-8 (0xE2 0x80 0xA2). The bullet
+    // glyph is included in the Meck Montserrat fonts as of v0.3.5.
+    char display[MECK_ADMIN_PASSWORD_MAX * 4 + 1] = {};
+
+    if (g_admin_pwd_len == 0) {
+        // Empty buffer — display stays "".
+    } else if (g_admin_pwd_reveal_all) {
+        // Full reveal — show the raw buffer verbatim.
+        strncpy(display, g_admin_pwd_raw, sizeof(display) - 1);
+    } else {
+        unsigned long now = (unsigned long)esp_log_timestamp();
+        bool show_last_char =
+            (g_admin_pwd_last_char_ms != 0 &&
+             (now - g_admin_pwd_last_char_ms) < MECK_ADMIN_PWD_REVEAL_MS);
+
+        int n_dots = show_last_char ? (g_admin_pwd_len - 1) : g_admin_pwd_len;
+        if (n_dots < 0) n_dots = 0;
+        int pos = 0;
+        for (int i = 0; i < n_dots && pos < (int)sizeof(display) - 4; i++) {
+            display[pos++] = (char)0xE2;
+            display[pos++] = (char)0x80;
+            display[pos++] = (char)0xA2;
+        }
+        if (show_last_char && g_admin_pwd_len > 0 &&
+            pos < (int)sizeof(display) - 1) {
+            display[pos++] = g_admin_pwd_raw[g_admin_pwd_len - 1];
+        }
+        display[pos] = '\0';
+    }
+
+    // Compare against current textarea content so we only call set_text
+    // when something actually changed. Avoids LVGL re-rendering on every
+    // 500ms tick when nothing is happening AND prevents infinite
+    // recursion through our own LV_EVENT_VALUE_CHANGED handler — which
+    // would otherwise blow the stack on screen entry.
+    //
+    // Belt and braces: the g_admin_pwd_render_in_progress flag also
+    // gates the change handler so even if a future LVGL version starts
+    // firing VALUE_CHANGED on no-op set_text calls, we still don't
+    // re-enter.
+    const char* current = lv_textarea_get_text(ta_admin_password);
+    if (!current || strcmp(current, display) != 0) {
+        g_admin_pwd_render_in_progress = true;
+        lv_textarea_set_text(ta_admin_password, display);
+        g_admin_pwd_render_in_progress = false;
+    }
+}
+
+// ---- Status line helper ----
+static void admin_login_show_status(const char* text, lv_color_t color) {
+    if (!lbl_admin_login_status) return;
+    lv_label_set_text(lbl_admin_login_status, text ? text : "");
+    lv_obj_set_style_text_color(lbl_admin_login_status, color, 0);
+}
+
+// ---- Event handlers ----
+
+static void on_admin_password_textarea_change(lv_event_t *e) {
+    // Programmatic update from admin_render_password_masked — not a
+    // user keypress. Skip; otherwise we infinite-recurse and blow the
+    // stack.
+    if (g_admin_pwd_render_in_progress) return;
+
+    // Read the current textarea content. We're going to derive the raw
+    // password from the diff between the previous masked display and
+    // the new content, then re-mask.
+    //
+    // Simpler approach: trust LVGL's keyboard to send LV_EVENT_VALUE_CHANGED
+    // on each keypress, but inspect the change relative to our raw
+    // buffer. LVGL textareas don't expose per-key events directly; the
+    // VALUE_CHANGED carries the full updated text. We have to figure
+    // out what changed.
+    //
+    // For a password field this is tractable: the only legitimate
+    // operations are append-one-char and delete-one-char (no paste,
+    // no cursor movement). Compare length to detect which.
+    if (!ta_admin_password) return;
+    const char* now_text = lv_textarea_get_text(ta_admin_password);
+    if (!now_text) return;
+
+    // Count visible "characters" in the new text. With dot-masking,
+    // each • is 3 bytes; with reveal-all, every byte is a char. We
+    // also have the in-flight "most recent char as cleartext" case
+    // where the textarea has (n-1) dots plus one cleartext char.
+    //
+    // The pragmatic approach: count UTF-8 codepoints in the new text.
+    int new_chars = 0;
+    for (const char* p = now_text; *p; ) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x80) p += 1;
+        else if ((c & 0xE0) == 0xC0) p += 2;
+        else if ((c & 0xF0) == 0xE0) p += 3;
+        else if ((c & 0xF8) == 0xF0) p += 4;
+        else p += 1;
+        new_chars++;
+    }
+
+    if (new_chars > g_admin_pwd_len) {
+        // Appended characters. Find the last codepoint in the new text
+        // and treat it as the just-typed character. Multi-char appends
+        // (paste) we can't recover the chars for — just append the
+        // last visible char and call it good. The expected operation
+        // is single-keypress so this is the normal path.
+        const char* last_cp = now_text;
+        for (const char* p = now_text; *p; ) {
+            last_cp = p;
+            unsigned char c = (unsigned char)*p;
+            if (c < 0x80) p += 1;
+            else if ((c & 0xE0) == 0xC0) p += 2;
+            else if ((c & 0xF0) == 0xE0) p += 3;
+            else if ((c & 0xF8) == 0xF0) p += 4;
+            else p += 1;
+        }
+        // Only accept ASCII chars into the raw buffer — anything else
+        // is a dot (•) from our own masking that we shouldn't store.
+        // If a non-ASCII char arrives (UTF-8 from the keyboard), we
+        // log and skip; the password protocol on the repeater side is
+        // ASCII-only anyway.
+        unsigned char last_byte = (unsigned char)*last_cp;
+        if (last_byte < 0x80 && last_byte >= 0x20 && last_byte < 0x7F) {
+            if (g_admin_pwd_len < MECK_ADMIN_PASSWORD_MAX) {
+                g_admin_pwd_raw[g_admin_pwd_len++] = (char)last_byte;
+                g_admin_pwd_raw[g_admin_pwd_len] = '\0';
+                g_admin_pwd_last_char_ms = (unsigned long)esp_log_timestamp();
+            }
+        } else if (last_byte == 0xE2) {
+            // The • we just rendered — ignore, this isn't a real
+            // keypress. Re-render to undo any state change.
+        }
+    } else if (new_chars < g_admin_pwd_len) {
+        // Characters deleted. Truncate the raw buffer to match the
+        // new length. (We assume deletes happen one-at-a-time via
+        // backspace.)
+        int delta = g_admin_pwd_len - new_chars;
+        g_admin_pwd_len -= delta;
+        if (g_admin_pwd_len < 0) g_admin_pwd_len = 0;
+        g_admin_pwd_raw[g_admin_pwd_len] = '\0';
+    }
+    // Always re-render after a change so the dot mask reasserts.
+    admin_render_password_masked();
+}
+
+static void on_admin_password_eye_tap(lv_event_t *e) {
+    g_admin_pwd_reveal_all = !g_admin_pwd_reveal_all;
+    if (btn_admin_password_eye) {
+        lv_obj_t* eye_lbl = lv_obj_get_child(btn_admin_password_eye, 0);
+        if (eye_lbl) {
+            lv_label_set_text(eye_lbl,
+                g_admin_pwd_reveal_all ? LV_SYMBOL_EYE_CLOSE : LV_SYMBOL_EYE_OPEN);
+        }
+    }
+    admin_render_password_masked();
+}
+
+static void on_admin_password_focused(lv_event_t *e) {
+    if (kb_admin_password && ta_admin_password) {
+        lv_keyboard_set_textarea(kb_admin_password, ta_admin_password);
+        lv_obj_clear_flag(kb_admin_password, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void on_admin_password_defocused(lv_event_t *e) {
+    if (kb_admin_password) {
+        lv_obj_add_flag(kb_admin_password, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void on_admin_login_submit(lv_event_t *e) {
+    if (g_admin_login_contact_idx < 0) return;
+    if (g_admin_ui_state == ADMIN_STATE_LOGGING_IN) return;  // debounce
+
+    // Allow empty password — the repeater accepts blank for the
+    // "already in ACL" case, and the user might be a known admin who
+    // wants to test the path. The repeater itself will silently fail
+    // if the password doesn't match.
+    printf("Admin: submitting login to contact[%d], pwd_len=%d\n",
+           g_admin_login_contact_idx, g_admin_pwd_len);
+
+    g_admin_ui_state = ADMIN_STATE_LOGGING_IN;
+    g_admin_login_sent_ms = (unsigned long)esp_log_timestamp();
+    g_admin_login_timeout_ms = 15000;  // initial guess; updated by send-result
+    admin_login_show_status("Logging in...",
+                            lv_palette_main(LV_PALETTE_YELLOW));
+
+    // Disable the Login button while in-flight so a double-tap can't
+    // queue a second send.
+    if (btn_admin_login_submit) {
+        lv_obj_add_state(btn_admin_login_submit, LV_STATE_DISABLED);
+    }
+
+    meck_request_admin_login(g_admin_login_contact_idx, g_admin_pwd_raw);
+}
+
+static void on_admin_login_back(lv_event_t *e) {
+    printf("Admin: back from login screen\n");
+    // Tear down any active session and any pending queues. Wipes the
+    // password buffer in meck_app's queue too.
+    meck_admin_clear_session();
+    g_admin_ui_state = ADMIN_STATE_IDLE;
+    // Wipe the raw password buffer on the UI side too.
+    memset(g_admin_pwd_raw, 0, sizeof(g_admin_pwd_raw));
+    g_admin_pwd_len = 0;
+    g_admin_pwd_reveal_all = false;
+    g_admin_pwd_last_char_ms = 0;
+    if (scr_contact_detail) lv_screen_load(scr_contact_detail);
+}
+
+static void on_admin_home_back(lv_event_t *e) {
+    printf("Admin: back from home screen\n");
+    meck_admin_clear_session();
+    g_admin_ui_state = ADMIN_STATE_IDLE;
+    memset(g_admin_pwd_raw, 0, sizeof(g_admin_pwd_raw));
+    g_admin_pwd_len = 0;
+    // Reset cached status state so a re-login starts fresh.
+    g_admin_status_last_update = 0;
+    g_admin_status_in_flight   = false;
+    g_admin_send_advert_in_flight = false;
+    g_admin_cmd_in_flight         = false;
+    if (scr_contact_detail) lv_screen_load(scr_contact_detail);
+}
+
+// Generic subpage back handler — returns to the admin home menu list.
+// Used by every admin subpage's back button.
+static void on_admin_subpage_back(lv_event_t *e) {
+    if (scr_admin_home) lv_screen_load(scr_admin_home);
+}
+
+// Menu-row taps → navigate to subpage screens.
+static void on_admin_menu_status_tap(lv_event_t *e) {
+    printf("Admin menu: Status tapped\n");
+    if (scr_admin_status) lv_screen_load(scr_admin_status);
+}
+
+static void on_admin_menu_cmd_tap(lv_event_t *e) {
+    printf("Admin menu: Cmd Line tapped\n");
+    if (scr_admin_cmd) lv_screen_load(scr_admin_cmd);
+}
+
+static void on_admin_menu_settings_tap(lv_event_t *e) {
+    printf("Admin menu: Settings tapped\n");
+    // Rebuild the list every entry so the visible set reflects the
+    // current session role (admin sees all rows, guest sees only the
+    // non-admin-gated ones).
+    admin_settings_rebuild_list();
+    if (scr_admin_settings) lv_screen_load(scr_admin_settings);
+}
+
+static void on_admin_menu_send_advert_tap(lv_event_t *e) {
+    printf("Admin menu: Send Advert tapped\n");
+    // Reset the in-flight state and response label so each visit
+    // starts clean.
+    g_admin_send_advert_in_flight = false;
+    if (lbl_admin_send_advert_status) {
+        lv_label_set_text(lbl_admin_send_advert_status,
+                          "Tap the button to send an advert command.");
+        lv_obj_set_style_text_color(lbl_admin_send_advert_status,
+                                    lv_color_make(180, 180, 180), 0);
+    }
+    if (lbl_admin_send_advert_response) {
+        lv_label_set_text(lbl_admin_send_advert_response, "");
+    }
+    if (btn_admin_send_advert) {
+        lv_obj_clear_state(btn_admin_send_advert, LV_STATE_DISABLED);
+    }
+    if (scr_admin_send_advert) lv_screen_load(scr_admin_send_advert);
+}
+
+// Update the persistent banner colour + text based on session role.
+// Green for admin, yellow for guest. Called from login dispatch.
+static void admin_home_update_banner(bool is_admin, const char* contact_name) {
+    if (!obj_admin_banner || !lbl_admin_banner) return;
+    lv_obj_set_style_bg_color(obj_admin_banner,
+        is_admin ? lv_palette_darken(LV_PALETTE_GREEN, 2)
+                 : lv_palette_darken(LV_PALETTE_YELLOW, 3),
+        0);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "Logged in as %s: %s",
+             is_admin ? "Admin" : "Guest",
+             contact_name && contact_name[0] ? contact_name : "?");
+    lv_label_set_text(lbl_admin_banner, buf);
+    // Yellow background reads poorly with white text — switch to black.
+    lv_obj_set_style_text_color(lbl_admin_banner,
+        is_admin ? lv_color_white() : lv_color_black(), 0);
+}
+
+// Render the most-recent RepeaterStats into lbl_admin_status_body.
+// Called once on status response arrival and again every tab entry
+// (so the "Ns ago" footer line stays roughly current).
+static void admin_render_status_body() {
+    if (!lbl_admin_status_body) return;
+
+    if (g_admin_status_last_update == 0) {
+        lv_label_set_text(lbl_admin_status_body,
+                          "No status data yet.\n\n"
+                          "Tap the Refresh button to request the\n"
+                          "repeater's current statistics.");
+        return;
+    }
+
+    const RepeaterStats& s = g_admin_last_status;
+
+    // Format helpers — keep these local to avoid file-scope clutter.
+    auto fmt_uptime = [](uint32_t secs, char* out, size_t out_sz) {
+        uint32_t days  = secs / 86400U;
+        uint32_t hours = (secs % 86400U) / 3600U;
+        uint32_t mins  = (secs % 3600U) / 60U;
+        uint32_t s2    = secs % 60U;
+        if (days > 0) {
+            snprintf(out, out_sz, "%ud %uh %um", (unsigned)days,
+                     (unsigned)hours, (unsigned)mins);
+        } else if (hours > 0) {
+            snprintf(out, out_sz, "%uh %um %us", (unsigned)hours,
+                     (unsigned)mins, (unsigned)s2);
+        } else {
+            snprintf(out, out_sz, "%um %us", (unsigned)mins, (unsigned)s2);
+        }
+    };
+
+    auto fmt_airtime = [](uint32_t secs, char* out, size_t out_sz) {
+        // Airtime is usually small; show in m:ss form past 60s, plain
+        // seconds otherwise.
+        if (secs < 60) {
+            snprintf(out, out_sz, "%u s", (unsigned)secs);
+        } else {
+            uint32_t mins = secs / 60U;
+            uint32_t s2   = secs % 60U;
+            snprintf(out, out_sz, "%um %us", (unsigned)mins, (unsigned)s2);
+        }
+    };
+
+    auto fmt_clock = [](uint32_t epoch, char* out, size_t out_sz) {
+        time_t t = (time_t)epoch;
+        struct tm tm_buf;
+        gmtime_r(&t, &tm_buf);
+        strftime(out, out_sz, "%d %b %Y %H:%M UTC", &tm_buf);
+    };
+
+    char uptime_buf[32];
+    fmt_uptime(s.total_up_time_secs, uptime_buf, sizeof(uptime_buf));
+
+    char tx_air_buf[32], rx_air_buf[32];
+    fmt_airtime(s.total_air_time_secs,    tx_air_buf, sizeof(tx_air_buf));
+    fmt_airtime(s.total_rx_air_time_secs, rx_air_buf, sizeof(rx_air_buf));
+
+    char clock_buf[48] = "?";
+    if (g_admin_status_clock_tag != 0) {
+        fmt_clock(g_admin_status_clock_tag, clock_buf, sizeof(clock_buf));
+    } else if (g_admin_session_clock_tag != 0) {
+        fmt_clock(g_admin_session_clock_tag, clock_buf, sizeof(clock_buf));
+    }
+
+    float battery_v = s.batt_milli_volts / 1000.0f;
+    float snr_db    = s.last_snr / 4.0f;
+
+    char body[1024];
+    snprintf(body, sizeof(body),
+             "Battery: %.2f V (%u mV)\n"
+             "Clock at last reply: %s\n"
+             "Uptime: %s\n"
+             "TX airtime: %s\n"
+             "RX airtime: %s\n"
+             "Last RSSI: %d dBm\n"
+             "Last SNR: %.2f dB\n"
+             "Noise floor: %d dBm\n"
+             "\n"
+             "Packets sent: %u total (%u flood, %u direct)\n"
+             "Packets received: %u total (%u flood, %u direct)\n"
+             "Duplicates seen: %u direct, %u flood\n"
+             "Receive errors: %u\n"
+             "TX queue length: %u\n"
+             "Debug error events: %u",
+             (double)battery_v, (unsigned)s.batt_milli_volts,
+             clock_buf,
+             uptime_buf,
+             tx_air_buf,
+             rx_air_buf,
+             (int)s.last_rssi,
+             (double)snr_db,
+             (int)s.noise_floor,
+             (unsigned)s.n_packets_sent,
+             (unsigned)s.n_sent_flood, (unsigned)s.n_sent_direct,
+             (unsigned)s.n_packets_recv,
+             (unsigned)s.n_recv_flood, (unsigned)s.n_recv_direct,
+             (unsigned)s.n_direct_dups, (unsigned)s.n_flood_dups,
+             (unsigned)s.n_recv_errors,
+             (unsigned)s.curr_tx_queue_len,
+             (unsigned)s.err_events);
+
+    lv_label_set_text(lbl_admin_status_body, body);
+}
+
+static void on_admin_status_refresh_tap(lv_event_t *e) {
+    if (g_admin_login_contact_idx < 0) return;
+    if (g_admin_status_in_flight) return;  // debounce
+
+    printf("Admin: status refresh requested for contact[%d]\n",
+           g_admin_login_contact_idx);
+
+    g_admin_status_in_flight = true;
+    if (lbl_admin_status_updated) {
+        lv_label_set_text(lbl_admin_status_updated, "Refreshing...");
+        lv_obj_set_style_text_color(lbl_admin_status_updated,
+                                    lv_palette_main(LV_PALETTE_YELLOW), 0);
+    }
+    if (btn_admin_status_refresh) {
+        lv_obj_add_state(btn_admin_status_refresh, LV_STATE_DISABLED);
+    }
+    meck_request_admin_status(g_admin_login_contact_idx);
+}
+
+static void on_admin_send_advert_tap(lv_event_t *e) {
+    if (g_admin_login_contact_idx < 0) return;
+    if (g_admin_send_advert_in_flight) return;  // debounce
+
+    printf("Admin: Send Advert requested for contact[%d]\n",
+           g_admin_login_contact_idx);
+
+    g_admin_send_advert_in_flight = true;
+    if (lbl_admin_send_advert_status) {
+        lv_label_set_text(lbl_admin_send_advert_status,
+                          "Sending advert command...");
+        lv_obj_set_style_text_color(lbl_admin_send_advert_status,
+                                    lv_palette_main(LV_PALETTE_YELLOW), 0);
+    }
+    if (lbl_admin_send_advert_response) {
+        lv_label_set_text(lbl_admin_send_advert_response, "");
+    }
+    if (btn_admin_send_advert) {
+        lv_obj_add_state(btn_admin_send_advert, LV_STATE_DISABLED);
+    }
+    meck_request_admin_cli(g_admin_login_contact_idx, "advert");
+}
+
+// Bridge callbacks (fired from meck_drain_pending_admin_responses on
+// the LVGL task). Safe to touch LVGL state here.
+
+static void meck_admin_send_result_dispatch(meck_admin_req_type_t type,
+                                              bool success,
+                                              uint32_t est_timeout_ms) {
+    printf("Admin: send result type=%d success=%d est_timeout=%u\n",
+           (int)type, success ? 1 : 0, (unsigned)est_timeout_ms);
+
+    if (type == MECK_ADMIN_REQ_LOGIN) {
+        if (!success) {
+            // Send itself failed (contact unreachable / MSG_SEND_FAILED).
+            // Drop back to PASSWORD_ENTRY so the user can retry.
+            g_admin_ui_state = ADMIN_STATE_PASSWORD_ENTRY;
+            admin_login_show_status("Send failed. Check the path and try again.",
+                                    lv_palette_main(LV_PALETTE_RED));
+            if (btn_admin_login_submit) {
+                lv_obj_clear_state(btn_admin_login_submit, LV_STATE_DISABLED);
+            }
+        } else {
+            // Send dispatched. Update the timeout from the mesh's
+            // estimate; the login response should arrive within this
+            // window. Pad +5s for the SD-bound rendering overhead on
+            // our side (matches upstream behaviour).
+            g_admin_login_timeout_ms = est_timeout_ms + 5000;
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Logging in... (timeout %us)",
+                     (unsigned)(g_admin_login_timeout_ms / 1000));
+            admin_login_show_status(buf, lv_palette_main(LV_PALETTE_YELLOW));
+        }
+        return;
+    }
+
+    if (type == MECK_ADMIN_REQ_STATUS) {
+        if (!success) {
+            // Send itself failed. Clear the in-flight flag and
+            // surface the error so the user can retry.
+            g_admin_status_in_flight = false;
+            if (lbl_admin_status_updated) {
+                lv_label_set_text(lbl_admin_status_updated,
+                                  "Send failed. Tap Refresh to retry.");
+                lv_obj_set_style_text_color(lbl_admin_status_updated,
+                                            lv_palette_main(LV_PALETTE_RED), 0);
+            }
+            if (btn_admin_status_refresh) {
+                lv_obj_clear_state(btn_admin_status_refresh, LV_STATE_DISABLED);
+            }
+        }
+        // success: leave g_admin_status_in_flight=true and the
+        // yellow "Refreshing..." label until the response arrives
+        // (or the user navigates away).
+        return;
+    }
+
+    if (type == MECK_ADMIN_REQ_CLI) {
+        if (!success && g_admin_send_advert_in_flight) {
+            g_admin_send_advert_in_flight = false;
+            if (lbl_admin_send_advert_status) {
+                lv_label_set_text(lbl_admin_send_advert_status,
+                                  "Send failed. Tap the button to retry.");
+                lv_obj_set_style_text_color(lbl_admin_send_advert_status,
+                                            lv_palette_main(LV_PALETTE_RED), 0);
+            }
+            if (btn_admin_send_advert) {
+                lv_obj_clear_state(btn_admin_send_advert, LV_STATE_DISABLED);
+            }
+        }
+        if (!success && g_admin_cmd_in_flight) {
+            // Replace the "(waiting...)" placeholder we appended at
+            // send time with a red error response. Same delete +
+            // re-add pattern as the success path in
+            // meck_admin_cli_dispatch.
+            g_admin_cmd_in_flight = false;
+            char last_cmd[ADMIN_CMD_MAX_LEN + 8] = "";
+            if (obj_admin_cmd_scroll) {
+                uint32_t n = lv_obj_get_child_count(obj_admin_cmd_scroll);
+                if (n > 0) {
+                    lv_obj_t* last_row = lv_obj_get_child(obj_admin_cmd_scroll, n - 1);
+                    if (last_row && lv_obj_get_child_count(last_row) >= 1) {
+                        lv_obj_t* cmd_lbl = lv_obj_get_child(last_row, 0);
+                        const char* t = lv_label_get_text(cmd_lbl);
+                        if (t) {
+                            const char* src = (t[0] == '>' && t[1] == ' ') ? t + 2 : t;
+                            strncpy(last_cmd, src, sizeof(last_cmd) - 1);
+                        }
+                    }
+                    lv_obj_delete(last_row);
+                }
+            }
+            admin_cmd_add_entry(last_cmd,
+                "Send failed. Check the path and try again.", true);
+            if (btn_admin_cmd_send) {
+                lv_obj_clear_state(btn_admin_cmd_send, LV_STATE_DISABLED);
+            }
+        }
+        return;
+    }
+
+    // Telemetry send-result will be handled when piece 5 wires up the
+    // telemetry view.
+}
+
+static void meck_admin_login_dispatch(bool success, uint8_t is_admin,
+                                       uint8_t permissions,
+                                       uint8_t fw_ver_level,
+                                       uint32_t clock_tag,
+                                       int contact_idx) {
+    printf("Admin: login dispatch success=%d is_admin=%u perms=0x%02X "
+           "fw_ver=%u clock=%u contact=%d\n",
+           success ? 1 : 0, (unsigned)is_admin, (unsigned)permissions,
+           (unsigned)fw_ver_level, (unsigned)clock_tag, contact_idx);
+
+    if (!success) {
+        g_admin_ui_state = ADMIN_STATE_PASSWORD_ENTRY;
+        admin_login_show_status("Login failed. Check the password.",
+                                lv_palette_main(LV_PALETTE_RED));
+        if (btn_admin_login_submit) {
+            lv_obj_clear_state(btn_admin_login_submit, LV_STATE_DISABLED);
+        }
+        return;
+    }
+
+    // Success path. Cache the password ONLY if the user opted in via
+    // the Remember Password checkbox AND the password was non-empty
+    // (caching a blank doesn't help anyone).
+    bool remember = false;
+    if (cb_admin_remember) {
+        remember = lv_obj_has_state(cb_admin_remember, LV_STATE_CHECKED);
+    }
+    if (remember && g_admin_pwd_len > 0) {
+        admin_pwd_cache_put(contact_idx, g_admin_pwd_raw);
+        printf("Admin: cached password for contact[%d]\n", contact_idx);
+    }
+
+    g_admin_session_is_admin    = (is_admin != 0);
+    g_admin_session_permissions = permissions;
+    g_admin_session_fw_ver      = fw_ver_level;
+    g_admin_session_clock_tag   = clock_tag;
+    g_admin_ui_state            = ADMIN_STATE_LOGGED_IN;
+
+    // Wipe raw password buffer post-success. The cache (if enabled)
+    // holds a copy; the screen no longer needs it.
+    memset(g_admin_pwd_raw, 0, sizeof(g_admin_pwd_raw));
+    g_admin_pwd_len = 0;
+    if (ta_admin_password) {
+        g_admin_pwd_render_in_progress = true;
+        lv_textarea_set_text(ta_admin_password, "");
+        g_admin_pwd_render_in_progress = false;
+    }
+
+    // Reset cached status state so a fresh login starts with the
+    // "Tap Refresh" placeholder rather than stale numbers from a
+    // previous session on a different repeater.
+    g_admin_status_last_update = 0;
+    g_admin_status_clock_tag   = 0;
+    g_admin_status_in_flight   = false;
+    memset(&g_admin_last_status, 0, sizeof(g_admin_last_status));
+    if (btn_admin_status_refresh) {
+        lv_obj_clear_state(btn_admin_status_refresh, LV_STATE_DISABLED);
+    }
+    if (lbl_admin_status_updated) {
+        lv_label_set_text(lbl_admin_status_updated, "Tap Refresh to load");
+        lv_obj_set_style_text_color(lbl_admin_status_updated,
+                                    lv_color_make(180, 180, 180), 0);
+    }
+    admin_render_status_body();
+
+    // Populate the banner + load the admin home menu list.
+    Meck* mesh = meck_get_instance();
+    ContactInfo ci = {};
+    const char* contact_name = "?";
+    if (mesh && mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
+        contact_name = ci.name;
+    }
+    admin_home_update_banner(is_admin != 0, contact_name);
+
+    // Also reset the Send Advert flow so a fresh login starts clean
+    // if the user goes straight there from a previous session.
+    g_admin_send_advert_in_flight = false;
+    if (lbl_admin_send_advert_status) {
+        lv_label_set_text(lbl_admin_send_advert_status,
+                          "Tap the button to send an advert command.");
+        lv_obj_set_style_text_color(lbl_admin_send_advert_status,
+                                    lv_color_make(180, 180, 180), 0);
+    }
+    if (lbl_admin_send_advert_response) {
+        lv_label_set_text(lbl_admin_send_advert_response, "");
+    }
+    if (btn_admin_send_advert) {
+        lv_obj_clear_state(btn_admin_send_advert, LV_STATE_DISABLED);
+    }
+
+    // Reset Cmd Line scrollback + input on fresh login. A different
+    // repeater is a different context; old responses shouldn't carry
+    // over.
+    g_admin_cmd_in_flight = false;
+    if (obj_admin_cmd_scroll) {
+        lv_obj_clean(obj_admin_cmd_scroll);
+    }
+    if (ta_admin_cmd_input) {
+        lv_textarea_set_text(ta_admin_cmd_input, "");
+    }
+    if (btn_admin_cmd_send) {
+        lv_obj_clear_state(btn_admin_cmd_send, LV_STATE_DISABLED);
+    }
+
+    if (scr_admin_home) lv_screen_load(scr_admin_home);
+}
+
+// Status response dispatch — fired by the bridge when a
+// REQ_TYPE_GET_STATUS reply lands. Updates the cached stats struct,
+// re-enables the refresh button, and re-renders the Status body.
+//
+// We don't gate on contact_idx == g_admin_login_contact_idx here —
+// if the user backed out and re-entered, the stats are still useful
+// to display until they overwrite. Stale-session handling is
+// elsewhere (the back button clears the cache).
+static void meck_admin_status_dispatch(const RepeaterStats* stats,
+                                        uint32_t clock_tag,
+                                        int contact_idx) {
+    if (!stats) return;
+    printf("Admin: status dispatch contact=%d clock_tag=%u\n",
+           contact_idx, (unsigned)clock_tag);
+
+    memcpy(&g_admin_last_status, stats, sizeof(RepeaterStats));
+    g_admin_status_clock_tag   = clock_tag;
+    g_admin_status_last_update = (unsigned long)esp_log_timestamp();
+    g_admin_status_in_flight   = false;
+
+    if (lbl_admin_status_updated) {
+        lv_label_set_text(lbl_admin_status_updated, "Updated just now");
+        lv_obj_set_style_text_color(lbl_admin_status_updated,
+                                    lv_palette_main(LV_PALETTE_GREEN), 0);
+    }
+    if (btn_admin_status_refresh) {
+        lv_obj_clear_state(btn_admin_status_refresh, LV_STATE_DISABLED);
+    }
+    admin_render_status_body();
+}
+
+// CLI response dispatch. Currently consumed by the Send Advert
+// subpage (the only thing in piece 4 that issues a CLI command).
+// Piece 6 will share this same dispatcher with the Cmd Line subpage.
+static void meck_admin_cli_dispatch(const char* response, int contact_idx) {
+    printf("Admin: CLI dispatch contact=%d response=\"%.80s%s\"\n",
+           contact_idx,
+           response ? response : "",
+           (response && strlen(response) > 80) ? "..." : "");
+
+    if (g_admin_send_advert_in_flight) {
+        // Send Advert flow — populate the result on the dedicated
+        // subpage. The screen may not be visible (user could have
+        // backed out before the reply arrived), but updating the
+        // label is harmless either way.
+        g_admin_send_advert_in_flight = false;
+        if (lbl_admin_send_advert_status) {
+            lv_label_set_text(lbl_admin_send_advert_status,
+                              "Advert command sent.");
+            lv_obj_set_style_text_color(lbl_admin_send_advert_status,
+                                        lv_palette_main(LV_PALETTE_GREEN), 0);
+        }
+        if (lbl_admin_send_advert_response && response) {
+            lv_label_set_text(lbl_admin_send_advert_response, response);
+        }
+        if (btn_admin_send_advert) {
+            lv_obj_clear_state(btn_admin_send_advert, LV_STATE_DISABLED);
+        }
+        return;
+    }
+
+    if (g_admin_cmd_in_flight) {
+        // Cmd Line flow — replace the "(waiting...)" placeholder in
+        // the most recent scrollback entry with the real response.
+        // Simplest implementation: just delete the last entry and
+        // re-add it with the response filled in. We need the command
+        // text from somewhere — pull it from the (waiting...) entry
+        // before deleting.
+        g_admin_cmd_in_flight = false;
+
+        char last_cmd[ADMIN_CMD_MAX_LEN + 8] = "";
+        if (obj_admin_cmd_scroll) {
+            uint32_t n = lv_obj_get_child_count(obj_admin_cmd_scroll);
+            if (n > 0) {
+                lv_obj_t* last_row = lv_obj_get_child(obj_admin_cmd_scroll, n - 1);
+                if (last_row && lv_obj_get_child_count(last_row) >= 1) {
+                    lv_obj_t* cmd_lbl = lv_obj_get_child(last_row, 0);
+                    const char* t = lv_label_get_text(cmd_lbl);
+                    if (t) {
+                        // Strip the "> " prefix we added at entry time.
+                        const char* src = (t[0] == '>' && t[1] == ' ') ? t + 2 : t;
+                        strncpy(last_cmd, src, sizeof(last_cmd) - 1);
+                    }
+                }
+                lv_obj_delete(last_row);
+            }
+        }
+        admin_cmd_add_entry(last_cmd, response ? response : "(no reply)", false);
+        if (btn_admin_cmd_send) {
+            lv_obj_clear_state(btn_admin_cmd_send, LV_STATE_DISABLED);
+        }
+        return;
+    }
+}
+
+// ---- Entry point from contact detail ----
+
+static void admin_login_screen_enter(int contact_idx) {
+    g_admin_login_contact_idx = contact_idx;
+    g_admin_ui_state = ADMIN_STATE_PASSWORD_ENTRY;
+    g_admin_pwd_len = 0;
+    memset(g_admin_pwd_raw, 0, sizeof(g_admin_pwd_raw));
+    g_admin_pwd_last_char_ms = 0;
+    g_admin_pwd_reveal_all = false;
+
+    Meck* mesh = meck_get_instance();
+    ContactInfo ci = {};
+    bool have_contact = mesh && mesh->getContactByIdx((uint32_t)contact_idx, ci);
+
+    // Subtitle: contact name. Title stays "Repeater Login" for both
+    // repeaters and room servers — the screen handles both the same
+    // way and "Login" is the user-facing concept.
+    if (lbl_admin_login_subtitle) {
+        lv_label_set_text(lbl_admin_login_subtitle,
+                          have_contact ? ci.name : "(unknown contact)");
+    }
+
+    // Routing-mode badge for the Login button. Based on the contact's
+    // CURRENT out_path_len at screen entry time. Login itself always
+    // forces flood inside Meck::uiLoginToRepeater, but the badge
+    // reflects the path state for subsequent admin commands.
+    g_admin_login_routing_direct =
+        have_contact && (ci.out_path_len != OUT_PATH_UNKNOWN);
+    if (lbl_admin_login_submit) {
+        char btn_text[32];
+        snprintf(btn_text, sizeof(btn_text), "Log In  ·  %s",
+                 g_admin_login_routing_direct ? "Direct" : "Flood");
+        lv_label_set_text(lbl_admin_login_submit, btn_text);
+    }
+    if (btn_admin_login_submit) {
+        lv_obj_clear_state(btn_admin_login_submit, LV_STATE_DISABLED);
+    }
+
+    // Pre-fill cached password if we have one. Update the raw buffer
+    // and let admin_render_password_masked render the masked view.
+    const char* cached = admin_pwd_cache_get(contact_idx);
+    if (cached && cached[0]) {
+        size_t n = strnlen(cached, MECK_ADMIN_PASSWORD_MAX);
+        memcpy(g_admin_pwd_raw, cached, n);
+        g_admin_pwd_raw[n] = '\0';
+        g_admin_pwd_len = (int)n;
+        // Pre-filled chars don't trigger reveal — render dots only.
+        g_admin_pwd_last_char_ms = 0;
+        // Check the Remember Password checkbox since we obviously
+        // remembered last time.
+        if (cb_admin_remember) {
+            lv_obj_add_state(cb_admin_remember, LV_STATE_CHECKED);
+        }
+    } else {
+        if (cb_admin_remember) {
+            lv_obj_add_state(cb_admin_remember, LV_STATE_CHECKED);
+        }
+    }
+    admin_render_password_masked();
+
+    admin_login_show_status("", lv_color_white());
+
+    if (scr_admin_login) lv_screen_load(scr_admin_login);
+}
+
+static void on_contact_admin_tap(lv_event_t *e) {
+    if (g_selected_contact_idx < 0) return;
+    admin_login_screen_enter(g_selected_contact_idx);
+}
+
+// ---- Screen construction ----
+
+static void create_admin_login_screen() {
+    scr_admin_login = lv_obj_create(NULL);
+    lock_screen_scroll(scr_admin_login);
+    lv_obj_set_style_bg_color(scr_admin_login, lv_color_black(), 0);
+    // Slot 9 — first free slot past the channel-picker / message screens.
+    screen_attach_clock_battery(scr_admin_login, 9, &meck_montserrat_22, 30);
+
+    // Back button (top left)
+    lv_obj_t *btn_back = lv_button_create(scr_admin_login);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_admin_login_back, LV_EVENT_CLICKED, NULL);
+
+    // Title — short "Login" rather than "Repeater Login" because the
+    // TFT camera punch-hole sits along the top-centre of the panel and
+    // obscures the second word at this x-position.
+    lbl_admin_login_title = lv_label_create(scr_admin_login);
+    lv_label_set_text(lbl_admin_login_title, "Login");
+    lv_obj_set_style_text_color(lbl_admin_login_title,
+                                lv_palette_main(LV_PALETTE_INDIGO), 0);
+    meck_set_font(lbl_admin_login_title, &meck_montserrat_24, 0);
+    lv_obj_align(lbl_admin_login_title, LV_ALIGN_TOP_LEFT, 120, 20);
+
+    // Subtitle — contact name (filled by admin_login_screen_enter)
+    lbl_admin_login_subtitle = lv_label_create(scr_admin_login);
+    lv_label_set_text(lbl_admin_login_subtitle, "");
+    lv_obj_set_style_text_color(lbl_admin_login_subtitle, lv_color_white(), 0);
+    meck_set_font(lbl_admin_login_subtitle, &meck_montserrat_18, 0);
+    lv_obj_align(lbl_admin_login_subtitle, LV_ALIGN_TOP_LEFT, 120, 55);
+
+    // Lock icon — large symbol above the password field. Centered.
+    lv_obj_t *lock_icon = lv_label_create(scr_admin_login);
+    lv_label_set_text(lock_icon, LV_SYMBOL_LOCK);
+    lv_obj_set_style_text_color(lock_icon,
+                                lv_palette_main(LV_PALETTE_INDIGO), 0);
+    meck_set_font(lock_icon, &meck_montserrat_24, 0);
+    lv_obj_align(lock_icon, LV_ALIGN_TOP_MID, 0, 110);
+
+    // "Authentication Required" heading
+    lv_obj_t *lbl_auth = lv_label_create(scr_admin_login);
+    lv_label_set_text(lbl_auth, "Authentication Required");
+    lv_obj_set_style_text_color(lbl_auth, lv_color_white(), 0);
+    meck_set_font(lbl_auth, &meck_montserrat_22, 0);
+    lv_obj_align(lbl_auth, LV_ALIGN_TOP_MID, 0, 160);
+
+    lv_obj_t *lbl_sub = lv_label_create(scr_admin_login);
+    lv_label_set_text(lbl_sub, "Please log in to manage this repeater.");
+    lv_obj_set_style_text_color(lbl_sub, lv_color_make(180, 180, 180), 0);
+    meck_set_font(lbl_sub, &meck_montserrat_16, 0);
+    lv_obj_align(lbl_sub, LV_ALIGN_TOP_MID, 0, 200);
+
+    // Password textarea
+    ta_admin_password = lv_textarea_create(scr_admin_login);
+    lv_obj_set_size(ta_admin_password, SCREEN_WIDTH - 130, 70);
+    lv_obj_align(ta_admin_password, LV_ALIGN_TOP_LEFT, 60, 250);
+    lv_textarea_set_placeholder_text(ta_admin_password, "Password");
+    lv_textarea_set_one_line(ta_admin_password, true);
+    meck_set_font(ta_admin_password, &meck_montserrat_22, 0);
+    lv_obj_add_event_cb(ta_admin_password, on_admin_password_textarea_change,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Eye toggle button (right of the textarea). The eye-open / eye-close
+    // FontAwesome glyphs (U+F06E / U+F070) are in the Meck Montserrat
+    // fonts as of v0.3.5.
+    btn_admin_password_eye = lv_button_create(scr_admin_login);
+    lv_obj_set_size(btn_admin_password_eye, 50, 70);
+    lv_obj_align(btn_admin_password_eye, LV_ALIGN_TOP_RIGHT, -10, 250);
+    lv_obj_set_style_bg_color(btn_admin_password_eye,
+                              lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_admin_password_eye, 8, 0);
+    lv_obj_t *eye_lbl = lv_label_create(btn_admin_password_eye);
+    lv_label_set_text(eye_lbl, LV_SYMBOL_EYE_OPEN);
+    lv_obj_set_style_text_color(eye_lbl, lv_color_white(), 0);
+    meck_set_font(eye_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(eye_lbl);
+    lv_obj_add_event_cb(btn_admin_password_eye, on_admin_password_eye_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Remember Password checkbox
+    cb_admin_remember = lv_checkbox_create(scr_admin_login);
+    lv_checkbox_set_text(cb_admin_remember, "Remember Password?");
+    lv_obj_set_style_text_color(cb_admin_remember, lv_color_white(), 0);
+    meck_set_font(cb_admin_remember, &meck_montserrat_18, 0);
+    lv_obj_align(cb_admin_remember, LV_ALIGN_TOP_LEFT, 60, 335);
+    lv_obj_add_state(cb_admin_remember, LV_STATE_CHECKED);
+
+    // Login button (large, centered below)
+    btn_admin_login_submit = lv_button_create(scr_admin_login);
+    lv_obj_set_size(btn_admin_login_submit, SCREEN_WIDTH - 120, 70);
+    lv_obj_align(btn_admin_login_submit, LV_ALIGN_TOP_LEFT, 60, 395);
+    lv_obj_set_style_bg_color(btn_admin_login_submit,
+                              lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_admin_login_submit, 8, 0);
+    lbl_admin_login_submit = lv_label_create(btn_admin_login_submit);
+    lv_label_set_text(lbl_admin_login_submit, "Log In  ·  Flood");
+    lv_obj_set_style_text_color(lbl_admin_login_submit, lv_color_white(), 0);
+    meck_set_font(lbl_admin_login_submit, &meck_montserrat_22, 0);
+    lv_obj_center(lbl_admin_login_submit);
+    lv_obj_add_event_cb(btn_admin_login_submit, on_admin_login_submit,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Status line (rendered in red on failure, yellow during login,
+    // hidden when idle)
+    lbl_admin_login_status = lv_label_create(scr_admin_login);
+    lv_label_set_text(lbl_admin_login_status, "");
+    lv_obj_set_style_text_color(lbl_admin_login_status, lv_color_white(), 0);
+    meck_set_font(lbl_admin_login_status, &meck_montserrat_18, 0);
+    lv_obj_align(lbl_admin_login_status, LV_ALIGN_TOP_MID, 0, 485);
+    lv_label_set_long_mode(lbl_admin_login_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_admin_login_status, SCREEN_WIDTH - 60);
+
+    // Footer hint
+    lv_obj_t *footer = lv_label_create(scr_admin_login);
+    lv_label_set_text(footer,
+                      "Some repeater owners may allow guests to view\n"
+                      "metrics without a password.");
+    lv_obj_set_style_text_color(footer, lv_color_make(140, 140, 140), 0);
+    meck_set_font(footer, &meck_montserrat_16, 0);
+    lv_obj_align(footer, LV_ALIGN_BOTTOM_MID, 0, -100);
+    lv_label_set_long_mode(footer, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(footer, SCREEN_WIDTH - 80);
+    lv_obj_set_style_text_align(footer, LV_TEXT_ALIGN_CENTER, 0);
+
+    // Keyboard (hidden by default — shown when textarea focused).
+    // meck_style_keyboard applies the codebase-wide layout (QWERTY /
+    // QWERTZ / AZERTY per user prefs), font, padding, and dark/light
+    // theme — without it the keyboard reverts to LVGL's default look,
+    // which doesn't match the rest of the UI.
+    kb_admin_password = lv_keyboard_create(scr_admin_login);
+    meck_style_keyboard(kb_admin_password);
+    lv_keyboard_set_textarea(kb_admin_password, ta_admin_password);
+    lv_obj_add_flag(kb_admin_password, LV_OBJ_FLAG_HIDDEN);
+    // Show keyboard when textarea focused, hide on defocus
+    lv_obj_add_event_cb(ta_admin_password, on_admin_password_focused,
+                        LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(ta_admin_password, on_admin_password_defocused,
+                        LV_EVENT_DEFOCUSED, NULL);
+}
+
+// ============================================================================
+// Admin home (menu list) + subpages — piece 4
+// ----------------------------------------------------------------------------
+// Replaces the piece-3 "logged in" placeholder. The home screen is a
+// scrollable list of menu rows under a persistent banner:
+//
+//   Status        → scr_admin_status       (full RepeaterStats view)
+//   Send Advert   → scr_admin_send_advert  (one-tap `advert` CLI)
+//   Cmd Line      → scr_admin_cmd          (placeholder for piece 6)
+//   Settings      → scr_admin_settings     (placeholder for piece 5)
+//
+// Banner colour:
+//   - green  = admin session
+//   - yellow = guest session
+//
+// Banner is shown ONLY on the home menu list. Subpages have their own
+// title bar and back button; they share scr_admin_home as the back
+// destination via on_admin_subpage_back.
+// ============================================================================
+
+// Helper: a tappable menu row that fills the full screen width. Same
+// pattern as create_settings_row but single-line (just a label + right
+// arrow), since admin menu rows are pure navigation with no value.
+static lv_obj_t* create_admin_menu_row(lv_obj_t* parent, const char* label,
+                                        int y, lv_event_cb_t cb) {
+    lv_obj_t* btn = lv_button_create(parent);
+    lv_obj_set_size(btn, SCREEN_WIDTH - 40, 70);
+    lv_obj_set_pos(btn, 20, y);
+    lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(btn, 10, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, label);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    meck_set_font(lbl, &meck_montserrat_22, 0);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
+
+    lv_obj_t* arrow = lv_label_create(btn);
+    lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(arrow, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(arrow, &meck_montserrat_18, 0);
+    lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -10, 0);
+
+    return btn;
+}
+
+// Standard subpage scaffolding: clock/battery header on a fresh slot,
+// black background, back button top-left (returns to admin home),
+// title to the right of the back button. Returns the screen handle.
+static lv_obj_t* create_admin_subpage(const char* title_text, int slot) {
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lock_screen_scroll(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    screen_attach_clock_battery(scr, slot, &meck_montserrat_22, 30);
+
+    // Back button → admin home menu list.
+    lv_obj_t* btn_back = lv_button_create(scr);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t* bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_admin_subpage_back, LV_EVENT_CLICKED, NULL);
+
+    // Title — short to clear the camera punch-hole.
+    lv_obj_t* title = lv_label_create(scr);
+    lv_label_set_text(title, title_text);
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    return scr;
+}
+
+static void create_admin_status_screen() {
+    scr_admin_status = create_admin_subpage("Status", 11);
+
+    // Refresh button — top-right under the header. No icon (LVGL's
+    // LV_SYMBOL_REFRESH points at U+F021 which isn't in our font
+    // glyph set — would render as tofu).
+    btn_admin_status_refresh = lv_button_create(scr_admin_status);
+    lv_obj_set_size(btn_admin_status_refresh, 160, 60);
+    lv_obj_align(btn_admin_status_refresh, LV_ALIGN_TOP_RIGHT, -10, 30);
+    lv_obj_set_style_bg_color(btn_admin_status_refresh,
+                              lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_admin_status_refresh, 8, 0);
+    lbl_admin_status_refresh = lv_label_create(btn_admin_status_refresh);
+    lv_label_set_text(lbl_admin_status_refresh, "Refresh");
+    lv_obj_set_style_text_color(lbl_admin_status_refresh, lv_color_white(), 0);
+    meck_set_font(lbl_admin_status_refresh, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_admin_status_refresh);
+    lv_obj_add_event_cb(btn_admin_status_refresh, on_admin_status_refresh_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    // "Updated Ns ago" / "Refreshing..." line — under the title row.
+    lbl_admin_status_updated = lv_label_create(scr_admin_status);
+    lv_label_set_text(lbl_admin_status_updated, "Tap Refresh to load");
+    lv_obj_set_style_text_color(lbl_admin_status_updated,
+                                lv_color_make(180, 180, 180), 0);
+    meck_set_font(lbl_admin_status_updated, &meck_montserrat_16, 0);
+    lv_obj_align(lbl_admin_status_updated, LV_ALIGN_TOP_LEFT, 20, 110);
+
+    // Status body — scrollable container with the full multi-line
+    // RepeaterStats output. Scrollable in case 14+ fields don't fit
+    // on screen at the user's font scale.
+    lv_obj_t* scroll = lv_obj_create(scr_admin_status);
+    lv_obj_set_size(scroll, SCREEN_WIDTH - 40, SCREEN_HEIGHT - 240);
+    lv_obj_set_pos(scroll, 20, 150);
+    lv_obj_set_style_bg_color(scroll, lv_color_make(10, 10, 15), 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_radius(scroll, 8, 0);
+    lv_obj_set_style_pad_all(scroll, 15, 0);
+    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+
+    lbl_admin_status_body = lv_label_create(scroll);
+    lv_label_set_text(lbl_admin_status_body,
+                      "No status data yet.\n\n"
+                      "Tap the Refresh button to request the\n"
+                      "repeater's current statistics.");
+    lv_obj_set_style_text_color(lbl_admin_status_body,
+                                lv_color_make(220, 220, 220), 0);
+    meck_set_font(lbl_admin_status_body, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_admin_status_body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_admin_status_body, SCREEN_WIDTH - 90);
+}
+
+static void create_admin_send_advert_screen() {
+    scr_admin_send_advert = create_admin_subpage("Send Advert", 12);
+
+    // Explanation text.
+    lv_obj_t* explain = lv_label_create(scr_admin_send_advert);
+    lv_label_set_text(explain,
+                      "Send a flood advert from the repeater so\n"
+                      "other nodes learn its current path.");
+    lv_obj_set_style_text_color(explain, lv_color_make(200, 200, 200), 0);
+    meck_set_font(explain, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(explain, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(explain, SCREEN_WIDTH - 40);
+    lv_obj_align(explain, LV_ALIGN_TOP_LEFT, 20, 130);
+
+    // The button itself — full-width-ish, centered, prominent.
+    btn_admin_send_advert = lv_button_create(scr_admin_send_advert);
+    lv_obj_set_size(btn_admin_send_advert, SCREEN_WIDTH - 80, 80);
+    lv_obj_align(btn_admin_send_advert, LV_ALIGN_TOP_MID, 0, 230);
+    lv_obj_set_style_bg_color(btn_admin_send_advert,
+                              lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_admin_send_advert, 10, 0);
+    lv_obj_t* btn_lbl = lv_label_create(btn_admin_send_advert);
+    lv_label_set_text(btn_lbl, "Send Advert");
+    lv_obj_set_style_text_color(btn_lbl, lv_color_white(), 0);
+    meck_set_font(btn_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(btn_lbl);
+    lv_obj_add_event_cb(btn_admin_send_advert, on_admin_send_advert_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Status text below the button — "Sending..." / "Sent" / etc.
+    lbl_admin_send_advert_status = lv_label_create(scr_admin_send_advert);
+    lv_label_set_text(lbl_admin_send_advert_status,
+                      "Tap the button to send an advert command.");
+    lv_obj_set_style_text_color(lbl_admin_send_advert_status,
+                                lv_color_make(180, 180, 180), 0);
+    meck_set_font(lbl_admin_send_advert_status, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_admin_send_advert_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_admin_send_advert_status, SCREEN_WIDTH - 40);
+    lv_obj_align(lbl_admin_send_advert_status, LV_ALIGN_TOP_LEFT, 20, 340);
+
+    // Response text — the actual reply from the repeater's CLI.
+    lbl_admin_send_advert_response = lv_label_create(scr_admin_send_advert);
+    lv_label_set_text(lbl_admin_send_advert_response, "");
+    lv_obj_set_style_text_color(lbl_admin_send_advert_response,
+                                lv_color_white(), 0);
+    meck_set_font(lbl_admin_send_advert_response, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_admin_send_advert_response, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_admin_send_advert_response, SCREEN_WIDTH - 40);
+    lv_obj_align(lbl_admin_send_advert_response, LV_ALIGN_TOP_LEFT, 20, 410);
+}
+
+// Cmd Line placeholder — piece 6 builds this out.
+// Cmd Line subpage — piece 6. Free-form CLI input with response
+// scrollback. The repeater understands commands like `neighbors`,
+// `ver`, `clock sync`, `get freq`, `set name <name>`, `reboot`, etc.
+//
+// Layout:
+//   y=0..100   clock/battery header (via create_admin_subpage)
+//   y=30..    title "Cmd Line"
+//   y=130..   scrollback container — fills the space above the textarea
+//   bottom:   textarea + send button (10px margins)
+//   keyboard slides up on textarea focus; textarea/send lift above it.
+//
+// Limits:
+//   - Command length: 100 chars (well within MeshCore single-packet
+//     payload limits)
+//   - Scrollback depth: LVGL handles whatever fits in memory; we trim
+//     to ~50 entries on the fly to keep it responsive.
+//
+// Sharing the CLI dispatch path: meck_admin_cli_dispatch is shared
+// with Send Advert. The dispatcher routes on whichever in-flight flag
+// is set (g_admin_send_advert_in_flight vs g_admin_cmd_in_flight).
+
+// Append a command/response pair to the scrollback. is_error flips
+// the response colour to red for "send failed" feedback.
+static void admin_cmd_add_entry(const char* cmd, const char* response,
+                                 bool is_error) {
+    if (!obj_admin_cmd_scroll) return;
+
+    // Trim the scrollback if it's getting too long. Each entry is a
+    // container holding two labels; deleting the container deletes
+    // its children. lv_obj_get_child_count walks the immediate
+    // children of the scroll only.
+    while (lv_obj_get_child_count(obj_admin_cmd_scroll) >= ADMIN_CMD_MAX_ENTRIES) {
+        lv_obj_t* oldest = lv_obj_get_child(obj_admin_cmd_scroll, 0);
+        if (!oldest) break;
+        lv_obj_delete(oldest);
+    }
+
+    lv_obj_t* row = lv_obj_create(obj_admin_cmd_scroll);
+    lv_obj_set_size(row, SCREEN_WIDTH - 60, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(row, lv_color_make(15, 15, 22), 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_radius(row, 8, 0);
+    lv_obj_set_style_pad_all(row, 12, 0);
+    lv_obj_set_style_margin_bottom(row, 10, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(row, 6, 0);
+    lock_screen_scroll(row);
+
+    if (cmd && cmd[0]) {
+        lv_obj_t* cmd_lbl = lv_label_create(row);
+        char buf[ADMIN_CMD_MAX_LEN + 8];
+        snprintf(buf, sizeof(buf), "> %s", cmd);
+        lv_label_set_text(cmd_lbl, buf);
+        lv_obj_set_style_text_color(cmd_lbl,
+            lv_palette_main(LV_PALETTE_CYAN), 0);
+        meck_set_font(cmd_lbl, &meck_montserrat_18, 0);
+        lv_label_set_long_mode(cmd_lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(cmd_lbl, SCREEN_WIDTH - 90);
+    }
+
+    if (response && response[0]) {
+        lv_obj_t* resp_lbl = lv_label_create(row);
+        lv_label_set_text(resp_lbl, response);
+        lv_obj_set_style_text_color(resp_lbl,
+            is_error ? lv_palette_main(LV_PALETTE_RED) : lv_color_white(), 0);
+        meck_set_font(resp_lbl, &meck_montserrat_18, 0);
+        lv_label_set_long_mode(resp_lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(resp_lbl, SCREEN_WIDTH - 90);
+    }
+
+    // Scroll to the bottom so the newest entry is visible.
+    lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+}
+
+// Issue the CLI command currently in the textarea. Validates non-empty
+// and not already in flight; clears the textarea + closes the keyboard
+// on success so the user can keep typing or read the response.
+static void admin_cmd_send_current() {
+    if (!ta_admin_cmd_input) return;
+    if (g_admin_login_contact_idx < 0) return;
+    if (g_admin_cmd_in_flight) return;
+    if (g_admin_send_advert_in_flight) {
+        // Another CLI is mid-flight; refuse politely.
+        admin_cmd_add_entry(NULL,
+            "Another CLI request is in flight. Try again in a moment.",
+            true);
+        return;
+    }
+
+    const char* text = lv_textarea_get_text(ta_admin_cmd_input);
+    if (!text || !text[0]) return;
+
+    // Truncate to ADMIN_CMD_MAX_LEN just in case.
+    char cmd_buf[ADMIN_CMD_MAX_LEN + 1];
+    strncpy(cmd_buf, text, ADMIN_CMD_MAX_LEN);
+    cmd_buf[ADMIN_CMD_MAX_LEN] = '\0';
+
+    printf("Admin Cmd: sending \"%s\" to contact[%d]\n",
+           cmd_buf, g_admin_login_contact_idx);
+
+    g_admin_cmd_in_flight = true;
+
+    // Append the command immediately with an empty response slot, so
+    // the user sees feedback even before the radio reply arrives.
+    // The response will be filled in by meck_admin_cli_dispatch.
+    admin_cmd_add_entry(cmd_buf, "(waiting...)", false);
+
+    // Clear the textarea and hide the keyboard so focus returns to
+    // the scrollback, ready for the user to read the reply.
+    lv_textarea_set_text(ta_admin_cmd_input, "");
+    if (kb_admin_cmd_input) {
+        lv_obj_add_flag(kb_admin_cmd_input, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (btn_admin_cmd_send) {
+        lv_obj_add_state(btn_admin_cmd_send, LV_STATE_DISABLED);
+    }
+
+    meck_request_admin_cli(g_admin_login_contact_idx, cmd_buf);
+}
+
+static void on_admin_cmd_send_tap(lv_event_t *e) {
+    admin_cmd_send_current();
+}
+
+// Textarea focus → show the keyboard and reposition the textarea + send
+// button above it. Mirrors the compose pattern.
+static void on_admin_cmd_input_focused(lv_event_t *e) {
+    if (!kb_admin_cmd_input) return;
+    lv_keyboard_set_textarea(kb_admin_cmd_input, ta_admin_cmd_input);
+    lv_obj_remove_flag(kb_admin_cmd_input, LV_OBJ_FLAG_HIDDEN);
+    if (ta_admin_cmd_input)
+        lv_obj_align(ta_admin_cmd_input, LV_ALIGN_BOTTOM_LEFT, 10,
+                     -(15 + MECK_KB_HEIGHT));
+    if (btn_admin_cmd_send)
+        lv_obj_align(btn_admin_cmd_send, LV_ALIGN_BOTTOM_RIGHT, -10,
+                     -(15 + MECK_KB_HEIGHT));
+}
+
+static void on_admin_cmd_input_defocused(lv_event_t *e) {
+    if (!kb_admin_cmd_input) return;
+    lv_obj_add_flag(kb_admin_cmd_input, LV_OBJ_FLAG_HIDDEN);
+    if (ta_admin_cmd_input)
+        lv_obj_align(ta_admin_cmd_input, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    if (btn_admin_cmd_send)
+        lv_obj_align(btn_admin_cmd_send, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+}
+
+// Keyboard event → handle enter (send) and cancel (close keyboard).
+static void on_admin_cmd_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY) {
+        admin_cmd_send_current();
+    } else if (code == LV_EVENT_CANCEL) {
+        on_admin_cmd_input_defocused(e);
+    }
+}
+
+static void create_admin_cmd_screen() {
+    scr_admin_cmd = create_admin_subpage("Cmd Line", 13);
+
+    // Bottom row: textarea (left, expanding) + send button (right).
+    // Built first so we know its height before positioning the
+    // scrollback. Both lift above the keyboard on textarea focus via
+    // on_admin_cmd_input_focused.
+    btn_admin_cmd_send = lv_button_create(scr_admin_cmd);
+    lv_obj_set_size(btn_admin_cmd_send, 130, 70);
+    lv_obj_align(btn_admin_cmd_send, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(btn_admin_cmd_send,
+        lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_admin_cmd_send, 8, 0);
+    lv_obj_t* send_lbl = lv_label_create(btn_admin_cmd_send);
+    lv_label_set_text(send_lbl, "Send");
+    lv_obj_set_style_text_color(send_lbl, lv_color_white(), 0);
+    meck_set_font(send_lbl, &meck_montserrat_18, 0);
+    lv_obj_center(send_lbl);
+    lv_obj_add_event_cb(btn_admin_cmd_send, on_admin_cmd_send_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    ta_admin_cmd_input = lv_textarea_create(scr_admin_cmd);
+    lv_obj_set_size(ta_admin_cmd_input, SCREEN_WIDTH - 170, 70);
+    lv_obj_align(ta_admin_cmd_input, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_textarea_set_placeholder_text(ta_admin_cmd_input,
+        "Command (e.g. neighbors, ver, get freq)");
+    lv_textarea_set_one_line(ta_admin_cmd_input, true);
+    lv_textarea_set_max_length(ta_admin_cmd_input, ADMIN_CMD_MAX_LEN);
+    meck_set_font(ta_admin_cmd_input, &meck_montserrat_18, 0);
+    lv_obj_add_event_cb(ta_admin_cmd_input, on_admin_cmd_input_focused,
+                        LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(ta_admin_cmd_input, on_admin_cmd_input_defocused,
+                        LV_EVENT_DEFOCUSED, NULL);
+
+    // Keyboard — hidden by default, shown when textarea is focused.
+    kb_admin_cmd_input = lv_keyboard_create(scr_admin_cmd);
+    lv_obj_set_size(kb_admin_cmd_input, SCREEN_WIDTH, MECK_KB_HEIGHT);
+    lv_obj_align(kb_admin_cmd_input, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(kb_admin_cmd_input, LV_OBJ_FLAG_HIDDEN);
+    meck_style_keyboard(kb_admin_cmd_input);
+    lv_obj_add_event_cb(kb_admin_cmd_input, on_admin_cmd_kb_event,
+                        LV_EVENT_ALL, NULL);
+
+    // Scrollback — sits between the title (y=110) and the textarea
+    // (bottom 90px). Reserved 110 top + 90 bottom = 200px outside
+    // the scrollback area itself.
+    obj_admin_cmd_scroll = lv_obj_create(scr_admin_cmd);
+    lv_obj_set_size(obj_admin_cmd_scroll,
+                    SCREEN_WIDTH - 20, SCREEN_HEIGHT - 200);
+    lv_obj_set_pos(obj_admin_cmd_scroll, 10, 110);
+    lv_obj_set_style_bg_color(obj_admin_cmd_scroll,
+                              lv_color_make(8, 8, 12), 0);
+    lv_obj_set_style_border_width(obj_admin_cmd_scroll, 0, 0);
+    lv_obj_set_style_radius(obj_admin_cmd_scroll, 8, 0);
+    lv_obj_set_style_pad_all(obj_admin_cmd_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_admin_cmd_scroll, LV_DIR_VER);
+    lv_obj_set_flex_flow(obj_admin_cmd_scroll, LV_FLEX_FLOW_COLUMN);
+}
+
+// Settings menu list — piece 5. Subpage with a scroll container of
+// rows. Rows are rebuilt on every entry so guest vs admin visibility
+// is honoured after a re-login. Each row taps into a shared
+// placeholder subpage (scr_admin_setting_placeholder) until the
+// individual setting screens get built out.
+static void create_admin_settings_screen() {
+    scr_admin_settings = create_admin_subpage("Settings", 14);
+
+    // Scroll container for the rows. Sits below the title with
+    // bottom margin for the home indicator area.
+    obj_admin_settings_list = lv_obj_create(scr_admin_settings);
+    lv_obj_set_size(obj_admin_settings_list, SCREEN_WIDTH, SCREEN_HEIGHT - 110);
+    lv_obj_set_pos(obj_admin_settings_list, 0, 100);
+    lv_obj_set_style_bg_color(obj_admin_settings_list, lv_color_black(), 0);
+    lv_obj_set_style_border_width(obj_admin_settings_list, 0, 0);
+    lv_obj_set_style_pad_all(obj_admin_settings_list, 10, 0);
+    lv_obj_set_scroll_dir(obj_admin_settings_list, LV_DIR_VER);
+
+    // First populate happens in on_admin_menu_settings_tap via
+    // admin_settings_rebuild_list, since session role isn't known at
+    // creation time.
+}
+
+// Generic placeholder subpage for individual settings, reused for all
+// 10 settings. The title and body labels get updated on entry to
+// reflect which row was tapped.
+static void create_admin_setting_placeholder_screen() {
+    scr_admin_setting_placeholder = lv_obj_create(NULL);
+    lock_screen_scroll(scr_admin_setting_placeholder);
+    lv_obj_set_style_bg_color(scr_admin_setting_placeholder, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_admin_setting_placeholder, 15,
+                                &meck_montserrat_22, 30);
+
+    // Back button — returns to the Settings menu list (not Admin
+    // home, which is where on_admin_subpage_back goes).
+    lv_obj_t* btn_back = lv_button_create(scr_admin_setting_placeholder);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t* bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_admin_setting_back,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Title — populated on entry. Stored in the file-scope handle so
+    // on_admin_setting_row_tap can update it.
+    lbl_admin_setting_placeholder_title = lv_label_create(scr_admin_setting_placeholder);
+    lv_label_set_text(lbl_admin_setting_placeholder_title, "");
+    lv_obj_set_style_text_color(lbl_admin_setting_placeholder_title,
+                                lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(lbl_admin_setting_placeholder_title, &meck_montserrat_24, 0);
+    lv_obj_align(lbl_admin_setting_placeholder_title,
+                 LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Body — populated on entry.
+    lbl_admin_setting_placeholder_body = lv_label_create(scr_admin_setting_placeholder);
+    lv_label_set_text(lbl_admin_setting_placeholder_body, "");
+    lv_obj_set_style_text_color(lbl_admin_setting_placeholder_body,
+                                lv_color_make(180, 180, 180), 0);
+    meck_set_font(lbl_admin_setting_placeholder_body, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_admin_setting_placeholder_body,
+                           LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_admin_setting_placeholder_body, SCREEN_WIDTH - 40);
+    lv_obj_align(lbl_admin_setting_placeholder_body,
+                 LV_ALIGN_TOP_LEFT, 20, 130);
+}
+
+// Back from an individual setting placeholder → Settings menu list
+// (not Admin home, which is where on_admin_subpage_back goes).
+static void on_admin_setting_back(lv_event_t *e) {
+    if (scr_admin_settings) lv_screen_load(scr_admin_settings);
+}
+
+// Per-row tap handler. user_data is a static const char* setting
+// name. Updates the placeholder screen's title + body and loads it.
+static void on_admin_setting_row_tap(lv_event_t *e) {
+    const char* name = (const char*)lv_event_get_user_data(e);
+    if (!name) return;
+
+    printf("Admin Settings: '%s' tapped\n", name);
+
+    if (lbl_admin_setting_placeholder_title) {
+        lv_label_set_text(lbl_admin_setting_placeholder_title, name);
+    }
+    if (lbl_admin_setting_placeholder_body) {
+        char body[160];
+        snprintf(body, sizeof(body),
+                 "%s\n\n"
+                 "This setting is part of the admin menu, but the\n"
+                 "control screen for it isn't built yet. It'll be\n"
+                 "added in a future piece.",
+                 name);
+        lv_label_set_text(lbl_admin_setting_placeholder_body, body);
+    }
+    if (scr_admin_setting_placeholder) {
+        lv_screen_load(scr_admin_setting_placeholder);
+    }
+}
+
+// Rebuild the rows in obj_admin_settings_list. Called from
+// on_admin_menu_settings_tap on every entry so admin vs guest
+// visibility is reflected.
+//
+// Row order is by frequency of use, with most-used at top. Guests
+// see only the rows that don't require admin permission:
+// Neighbours, Firmware Info.
+static void admin_settings_rebuild_list() {
+    if (!obj_admin_settings_list) return;
+
+    // Clear existing rows.
+    lv_obj_clean(obj_admin_settings_list);
+
+    // (label, admin_only) pairs.
+    struct SettingRow {
+        const char* name;
+        bool admin_only;
+    };
+    static const SettingRow ROWS[] = {
+        { "Neighbours",          false },  // guest-visible
+        { "Sync Clock",          true  },
+        { "Firmware Info",       false },  // guest-visible
+        { "Manage Regions",      true  },
+        { "Position",            true  },
+        { "Repeat Settings",     true  },
+        { "Access Control",      true  },
+        { "Admin Password",      true  },
+        { "Guest Password",      true  },
+        { "Change Identity Key", true  },
+    };
+
+    int y = 5;
+    for (size_t i = 0; i < sizeof(ROWS) / sizeof(ROWS[0]); i++) {
+        if (ROWS[i].admin_only && !g_admin_session_is_admin) continue;
+
+        lv_obj_t* btn = lv_button_create(obj_admin_settings_list);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 40, 70);
+        lv_obj_set_pos(btn, 10, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
+        // user_data is the static string literal, used by the tap
+        // handler to look up which row was pressed.
+        lv_obj_add_event_cb(btn, on_admin_setting_row_tap,
+                            LV_EVENT_CLICKED, (void*)ROWS[i].name);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, ROWS[i].name);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_22, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
+
+        lv_obj_t* arrow = lv_label_create(btn);
+        lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(arrow,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(arrow, &meck_montserrat_18, 0);
+        lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -10, 0);
+
+        y += 80;
+    }
+}
+
+static void create_admin_home_screen() {
+    scr_admin_home = lv_obj_create(NULL);
+    lock_screen_scroll(scr_admin_home);
+    lv_obj_set_style_bg_color(scr_admin_home, lv_color_black(), 0);
+    // Slot 10 — same as the piece-3 placeholder it replaces.
+    screen_attach_clock_battery(scr_admin_home, 10, &meck_montserrat_22, 30);
+
+    // Title — "Admin" only (avoids the camera punch-hole).
+    lv_obj_t *title = lv_label_create(scr_admin_home);
+    lv_label_set_text(title, "Admin");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Persistent banner — green/yellow, full-width, just under the
+    // clock/battery header. Updated by admin_home_update_banner on
+    // login dispatch. Only present on the home menu list (not on
+    // subpages).
+    obj_admin_banner = lv_obj_create(scr_admin_home);
+    lv_obj_set_size(obj_admin_banner, SCREEN_WIDTH - 40, 60);
+    lv_obj_set_pos(obj_admin_banner, 20, 120);
+    lv_obj_set_style_bg_color(obj_admin_banner,
+                              lv_palette_darken(LV_PALETTE_GREEN, 2), 0);
+    lv_obj_set_style_border_width(obj_admin_banner, 0, 0);
+    lv_obj_set_style_radius(obj_admin_banner, 8, 0);
+    lv_obj_set_style_pad_all(obj_admin_banner, 0, 0);
+    lock_screen_scroll(obj_admin_banner);
+
+    lbl_admin_banner = lv_label_create(obj_admin_banner);
+    lv_label_set_text(lbl_admin_banner, "Logged in");
+    lv_obj_set_style_text_color(lbl_admin_banner, lv_color_white(), 0);
+    meck_set_font(lbl_admin_banner, &meck_montserrat_22, 0);
+    lv_obj_center(lbl_admin_banner);
+
+    // Menu rows. y=200 below the banner with comfortable spacing.
+    // Order: Status, Send Advert (frequent operations), Cmd Line,
+    // Settings (less frequent).
+    int y = 200;
+    create_admin_menu_row(scr_admin_home, "Status",      y, on_admin_menu_status_tap);
+    y += 90;
+    create_admin_menu_row(scr_admin_home, "Send Advert", y, on_admin_menu_send_advert_tap);
+    y += 90;
+    create_admin_menu_row(scr_admin_home, "Cmd Line",    y, on_admin_menu_cmd_tap);
+    y += 90;
+    create_admin_menu_row(scr_admin_home, "Settings",    y, on_admin_menu_settings_tap);
+
+    // Back button — bottom-left. Tears down the session and returns
+    // to contact detail.
+    lv_obj_t *btn_back = lv_button_create(scr_admin_home);
+    lv_obj_set_size(btn_back, 140, 70);
+    lv_obj_align(btn_back, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_admin_home_back, LV_EVENT_CLICKED, NULL);
+
+    // Build subpage screens after the home so any references between
+    // them are resolved.
+    create_admin_status_screen();
+    create_admin_send_advert_screen();
+    create_admin_cmd_screen();
+    create_admin_settings_screen();
+    create_admin_setting_placeholder_screen();
+}
+
 extern "C" void meck_ui_init() {
     printf("MeckUI: building home screen\n");
 
@@ -5820,6 +7785,8 @@ extern "C" void meck_ui_init() {
     create_contacts_screen();
     create_contact_detail_screen();
     create_discover_screen();
+    create_admin_login_screen();
+    create_admin_home_screen();
     meck_audio_ui_init();
 
     lv_timer_create(ui_update_timer_cb, 500, NULL);
@@ -5860,6 +7827,14 @@ extern "C" void meck_ui_init() {
     // so they're not silently lost.
     meck_register_dm_recv_callback(meck_dm_recv_dispatch);
     meck_register_dm_sent_callback(meck_dm_sent_dispatch);
+
+    // Repeater admin callbacks. Login + send-result wired in piece 3,
+    // status + CLI dispatch wired in piece 4. Telemetry callback lands
+    // in piece 5 when the screen that consumes it exists.
+    meck_register_admin_send_result_callback(meck_admin_send_result_dispatch);
+    meck_register_admin_login_callback(meck_admin_login_dispatch);
+    meck_register_admin_status_callback(meck_admin_status_dispatch);
+    meck_register_admin_cli_callback(meck_admin_cli_dispatch);
 
     // Hydrate per-contact DM rings from /sdcard/meshcore/dms.bin. Runs
     // after the mesh + contacts are loaded so the pub_key prefix demux

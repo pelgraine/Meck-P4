@@ -124,6 +124,10 @@ static void meck_task(void* arg) {
         radio_apply_pending_reconfig();
         meck_apply_pending_send();
         meck_apply_pending_send_dm();
+        meck_apply_pending_admin_login();
+        meck_apply_pending_admin_status();
+        meck_apply_pending_admin_cli();
+        meck_apply_pending_admin_telemetry();
         meck_apply_pending_save();
         if (g_the_mesh) {
             g_the_mesh->loop();
@@ -310,6 +314,297 @@ extern "C" void meck_drain_pending_dms() {
             // unregistered). Log so the message isn't silently lost.
             printf("meck_drain_pending_dms: no callback, dropping DM from %s: %s\n",
                    dm.from_name, dm.text);
+        }
+    }
+}
+
+// ============================================================================
+// Repeater Admin bridge
+// ----------------------------------------------------------------------------
+// Send-side: four one-deep queues, one per request type. LVGL queues via
+// meck_request_admin_*; meck_task drains via meck_apply_pending_admin_*
+// at the top of its loop. Each apply calls the corresponding Meck::ui*
+// method which actually touches the radio.
+//
+// Send-result notification: a single shared g_admin_send_result_*
+// slot is populated after each send attempt (success or failure). The
+// LVGL task picks it up on its next tick via the drain dispatcher.
+//
+// Receive-side: meck_task's onContactResponse / onCommandDataRecv push
+// onto Meck's per-type pending rings. meck_drain_pending_admin_responses
+// pops each ring and fires the matching registered callback. All
+// callbacks run on the LVGL task.
+// ============================================================================
+
+// ---- Send queues (one-deep each) ----
+static volatile bool g_admin_login_pending     = false;
+static volatile int  g_admin_login_contact_idx = -1;
+static char          g_admin_login_password[64] = {};
+
+static volatile bool g_admin_status_pending     = false;
+static volatile int  g_admin_status_contact_idx = -1;
+
+static volatile bool g_admin_cli_pending     = false;
+static volatile int  g_admin_cli_contact_idx = -1;
+static char          g_admin_cli_command[160] = {};
+
+static volatile bool g_admin_telemetry_pending     = false;
+static volatile int  g_admin_telemetry_contact_idx = -1;
+
+// ---- Send-result notification slot (one-deep, shared across all types) ----
+// Populated by meck_apply_pending_admin_* after each send attempt; drained
+// by meck_drain_pending_admin_responses on the LVGL task. If two send
+// attempts complete between two LVGL ticks the second overwrites the
+// first's notification — acceptable because the UI flow is sequential
+// (user can't tap a second admin button before the first lands).
+static volatile bool                 g_admin_send_result_pending  = false;
+static volatile meck_admin_req_type_t g_admin_send_result_type    = MECK_ADMIN_REQ_LOGIN;
+static volatile bool                 g_admin_send_result_success  = false;
+static volatile uint32_t             g_admin_send_result_timeout  = 0;
+
+// ---- Callback slots ----
+static meck_admin_send_result_cb_t g_admin_send_result_cb = nullptr;
+static meck_admin_login_cb_t       g_admin_login_cb       = nullptr;
+static meck_admin_status_cb_t      g_admin_status_cb      = nullptr;
+static meck_admin_cli_cb_t         g_admin_cli_cb         = nullptr;
+static meck_admin_telemetry_cb_t   g_admin_telemetry_cb   = nullptr;
+
+// ---- Send-queue producers (called by LVGL task) ----
+
+extern "C" void meck_request_admin_login(int contact_idx, const char* password) {
+    if (!password) return;
+    g_admin_login_contact_idx = contact_idx;
+    strncpy(g_admin_login_password, password, sizeof(g_admin_login_password) - 1);
+    g_admin_login_password[sizeof(g_admin_login_password) - 1] = '\0';
+    g_admin_login_pending = true;
+    printf("meck_request_admin_login: queued contact[%d]\n", contact_idx);
+}
+
+extern "C" void meck_request_admin_status(int contact_idx) {
+    g_admin_status_contact_idx = contact_idx;
+    g_admin_status_pending = true;
+    printf("meck_request_admin_status: queued contact[%d]\n", contact_idx);
+}
+
+extern "C" void meck_request_admin_cli(int contact_idx, const char* command) {
+    if (!command) return;
+    g_admin_cli_contact_idx = contact_idx;
+    strncpy(g_admin_cli_command, command, sizeof(g_admin_cli_command) - 1);
+    g_admin_cli_command[sizeof(g_admin_cli_command) - 1] = '\0';
+    g_admin_cli_pending = true;
+    printf("meck_request_admin_cli: queued contact[%d] cmd='%s'\n",
+           contact_idx, g_admin_cli_command);
+}
+
+extern "C" void meck_request_admin_telemetry(int contact_idx) {
+    g_admin_telemetry_contact_idx = contact_idx;
+    g_admin_telemetry_pending = true;
+    printf("meck_request_admin_telemetry: queued contact[%d]\n", contact_idx);
+}
+
+// Helper: record a send-result for the LVGL task to pick up on next drain.
+// Last-write-wins if two completions happen in the same meck_task loop
+// (rare, single-session policy).
+static void admin_post_send_result(meck_admin_req_type_t type,
+                                    bool success,
+                                    uint32_t est_timeout) {
+    g_admin_send_result_type    = type;
+    g_admin_send_result_success = success;
+    g_admin_send_result_timeout = est_timeout;
+    g_admin_send_result_pending = true;
+}
+
+// ---- Send-queue drains (called by meck_task) ----
+
+extern "C" void meck_apply_pending_admin_login() {
+    if (!g_admin_login_pending) return;
+    g_admin_login_pending = false;
+    if (!g_the_mesh) {
+        admin_post_send_result(MECK_ADMIN_REQ_LOGIN, false, 0);
+        return;
+    }
+
+    int contact_idx = g_admin_login_contact_idx;
+    uint32_t est_timeout = 0;
+    bool ok = g_the_mesh->uiLoginToRepeater(contact_idx, g_admin_login_password,
+                                             est_timeout);
+
+    // Wipe the password buffer post-send. Belt and braces — the buffer
+    // is in DRAM and would otherwise hang around indefinitely as a
+    // plaintext copy of a credential.
+    memset(g_admin_login_password, 0, sizeof(g_admin_login_password));
+
+    admin_post_send_result(MECK_ADMIN_REQ_LOGIN, ok, est_timeout);
+    printf(">>> %s admin login to contact[%d], est_timeout=%ums\n",
+           ok ? "Sent" : "FAILED",
+           contact_idx, (unsigned)est_timeout);
+}
+
+extern "C" void meck_apply_pending_admin_status() {
+    if (!g_admin_status_pending) return;
+    g_admin_status_pending = false;
+    if (!g_the_mesh) {
+        admin_post_send_result(MECK_ADMIN_REQ_STATUS, false, 0);
+        return;
+    }
+
+    int contact_idx = g_admin_status_contact_idx;
+    uint32_t est_timeout = 0;
+    bool ok = g_the_mesh->uiSendStatusRequest(contact_idx, est_timeout);
+
+    admin_post_send_result(MECK_ADMIN_REQ_STATUS, ok, est_timeout);
+    printf(">>> %s admin status request to contact[%d], est_timeout=%ums\n",
+           ok ? "Sent" : "FAILED",
+           contact_idx, (unsigned)est_timeout);
+}
+
+extern "C" void meck_apply_pending_admin_cli() {
+    if (!g_admin_cli_pending) return;
+    g_admin_cli_pending = false;
+    if (!g_the_mesh) {
+        admin_post_send_result(MECK_ADMIN_REQ_CLI, false, 0);
+        return;
+    }
+
+    int contact_idx = g_admin_cli_contact_idx;
+    uint32_t est_timeout = 0;
+    bool ok = g_the_mesh->uiSendCliCommand(contact_idx, g_admin_cli_command,
+                                            est_timeout);
+
+    admin_post_send_result(MECK_ADMIN_REQ_CLI, ok, est_timeout);
+    printf(">>> %s admin CLI to contact[%d] '%s', est_timeout=%ums\n",
+           ok ? "Sent" : "FAILED",
+           contact_idx, g_admin_cli_command, (unsigned)est_timeout);
+}
+
+extern "C" void meck_apply_pending_admin_telemetry() {
+    if (!g_admin_telemetry_pending) return;
+    g_admin_telemetry_pending = false;
+    if (!g_the_mesh) {
+        admin_post_send_result(MECK_ADMIN_REQ_TELEMETRY, false, 0);
+        return;
+    }
+
+    int contact_idx = g_admin_telemetry_contact_idx;
+    uint32_t est_timeout = 0;
+    bool ok = g_the_mesh->uiSendTelemetryRequest(contact_idx, est_timeout);
+
+    admin_post_send_result(MECK_ADMIN_REQ_TELEMETRY, ok, est_timeout);
+    printf(">>> %s admin telemetry request to contact[%d], est_timeout=%ums\n",
+           ok ? "Sent" : "FAILED",
+           contact_idx, (unsigned)est_timeout);
+}
+
+extern "C" void meck_admin_clear_session() {
+    if (!g_the_mesh) return;
+    g_the_mesh->clearAdminSession();
+    // Also wipe any pending requests so a stale queue can't trigger
+    // sends to a contact the UI thinks it's no longer admin'd on.
+    g_admin_login_pending     = false;
+    g_admin_status_pending    = false;
+    g_admin_cli_pending       = false;
+    g_admin_telemetry_pending = false;
+    memset(g_admin_login_password, 0, sizeof(g_admin_login_password));
+    printf("meck_admin_clear_session: cleared\n");
+}
+
+// ---- Callback registration ----
+
+extern "C" void meck_register_admin_send_result_callback(meck_admin_send_result_cb_t cb) {
+    g_admin_send_result_cb = cb;
+    printf("meck_register_admin_send_result_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+extern "C" void meck_register_admin_login_callback(meck_admin_login_cb_t cb) {
+    g_admin_login_cb = cb;
+    printf("meck_register_admin_login_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+extern "C" void meck_register_admin_status_callback(meck_admin_status_cb_t cb) {
+    g_admin_status_cb = cb;
+    printf("meck_register_admin_status_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+extern "C" void meck_register_admin_cli_callback(meck_admin_cli_cb_t cb) {
+    g_admin_cli_cb = cb;
+    printf("meck_register_admin_cli_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+extern "C" void meck_register_admin_telemetry_callback(meck_admin_telemetry_cb_t cb) {
+    g_admin_telemetry_cb = cb;
+    printf("meck_register_admin_telemetry_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+// ---- Response drain (LVGL task, called from ui_update_timer_cb) ----
+
+extern "C" void meck_drain_pending_admin_responses() {
+    if (!g_the_mesh) return;
+
+    // Send-result notification first — UI uses this to dismiss
+    // "Sending..." spinners and start countdowns. Single-shot per
+    // tick; if two completions happened between ticks, only the most
+    // recent surfaces (acceptable for sequential admin flow).
+    if (g_admin_send_result_pending) {
+        g_admin_send_result_pending = false;
+        meck_admin_req_type_t type = g_admin_send_result_type;
+        bool                  ok   = g_admin_send_result_success;
+        uint32_t              t    = g_admin_send_result_timeout;
+        if (g_admin_send_result_cb) {
+            g_admin_send_result_cb(type, ok, t);
+        }
+    }
+
+    // Login responses
+    {
+        Meck::PendingAdminLogin r;
+        while (g_the_mesh->drainPendingAdminLogin(r)) {
+            if (g_admin_login_cb) {
+                g_admin_login_cb(r.success, r.is_admin, r.permissions,
+                                 r.fw_ver_level, r.clock_tag, r.contact_idx);
+            } else {
+                printf("meck_drain_pending_admin_responses: no login callback, "
+                       "dropping result success=%d contact=%d\n",
+                       r.success ? 1 : 0, r.contact_idx);
+            }
+        }
+    }
+
+    // Status responses
+    {
+        Meck::PendingAdminStatus r;
+        while (g_the_mesh->drainPendingAdminStatus(r)) {
+            if (g_admin_status_cb) {
+                g_admin_status_cb(&r.stats, r.clock_tag, r.contact_idx);
+            } else {
+                printf("meck_drain_pending_admin_responses: no status callback, "
+                       "dropping result contact=%d\n", r.contact_idx);
+            }
+        }
+    }
+
+    // CLI responses
+    {
+        Meck::PendingAdminCli r;
+        while (g_the_mesh->drainPendingAdminCli(r)) {
+            if (g_admin_cli_cb) {
+                g_admin_cli_cb(r.text, r.contact_idx);
+            } else {
+                printf("meck_drain_pending_admin_responses: no CLI callback, "
+                       "dropping response contact=%d\n", r.contact_idx);
+            }
+        }
+    }
+
+    // Telemetry responses
+    {
+        Meck::PendingAdminTelemetry r;
+        while (g_the_mesh->drainPendingAdminTelemetry(r)) {
+            if (g_admin_telemetry_cb) {
+                g_admin_telemetry_cb(r.lpp, r.lpp_len, r.clock_tag, r.contact_idx);
+            } else {
+                printf("meck_drain_pending_admin_responses: no telemetry callback, "
+                       "dropping response contact=%d\n", r.contact_idx);
+            }
         }
     }
 }
