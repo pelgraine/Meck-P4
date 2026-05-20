@@ -106,6 +106,20 @@ struct P4NodePrefs {
     uint8_t kb_layout;            // 0 = QWERTY (default), 1 = AZERTY, 2 = QWERTZ
     uint8_t font_scale;           // 0 = Classic, 1 = Larger
 
+    // Map screen — last-viewed center for restore-on-entry, plus the
+    // type-filter bitmask. All four fields use 0 as the "not set"
+    // sentinel so existing NVS blobs (which had reserved bytes here
+    // previously) come up cleanly with the Sydney CBD fallback and the
+    // repeaters-only default filter. loadPrefs already memsets to zero
+    // and tolerates short reads, so appending here is safe with no
+    // version bump.
+    int32_t map_last_lat_e7;      // 0 = not set; otherwise lat * 1e7
+    int32_t map_last_lon_e7;      // 0 = not set; otherwise lon * 1e7
+    uint8_t map_last_zoom;        // 0 = not set; else clamped to detected range
+    uint8_t map_filter_mask;      // 0 = not set (use default = repeaters only)
+                                  // bit 7 set = user has explicitly chosen
+                                  // bits 0..3 = chat | repeater | room | sensor
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -127,6 +141,10 @@ struct P4NodePrefs {
         kb_dark_mode = 0;       // dark theme (matches the rest of Meck's UI)
         kb_layout = 0;          // QWERTY
         font_scale = 0;         // Classic
+        map_last_lat_e7 = 0;    // not set -> Sydney CBD fallback
+        map_last_lon_e7 = 0;    // not set
+        map_last_zoom = 0;      // not set -> mid of detected range
+        map_filter_mask = 0;    // not set -> repeaters only
     }
 };
 

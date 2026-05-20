@@ -38,6 +38,7 @@
 #include "MeckMesh.h"
 #include "MeckDataStore.h"
 #include "MeckAudioUI.h"
+#include "MeckMapScreen.h"
 
 #include <sys/lock.h>
 #include "lvgl.h"
@@ -882,7 +883,7 @@ static void cb_todo_discover(lv_event_t* e) {
     goto_discover(e);
 }
 static void cb_todo_trace(lv_event_t* e)    { printf("MeckUI: Trace tile clicked (TODO)\n"); }
-static void cb_todo_maps(lv_event_t* e)     { printf("MeckUI: Maps tile clicked (TODO)\n"); }
+static void cb_todo_maps(lv_event_t* e)     { meck_map_ui_show(); }
 static void goto_audio_browser(lv_event_t* e) {
     (void)e;
     meck_audio_ui_show_browser();
@@ -1775,9 +1776,12 @@ static void format_local_time(uint32_t utc_epoch, char* buf, size_t buf_len) {
 // é, ñ, ø all work), but emoji, CJK, and other higher-plane Unicode render
 // as the missing-glyph "tofu" box. Pre-stripping at render time gives clean
 // text instead of brackets.
+//
+// Linkage note: kept non-static so MeckMapScreen.cpp can reuse it through
+// an extern "C" forward declaration. Same convention as lock_screen_scroll.
 // ============================================================================
 
-static void strip_unrenderable(const char *src, char *dst, size_t dst_sz) {
+extern "C" void strip_unrenderable(const char *src, char *dst, size_t dst_sz) {
     if (!dst || dst_sz == 0) return;
     if (!src) { dst[0] = '\0'; return; }
     size_t di = 0;
@@ -8599,6 +8603,7 @@ extern "C" void meck_ui_init() {
     create_admin_login_screen();
     create_admin_home_screen();
     meck_audio_ui_init();
+    meck_map_ui_init();
 
     lv_timer_create(ui_update_timer_cb, 500, NULL);
 

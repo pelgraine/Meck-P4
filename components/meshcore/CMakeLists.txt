@@ -39,6 +39,7 @@ idf_component_register(
         "MeckUI.cpp"
         "MeckAudio.cpp"
         "MeckAudioUI.cpp"
+        "MeckMapScreen.cpp"
         "es8311.cpp" 
         "meck_montserrat_14.c"
         "meck_montserrat_16.c"

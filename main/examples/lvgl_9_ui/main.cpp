@@ -5801,9 +5801,7 @@ extern "C" void app_main(void)
     _lock_release(&lvgl_api_lock);
 
     ES8311_IIC_Bus->set_bus_handle(SGM38121_IIC_Bus->get_bus_handle());
-    // ES8311_Init();  // disabled — see comment block below. Leaving this call
-                      // active also pins the I2S driver's APB_FREQ_MAX PM lock
-                      // permanently, blocking DFS from clocking APB down.
+    ES8311_Init();  // re-enabled - audio doesn't work without it
     // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     // Meck audio backend (components/meshcore/MeckAudio.cpp) now owns the
     // ES8311 lifecycle. It initialises the codec lazily on first audio
