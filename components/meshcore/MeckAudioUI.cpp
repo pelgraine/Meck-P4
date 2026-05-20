@@ -30,6 +30,11 @@
 #include <string>
 #include <algorithm>
 
+// Debug Logs: rewrites printf -> meck_debug_log_printf so calls below
+// land in the SD log file when Settings > Debug Logs > Start is active.
+// See meck_log.h for the macro mechanism.
+#include "meck_log.h"
+
 /* ============================================================================
  * Constants
  * ==========================================================================*/

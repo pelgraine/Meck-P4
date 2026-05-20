@@ -27,6 +27,11 @@
 #include "mbedtls/base64.h"
 #include <strings.h>   // strcasecmp for case-insensitive name match in migrateChannelSecrets
 
+// Debug Logs: rewrites printf -> meck_debug_log_printf so calls below
+// land in the SD log file when Settings > Debug Logs > Start is active.
+// See meck_log.h for the macro mechanism.
+#include "meck_log.h"
+
 // Forward decl for the deferred SD-save queue, defined in meck_app.cpp.
 // Allows ring-write call sites in this header to enqueue without including
 // target.h (which would pull P4SX1262Radio.h into hot paths). ring_idx is

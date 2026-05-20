@@ -52,6 +52,11 @@
 #include "variant.h"
 #include "MeckSDCard.h"
 
+// Debug Logs: rewrites printf -> meck_debug_log_printf so calls below
+// land in the SD log file when Settings > Debug Logs > Start is active.
+// See meck_log.h for the macro mechanism.
+#include "meck_log.h"
+
 // ---- Channel storage record ----
 // Matches MeshCore's channel structure: name + 32-byte secret
 #define P4_CHANNEL_NAME_MAX  32

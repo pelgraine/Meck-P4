@@ -36,6 +36,11 @@
 #include "MeckDataStore.h"
 #include "MeckUI.h"
 
+// Debug Logs: rewrites printf -> meck_debug_log_printf so calls below
+// land in the SD log file when Settings > Debug Logs > Start is active.
+// See meck_log.h for the macro mechanism.
+#include "meck_log.h"
+
 // ----------------------------------------------------------------------------
 // External symbols from MeckUI.cpp.
 // meck_get_instance() is declared in target.h (included via MeckMesh.h

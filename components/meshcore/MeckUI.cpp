@@ -53,6 +53,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <climits>
+#include <cstdarg>   // va_list, va_start, va_end (meck_debug_log_printf)
+#include <cerrno>    // errno (Debug Logs fopen error reporting)
 
 extern _lock_t lvgl_api_lock;
 
@@ -368,6 +370,25 @@ static lv_obj_t *lbl_set_txpower   = NULL;
 static lv_obj_t *lbl_set_utc       = NULL;
 static lv_obj_t *lbl_set_pathhash  = NULL;
 static lv_obj_t *lbl_set_homecolor = NULL;
+
+// Debug Logs subpage (Settings > Debug Logs)
+// Captures Meck source printf calls (via meck_log.h macro substitution) to
+// /sdcard/meshcore/logs/log_<unix>.txt while active. When Start is tapped
+// the file is fopen'd and g_debug_log_active flips true; meck_debug_log_printf
+// then writes to the file instead of UART. Sync write per line under a
+// recursive mutex so cross-task printf calls serialise on the FILE*.
+static lv_obj_t *scr_debug_logs        = NULL;
+static lv_obj_t *lbl_set_debug_logs    = NULL;  // value label on the Settings row
+static lv_obj_t *lbl_debug_status      = NULL;  // status text on the subpage
+static lv_obj_t *btn_debug_start       = NULL;
+static lv_obj_t *btn_debug_stop        = NULL;
+static lv_obj_t *btn_debug_export      = NULL;
+
+static bool              g_debug_log_active = false;
+static FILE             *g_debug_log_fp    = nullptr;
+static SemaphoreHandle_t g_debug_log_mutex = nullptr;  // recursive
+static char g_debug_log_path[96]    = "";     // most-recent session file path
+static char g_debug_export_path[96] = "";     // most-recent export path (after Export tap)
 static lv_obj_t *slider_set_brightness   = NULL;
 static lv_obj_t *lbl_set_brightness_pct  = NULL;
 static lv_obj_t *lbl_set_screen_off  = NULL;
@@ -932,6 +953,14 @@ static void on_settings_autoadd_sensor_tap(lv_event_t *e);
 static void on_settings_autoadd_overwrite_tap(lv_event_t *e);
 static void on_settings_backup_to_sd_tap(lv_event_t *e);
 static void on_settings_export_config_tap(lv_event_t *e);
+// Debug Logs subpage handlers
+static void on_settings_debug_logs_tap(lv_event_t *e);
+static void create_debug_logs_screen();
+static void on_debug_log_start_tap(lv_event_t *e);
+static void on_debug_log_stop_tap(lv_event_t *e);
+static void on_debug_log_export_tap(lv_event_t *e);
+static void on_debug_logs_back(lv_event_t *e);
+static void debug_log_update_status();
 static void on_export_modal_identity_changed(lv_event_t *e);
 static void on_export_modal_cancel(lv_event_t *e);
 static void on_export_modal_export(lv_event_t *e);
@@ -3862,6 +3891,352 @@ static void on_settings_export_config_tap(lv_event_t *e) {
     lv_obj_clear_flag(obj_export_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ============================================================================
+// Debug Logs subpage handlers
+// ----------------------------------------------------------------------------
+// Start fopen's /sdcard/meshcore/logs/log_<unix>.txt and flips
+// g_debug_log_active true. Meck source files include "meck_log.h" which
+// rewrites printf -> meck_debug_log_printf via macro; that function checks
+// g_debug_log_active and either writes to the SD file (under mutex) or
+// falls through to vprintf (UART) when inactive. Stop closes the file.
+// Export stream-copies the most-recent session log to
+// /sdcard/meck_debug_<unix>.txt at the SD root for easy access when the
+// card is mounted on a computer.
+//
+// While Start is active, no output goes to the USB serial console — the
+// printf wrapper writes only to SD. Serial returns the moment Stop is
+// tapped. Writes are sync per line under a recursive FreeRTOS mutex, so
+// cross-task printf calls serialise on the FILE* and may stall briefly
+// when the SD is slow.
+// ============================================================================
+
+// printf wrapper installed via meck_log.h macro substitution. When debug
+// logging is active, writes the formatted line to the SD log file under
+// the recursive mutex. When inactive, falls through to vprintf so output
+// goes to UART as it normally would.
+//
+// Returns the number of bytes written (matches printf semantics).
+extern "C" int meck_debug_log_printf(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+
+    if (g_debug_log_active && g_debug_log_mutex) {
+        xSemaphoreTakeRecursive(g_debug_log_mutex, portMAX_DELAY);
+        // Re-check under the mutex — Stop might have just closed the
+        // file between our check above and the take.
+        if (g_debug_log_active && g_debug_log_fp) {
+            int n = vfprintf(g_debug_log_fp, fmt, args);
+            fflush(g_debug_log_fp);
+            xSemaphoreGiveRecursive(g_debug_log_mutex);
+            va_end(args);
+            return n;
+        }
+        xSemaphoreGiveRecursive(g_debug_log_mutex);
+        // Fell through — state changed under us. Treat as inactive.
+    }
+
+    // Inactive (or transitioning) — write to UART as normal printf would.
+    int n = vprintf(fmt, args);
+    va_end(args);
+    return n;
+}
+
+// Refresh the button enable states + status label based on
+// g_debug_log_active and whether a file/export exists.
+static void debug_log_update_status() {
+    // Button enable states.
+    if (btn_debug_start) {
+        if (g_debug_log_active) lv_obj_add_state(btn_debug_start, LV_STATE_DISABLED);
+        else                    lv_obj_clear_state(btn_debug_start, LV_STATE_DISABLED);
+    }
+    if (btn_debug_stop) {
+        if (g_debug_log_active) lv_obj_clear_state(btn_debug_stop, LV_STATE_DISABLED);
+        else                    lv_obj_add_state(btn_debug_stop, LV_STATE_DISABLED);
+    }
+    if (btn_debug_export) {
+        // Enabled only when capture is stopped AND a file exists.
+        bool can_export = (!g_debug_log_active) && (g_debug_log_path[0] != '\0');
+        if (can_export) lv_obj_clear_state(btn_debug_export, LV_STATE_DISABLED);
+        else            lv_obj_add_state(btn_debug_export, LV_STATE_DISABLED);
+    }
+
+    // Status label text — pick the most informative state.
+    if (lbl_debug_status) {
+        char buf[160];
+        if (g_debug_log_active) {
+            // Trim path to basename for display.
+            const char* slash = strrchr(g_debug_log_path, '/');
+            const char* base  = slash ? slash + 1 : g_debug_log_path;
+            snprintf(buf, sizeof(buf), "Recording -> %s", base);
+        } else if (g_debug_export_path[0] != '\0') {
+            const char* slash = strrchr(g_debug_export_path, '/');
+            const char* base  = slash ? slash + 1 : g_debug_export_path;
+            snprintf(buf, sizeof(buf), "Exported -> %s", base);
+        } else if (g_debug_log_path[0] != '\0') {
+            const char* slash = strrchr(g_debug_log_path, '/');
+            const char* base  = slash ? slash + 1 : g_debug_log_path;
+            snprintf(buf, sizeof(buf), "Stopped -> %s", base);
+        } else {
+            snprintf(buf, sizeof(buf), "Idle");
+        }
+        lv_label_set_text(lbl_debug_status, buf);
+    }
+
+    // Settings row value label.
+    if (lbl_set_debug_logs) {
+        if (g_debug_log_active) {
+            lv_label_set_text(lbl_set_debug_logs, "Recording");
+            lv_obj_set_style_text_color(lbl_set_debug_logs,
+                lv_palette_main(LV_PALETTE_GREEN), 0);
+        } else if (g_debug_log_path[0] != '\0') {
+            lv_label_set_text(lbl_set_debug_logs, "Stopped");
+            lv_obj_set_style_text_color(lbl_set_debug_logs,
+                lv_palette_main(LV_PALETTE_GREY), 0);
+        } else {
+            lv_label_set_text(lbl_set_debug_logs, "Idle");
+            lv_obj_set_style_text_color(lbl_set_debug_logs,
+                lv_palette_main(LV_PALETTE_GREY), 0);
+        }
+    }
+}
+
+static void on_debug_log_start_tap(lv_event_t *e) {
+    if (g_debug_log_active) return;
+
+    // Lazily create the mutex on first Start. Recursive so a single task
+    // calling printf inside another printf-style expression doesn't
+    // self-deadlock.
+    if (!g_debug_log_mutex) {
+        g_debug_log_mutex = xSemaphoreCreateRecursiveMutex();
+        if (!g_debug_log_mutex) {
+            if (lbl_debug_status) lv_label_set_text(lbl_debug_status, "Start failed: mutex alloc");
+            return;
+        }
+    }
+
+    // Make sure /sdcard/meshcore/logs exists. mkdir on an existing dir
+    // returns -1/EEXIST which we tolerate; only real fopen failure later
+    // is fatal.
+    mkdir("/sdcard/meshcore", 0755);
+    mkdir("/sdcard/meshcore/logs", 0755);
+
+    // Filename uses meck_clock_get_utc — if the RTC hasn't sync'd this
+    // returns 0 and the filename ends up log_0.txt. Acceptable for a
+    // diagnostic feature; once RTC is up the next session is timestamped.
+    uint32_t now = meck_clock_get_utc();
+    snprintf(g_debug_log_path, sizeof(g_debug_log_path),
+             "/sdcard/meshcore/logs/log_%lu.txt", (unsigned long)now);
+
+    FILE *fp = fopen(g_debug_log_path, "w");
+    if (!fp) {
+        // Direct vprintf-equivalent to UART since we haven't flipped
+        // g_debug_log_active yet; this printf goes to UART as normal.
+        printf("Debug log: fopen(%s) failed errno=%d\n", g_debug_log_path, errno);
+        g_debug_log_path[0] = '\0';
+        if (lbl_debug_status) lv_label_set_text(lbl_debug_status, "Start failed (see serial)");
+        return;
+    }
+    // Line-buffer so each newline flushes promptly to SD; default block
+    // buffering would hold up to ~4 KB before any output became visible
+    // in the file mid-session.
+    setvbuf(fp, NULL, _IOLBF, 0);
+
+    // Publish the file pointer and flip active under the mutex so any
+    // in-flight printf observers see a consistent state.
+    xSemaphoreTakeRecursive(g_debug_log_mutex, portMAX_DELAY);
+    g_debug_log_fp = fp;
+    g_debug_log_active = true;
+    g_debug_export_path[0] = '\0';   // clear stale export label from prior session
+    fprintf(g_debug_log_fp, "==== Meck debug log started ts=%lu ====\n",
+            (unsigned long)now);
+    fflush(g_debug_log_fp);
+    xSemaphoreGiveRecursive(g_debug_log_mutex);
+
+    debug_log_update_status();
+}
+
+static void on_debug_log_stop_tap(lv_event_t *e) {
+    if (!g_debug_log_active) return;
+    if (!g_debug_log_mutex) return;  // shouldn't happen — defensive
+
+    // Take the mutex so any concurrent printf finishes before we close
+    // the FILE*. Flip active to false under the mutex so the next
+    // printf attempt routes to UART.
+    xSemaphoreTakeRecursive(g_debug_log_mutex, portMAX_DELAY);
+    if (g_debug_log_fp) {
+        fprintf(g_debug_log_fp, "==== Meck debug log stopped ====\n");
+        fflush(g_debug_log_fp);
+        fclose(g_debug_log_fp);
+        g_debug_log_fp = nullptr;
+    }
+    g_debug_log_active = false;
+    xSemaphoreGiveRecursive(g_debug_log_mutex);
+
+    debug_log_update_status();
+}
+
+static void on_debug_log_export_tap(lv_event_t *e) {
+    if (g_debug_log_active) return;          // shouldn't be enabled, but defend
+    if (g_debug_log_path[0] == '\0') return; // no file to export
+
+    uint32_t now = meck_clock_get_utc();
+    snprintf(g_debug_export_path, sizeof(g_debug_export_path),
+             "/sdcard/meck_debug_%lu.txt", (unsigned long)now);
+
+    FILE* src = fopen(g_debug_log_path, "rb");
+    if (!src) {
+        printf("Debug log export: fopen(%s, rb) failed errno=%d\n",
+               g_debug_log_path, errno);
+        g_debug_export_path[0] = '\0';
+        if (lbl_debug_status) lv_label_set_text(lbl_debug_status, "Export failed (see serial)");
+        return;
+    }
+    FILE* dst = fopen(g_debug_export_path, "wb");
+    if (!dst) {
+        printf("Debug log export: fopen(%s, wb) failed errno=%d\n",
+               g_debug_export_path, errno);
+        fclose(src);
+        g_debug_export_path[0] = '\0';
+        if (lbl_debug_status) lv_label_set_text(lbl_debug_status, "Export failed (see serial)");
+        return;
+    }
+
+    char buf[1024];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
+        if (fwrite(buf, 1, n, dst) != n) { ok = false; break; }
+    }
+    fclose(src);
+    fclose(dst);
+
+    if (!ok) {
+        printf("Debug log export: write to %s failed mid-copy\n", g_debug_export_path);
+        g_debug_export_path[0] = '\0';
+        if (lbl_debug_status) lv_label_set_text(lbl_debug_status, "Export failed (see serial)");
+        return;
+    }
+
+    debug_log_update_status();
+}
+
+static void on_debug_logs_back(lv_event_t *e) {
+    if (scr_settings) lv_screen_load(scr_settings);
+}
+
+static void on_settings_debug_logs_tap(lv_event_t *e) {
+    debug_log_update_status();
+    if (scr_debug_logs) lv_screen_load(scr_debug_logs);
+}
+
+static void create_debug_logs_screen() {
+    scr_debug_logs = lv_obj_create(NULL);
+    lock_screen_scroll(scr_debug_logs);
+    lv_obj_set_style_bg_color(scr_debug_logs, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_debug_logs, 10, &meck_montserrat_22, 30);
+
+    // Back button — top-left.
+    lv_obj_t *btn_back = lv_button_create(scr_debug_logs);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_debug_logs_back, LV_EVENT_CLICKED, NULL);
+
+    // Title.
+    lv_obj_t *title = lv_label_create(scr_debug_logs);
+    lv_label_set_text(title, "Debug Logs");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_CYAN), 0);
+    meck_set_font(title, &meck_montserrat_22, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Status box — multi-line label inside a panel, room for the
+    // current state and an export path.
+    lv_obj_t *status_panel = lv_obj_create(scr_debug_logs);
+    lv_obj_set_size(status_panel, SCREEN_WIDTH - 40, 120);
+    lv_obj_set_pos(status_panel, 20, 110);
+    lv_obj_set_style_bg_color(status_panel, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_border_width(status_panel, 1, 0);
+    lv_obj_set_style_border_color(status_panel, lv_color_make(50, 50, 60), 0);
+    lv_obj_set_style_radius(status_panel, 10, 0);
+    lv_obj_set_style_pad_all(status_panel, 12, 0);
+    lock_screen_scroll(status_panel);
+
+    lbl_debug_status = lv_label_create(status_panel);
+    lv_label_set_text(lbl_debug_status, "Idle");
+    lv_obj_set_style_text_color(lbl_debug_status, lv_color_white(), 0);
+    meck_set_font(lbl_debug_status, &meck_montserrat_16, 0);
+    lv_label_set_long_mode(lbl_debug_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_debug_status, SCREEN_WIDTH - 80);
+
+    // Help text below the status panel describing what each button does.
+    lv_obj_t *lbl_help = lv_label_create(scr_debug_logs);
+    lv_label_set_text(lbl_help,
+        "Start: begin capturing stdout to SD\n"
+        "Stop: close the file (serial returns)\n"
+        "Export: copy the file to /sdcard root");
+    lv_obj_set_style_text_color(lbl_help, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(lbl_help, &meck_montserrat_14, 0);
+    lv_label_set_long_mode(lbl_help, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_help, SCREEN_WIDTH - 40);
+    lv_obj_set_pos(lbl_help, 20, 250);
+
+    // Three action buttons, stacked vertically below the help text.
+    int btn_y = 360;
+    int btn_h = 70;
+    int btn_gap = 20;
+    int btn_w = SCREEN_WIDTH - 40;
+
+    btn_debug_start = lv_button_create(scr_debug_logs);
+    lv_obj_set_size(btn_debug_start, btn_w, btn_h);
+    lv_obj_set_pos(btn_debug_start, 20, btn_y);
+    lv_obj_set_style_bg_color(btn_debug_start,
+        lv_palette_darken(LV_PALETTE_GREEN, 1), 0);
+    lv_obj_set_style_radius(btn_debug_start, 8, 0);
+    lv_obj_t *sl = lv_label_create(btn_debug_start);
+    lv_label_set_text(sl, "Start");
+    lv_obj_set_style_text_color(sl, lv_color_white(), 0);
+    meck_set_font(sl, &meck_montserrat_18, 0);
+    lv_obj_center(sl);
+    lv_obj_add_event_cb(btn_debug_start, on_debug_log_start_tap, LV_EVENT_CLICKED, NULL);
+    btn_y += btn_h + btn_gap;
+
+    btn_debug_stop = lv_button_create(scr_debug_logs);
+    lv_obj_set_size(btn_debug_stop, btn_w, btn_h);
+    lv_obj_set_pos(btn_debug_stop, 20, btn_y);
+    lv_obj_set_style_bg_color(btn_debug_stop,
+        lv_palette_darken(LV_PALETTE_RED, 1), 0);
+    lv_obj_set_style_radius(btn_debug_stop, 8, 0);
+    lv_obj_t *tl = lv_label_create(btn_debug_stop);
+    lv_label_set_text(tl, "Stop");
+    lv_obj_set_style_text_color(tl, lv_color_white(), 0);
+    meck_set_font(tl, &meck_montserrat_18, 0);
+    lv_obj_center(tl);
+    lv_obj_add_event_cb(btn_debug_stop, on_debug_log_stop_tap, LV_EVENT_CLICKED, NULL);
+    btn_y += btn_h + btn_gap;
+
+    btn_debug_export = lv_button_create(scr_debug_logs);
+    lv_obj_set_size(btn_debug_export, btn_w, btn_h);
+    lv_obj_set_pos(btn_debug_export, 20, btn_y);
+    lv_obj_set_style_bg_color(btn_debug_export,
+        lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_debug_export, 8, 0);
+    lv_obj_t *xl = lv_label_create(btn_debug_export);
+    lv_label_set_text(xl, "Export");
+    lv_obj_set_style_text_color(xl, lv_color_white(), 0);
+    meck_set_font(xl, &meck_montserrat_18, 0);
+    lv_obj_center(xl);
+    lv_obj_add_event_cb(btn_debug_export, on_debug_log_export_tap, LV_EVENT_CLICKED, NULL);
+
+    // Set initial button states (Start enabled, Stop/Export disabled).
+    debug_log_update_status();
+}
+
 // Show/hide the identity-warning sub-label as the Identity checkbox is
 // toggled. Warning only makes sense when identity is being included.
 static void on_export_modal_identity_changed(lv_event_t *e) {
@@ -4299,6 +4674,19 @@ static void create_settings_screen() {
     if (export_value_lbl) {
         lv_label_set_text(export_value_lbl, "Tap");
         lv_obj_set_style_text_color(export_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
+    // Debug Logs — opens scr_debug_logs subpage for Start/Stop/Export of
+    // process-wide stdout capture to SD. Value label mirrors capture state
+    // ("Idle" / "Recording" / "Stopped") so it's visible without opening
+    // the subpage.
+    create_settings_row(scroll, "Debug Logs",
+        &lbl_set_debug_logs, on_settings_debug_logs_tap, y);
+    if (lbl_set_debug_logs) {
+        lv_label_set_text(lbl_set_debug_logs, "Idle");
+        lv_obj_set_style_text_color(lbl_set_debug_logs,
             lv_palette_main(LV_PALETTE_GREY), 0);
     }
     y += 65;
@@ -9424,6 +9812,7 @@ extern "C" void meck_ui_init() {
     create_page_shutdown(t_shutdown);
 
     create_settings_screen();
+    create_debug_logs_screen();
     create_settings_contacts_screen();
     create_radio_picker_screen();
     create_channel_picker_screen();

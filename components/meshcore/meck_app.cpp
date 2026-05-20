@@ -26,6 +26,11 @@
 #include "freertos/task.h"
 #include <cstdio>
 
+// Debug Logs: rewrites printf -> meck_debug_log_printf so calls below
+// land in the SD log file when Settings > Debug Logs > Start is active.
+// See meck_log.h for the macro mechanism.
+#include "meck_log.h"
+
 // ---- Static instances ----
 static P4DataStore g_dataStore;
 static P4NodePrefs g_node_prefs;

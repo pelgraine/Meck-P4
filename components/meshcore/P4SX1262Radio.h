@@ -24,6 +24,11 @@
 #include "t_display_p4_config.h"
 #include "esp_timer.h"
 
+// Debug Logs: rewrites printf -> meck_debug_log_printf so the
+// startSendRaw line and any other printfs below land in the SD log
+// file when Settings > Debug Logs > Start is active. See meck_log.h.
+#include "meck_log.h"
+
 // LilyGo's main.cpp defines `auto SX1262 = std::make_unique<...>(...)` at
 // file scope. That gives a global with external linkage. We reference it
 // here so the radio adapter methods can drive the chip.
