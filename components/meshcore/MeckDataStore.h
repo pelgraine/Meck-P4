@@ -1760,4 +1760,199 @@ public:
         fclose(f);
         return wrote == record_size;
     }
+
+    // =====================================================================
+    // Room post persistence
+    // ---------------------------------------------------------------------
+    // File layout: /sdcard/meshcore/posts.bin
+    //   [P4PostFileHeader]  16 bytes (magic 'MCPS', version, record_size)
+    //   [record 0][record 1]...   each P4PostFileRecord (176 bytes)
+    //
+    // Posts are pushed from a room server to clients after a successful
+    // login (TXT_TYPE_SIGNED_PLAIN, dispatched via onSignedMessageRecv).
+    // Each record carries the room contact's 4-byte pub_key prefix as the
+    // demux key, plus the original author's 4-byte pub_key prefix for
+    // attribution. On load the UI demultiplexes by matching the room
+    // prefix against the first 4 bytes of each room contact's pub_key.
+    //
+    // Why a distinct file/magic from dms.bin: posts are conceptually
+    // different (one-to-many push from a room, vs one-to-one DM) and the
+    // record layout differs (sender_prefix is post-specific). Keeping
+    // them separate makes the on-disk schema explicit.
+    //
+    // Only received posts are persisted; outgoing posts (added in Piece C)
+    // will go through the same path as DM outgoing — RAM-only until the
+    // server echoes them back.
+    // =====================================================================
+
+    static constexpr const char* SD_POST_FILE_PATH = "/sdcard/meshcore/posts.bin";
+
+    // Append one post record to /sdcard/meshcore/posts.bin. Same shape as
+    // appendDMRecord — caller controls magic/version/record_size so the
+    // schema constants stay centralised in MeckMesh.h.
+    bool appendPostRecord(uint32_t expected_magic,
+                          uint16_t expected_version,
+                          uint16_t record_size,
+                          const void* record_bytes,
+                          uint32_t* out_offset = nullptr)
+    {
+        if (out_offset) *out_offset = 0;
+        if (!record_bytes || record_size == 0) return false;
+        if (!p4_sdcard_is_mounted()) return false;
+
+        if (!ensureDir("/sdcard/meshcore")) {
+            ESP_LOGW(TAG, "appendPostRecord: cannot create /sdcard/meshcore (errno=%d)", errno);
+            return false;
+        }
+
+        const char* path = SD_POST_FILE_PATH;
+
+        FILE* f = fopen(path, "r+b");
+        bool fresh_file = false;
+
+        if (f) {
+            struct {
+                uint32_t magic;
+                uint16_t version;
+                uint16_t record_size;
+                uint32_t reserved[2];
+            } __attribute__((packed)) hdr;
+
+            if (fread(&hdr, sizeof(hdr), 1, f) == 1 &&
+                hdr.magic == expected_magic &&
+                hdr.record_size == record_size &&
+                hdr.version <= expected_version) {
+
+                if (hdr.version < expected_version) {
+                    ESP_LOGI(TAG, "appendPostRecord: upgrading header v%u -> v%u in place",
+                             (unsigned)hdr.version, (unsigned)expected_version);
+                    if (fseek(f, (long)sizeof(uint32_t), SEEK_SET) == 0) {
+                        uint16_t v = expected_version;
+                        fwrite(&v, sizeof(v), 1, f);
+                    }
+                }
+
+                fseek(f, 0, SEEK_END);
+                long append_at = ftell(f);
+                size_t wrote = fwrite(record_bytes, 1, record_size, f);
+                fclose(f);
+                bool ok = (wrote == record_size);
+                if (ok && out_offset && append_at >= 0) {
+                    *out_offset = (uint32_t)append_at;
+                }
+                return ok;
+            }
+
+            fclose(f);
+            char bak_path[64];
+            snprintf(bak_path, sizeof(bak_path), "%s.bak", path);
+            remove(bak_path);
+            if (rename(path, bak_path) == 0) {
+                ESP_LOGW(TAG, "appendPostRecord: schema mismatch, renamed to %s, starting fresh",
+                         bak_path);
+            } else {
+                ESP_LOGW(TAG, "appendPostRecord: schema mismatch, rename failed (errno=%d), overwriting",
+                         errno);
+            }
+            fresh_file = true;
+        } else {
+            fresh_file = true;
+        }
+
+        f = fopen(path, "wb");
+        if (!f) {
+            ESP_LOGW(TAG, "appendPostRecord: fopen(%s, wb) failed (errno=%d)", path, errno);
+            return false;
+        }
+
+        struct {
+            uint32_t magic;
+            uint16_t version;
+            uint16_t record_size;
+            uint32_t reserved[2];
+        } __attribute__((packed)) hdr;
+        hdr.magic       = expected_magic;
+        hdr.version     = expected_version;
+        hdr.record_size = record_size;
+        hdr.reserved[0] = 0;
+        hdr.reserved[1] = 0;
+
+        bool ok = (fwrite(&hdr, sizeof(hdr), 1, f) == 1) &&
+                  (fwrite(record_bytes, 1, record_size, f) == record_size);
+        long append_at = (long)sizeof(hdr);
+        fclose(f);
+
+        if (ok) {
+            if (out_offset) *out_offset = (uint32_t)append_at;
+            if (fresh_file) {
+                ESP_LOGI(TAG, "appendPostRecord: created %s", path);
+            }
+        }
+        return ok;
+    }
+
+    // Load up to max_records post records from /sdcard/meshcore/posts.bin.
+    // Same tail-wins behaviour as loadDMRecords for over-cap files.
+    int loadPostRecords(uint32_t expected_magic,
+                        uint16_t expected_version,
+                        uint16_t record_size,
+                        void* records_buf,
+                        int max_records)
+    {
+        if (!records_buf || record_size == 0 || max_records <= 0) return 0;
+        if (!p4_sdcard_is_mounted()) return 0;
+
+        const char* path = SD_POST_FILE_PATH;
+        if (!p4_sdcard_file_exists(path)) return 0;
+
+        FILE* f = fopen(path, "rb");
+        if (!f) return 0;
+
+        struct {
+            uint32_t magic;
+            uint16_t version;
+            uint16_t record_size;
+            uint32_t reserved[2];
+        } __attribute__((packed)) hdr;
+
+        if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
+            fclose(f);
+            return 0;
+        }
+
+        if (hdr.magic != expected_magic ||
+            hdr.record_size != record_size ||
+            hdr.version > expected_version) {
+            fclose(f);
+            ESP_LOGW(TAG, "loadPostRecords: schema mismatch "
+                          "(file v%u, expected <= v%u, size %u vs %u), skipping",
+                     (unsigned)hdr.version, (unsigned)expected_version,
+                     (unsigned)hdr.record_size, (unsigned)record_size);
+            return 0;
+        }
+        if (hdr.version < expected_version) {
+            ESP_LOGI(TAG, "loadPostRecords: loading legacy v%u (layout-compatible with v%u)",
+                     (unsigned)hdr.version, (unsigned)expected_version);
+        }
+
+        fseek(f, 0, SEEK_END);
+        long file_size = ftell(f);
+        long data_size = file_size - (long)sizeof(hdr);
+        if (data_size < 0) { fclose(f); return 0; }
+
+        long total_records = data_size / record_size;
+        long skip_records  = (total_records > max_records) ? (total_records - max_records) : 0;
+        long load_records  = total_records - skip_records;
+
+        long first_offset = (long)sizeof(hdr) + (skip_records * record_size);
+        if (fseek(f, first_offset, SEEK_SET) != 0) { fclose(f); return 0; }
+
+        size_t bytes_to_read = (size_t)(load_records * record_size);
+        size_t got = fread(records_buf, 1, bytes_to_read, f);
+        fclose(f);
+
+        int loaded = (int)(got / record_size);
+        ESP_LOGI(TAG, "loadPostRecords: loaded %d of %ld total", loaded, total_records);
+        return loaded;
+    }
 };

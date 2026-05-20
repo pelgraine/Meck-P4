@@ -90,6 +90,30 @@ typedef void (*meck_dm_sent_cb_t)(int contact_idx,
 extern "C" void meck_register_dm_sent_callback(meck_dm_sent_cb_t cb);
 extern "C" void meck_drain_pending_dm_sends();
 
+// ---- Room post receive bridge (LVGL <-> mesh task) (Piece B) ----
+//
+// Same pull-based model as the DM receive bridge. meck_task fills Meck's
+// pending-post ring inside onSignedMessageRecv. The LVGL task calls
+// meck_drain_pending_posts() from ui_update_timer_cb, which pops queued
+// posts and invokes the callback registered via
+// meck_register_post_recv_callback.
+//
+// The callback receives the room contact's pub_key (32 bytes), the
+// original author's pub_key prefix (4 bytes), the post text, sender
+// timestamp, path_len (0xFF direct, raw hop count for flooded), and
+// SNR×4. Lifetimes: the pointers are only valid for the duration of the
+// callback — the UI must copy anything it wants to retain.
+typedef void (*meck_post_recv_cb_t)(const uint8_t* room_pub_key,
+                                    const char* room_name,
+                                    const uint8_t* sender_prefix,
+                                    const char* text,
+                                    uint32_t sender_timestamp,
+                                    uint8_t path_len,
+                                    int8_t snr_x4);
+
+extern "C" void meck_register_post_recv_callback(meck_post_recv_cb_t cb);
+extern "C" void meck_drain_pending_posts();
+
 // ---- Repeater Admin bridge (LVGL <-> mesh task) ----
 //
 // Same threading model as the DM bridges: LVGL queues requests via

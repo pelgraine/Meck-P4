@@ -483,6 +483,49 @@ static DMRing* g_dm_rings[MAX_CONTACTS] = {nullptr};
 static int  g_active_dm_contact_idx = -1;
 static bool g_in_dm_mode            = false;
 
+// ============================================================================
+// Per-room post ring (Piece B)
+// ----------------------------------------------------------------------------
+// Mirror of the DM ring, scoped per room contact. Posts arrive from
+// onSignedMessageRecv (via meck_drain_pending_posts → meck_post_recv_dispatch)
+// and on boot from load_persisted_posts_into_rings reading posts.bin.
+//
+// Differences from DMRing:
+//   - depth 32 to match upstream MyMesh MAX_UNSYNCED_POSTS (typical push
+//     burst after login)
+//   - no `unread` field — the room view is a passive history, the home
+//     screen unread counter only tracks DMs and channel messages
+//   - sender_prefix[4] carries the original author so the renderer can
+//     show "Alice: hello" (resolved against contacts) or
+//     "Unknown <abcd1234>: hello"
+//   - no outgoing-message persistence path yet (Piece C will add the
+//     composer, with the same local-echo + RAM-only convention as DMs)
+// ============================================================================
+#define MECK_POST_PER_ROOM  32
+
+struct PostMessage {
+    uint32_t timestamp;
+    uint8_t  sender_prefix[4];   // original author's pub_key prefix
+    uint8_t  path_len;           // 0xFF direct, else hop count when post arrived
+    int8_t   snr_x4;
+    char     text[160];          // null-terminated; matches P4_POST_TEXT_LEN headroom
+    uint32_t file_offset;        // byte offset in posts.bin; 0 if not persisted / loaded
+    bool     from_disk;          // true if hydrated from posts.bin, false if runtime
+};
+
+struct PostRing {
+    PostMessage* messages;       // heap_caps_calloc'd, MECK_POST_PER_ROOM entries in PSRAM
+    int          count;
+    int          newest_idx;
+};
+
+static PostRing* g_post_rings[MAX_CONTACTS] = {nullptr};
+
+// View state — which room's history is currently open. -1 when scr_room_messages
+// isn't the active screen.
+static int  g_active_room_contact_idx = -1;
+static bool g_in_room_mode            = false;
+
 // Contacts
 static lv_obj_t *scr_contacts            = NULL;
 static lv_obj_t *obj_contacts_scroll     = NULL;
@@ -551,7 +594,15 @@ static lv_obj_t *lbl_discover_status  = NULL;
 // ============================================================================
 static lv_obj_t *scr_admin_login            = NULL;
 static lv_obj_t *scr_admin_home             = NULL;  // 3-tab logged-in home (piece 4)
+static lv_obj_t *scr_room_messages          = NULL;  // room post history (Piece A: stub)
+static lv_obj_t *lbl_room_messages_title    = NULL;  // room contact name in scr_room_messages header
+static lv_obj_t *btn_room_admin             = NULL;  // top-right Admin overlay on scr_room_messages, visible only when g_admin_session_is_admin
+static lv_obj_t *obj_room_scroll            = NULL;  // bubble scroll container inside scr_room_messages (Piece B)
+static lv_obj_t *ta_room_compose            = NULL;  // composer textarea on scr_room_messages (Piece C)
+static lv_obj_t *btn_room_send              = NULL;  // composer send button (Piece C)
+static lv_obj_t *kb_room_compose            = NULL;  // composer keyboard (Piece C)
 static lv_obj_t *btn_contact_admin          = NULL;  // visible only for ADV_TYPE_REPEATER/ROOM
+static lv_obj_t *lbl_contact_admin_btn      = NULL;  // text inside btn_contact_admin; updated per contact type ("Admin" for repeater, "Login" for room)
 static lv_obj_t *btn_contact_dm             = NULL;  // visible only for ADV_TYPE_CHAT
 static lv_obj_t *lbl_admin_login_title      = NULL;
 static lv_obj_t *lbl_admin_login_subtitle   = NULL;
@@ -790,6 +841,35 @@ static void on_admin_password_defocused(lv_event_t *e);
 static void on_admin_password_eye_tap(lv_event_t *e);
 static void on_admin_home_back(lv_event_t *e);
 static void on_admin_subpage_back(lv_event_t *e);
+// Room messages (Piece A: stub screen, no storage/rendering yet)
+static void create_room_messages_screen();
+static void on_room_back(lv_event_t *e);
+static void on_room_admin_tap(lv_event_t *e);
+static void room_messages_screen_enter(int contact_idx, const char* contact_name);
+// Room post storage + rendering (Piece B)
+static PostRing* post_ring_get_or_alloc(int contact_idx);
+static int  post_ring_append(int contact_idx, const PostMessage& msg);
+static int  post_ring_copy_chronological(int contact_idx, PostMessage* out, int max_out);
+static bool post_ring_has_post(int contact_idx, uint32_t timestamp,
+                                const uint8_t* sender_prefix);
+static void resolve_post_author(const uint8_t* sender_prefix, char* out, int out_len);
+static void rebuild_room_bubbles(int contact_idx);
+static void meck_post_recv_dispatch(const uint8_t* room_pub_key,
+                                    const char* room_name,
+                                    const uint8_t* sender_prefix,
+                                    const char* text,
+                                    uint32_t sender_timestamp,
+                                    uint8_t path_len,
+                                    int8_t snr_x4);
+static void load_persisted_posts_into_rings();
+// Room composer (Piece C)
+static bool post_is_outgoing(const uint8_t* sender_prefix);
+static void meck_relayout_room_compose(void);
+static void on_room_send_clicked(lv_event_t *e);
+static void on_room_compose_focused(lv_event_t *e);
+static void on_room_compose_defocused(lv_event_t *e);
+static void on_room_compose_size_changed(lv_event_t *e);
+static void on_room_kb_event(lv_event_t *e);
 static void on_admin_menu_status_tap(lv_event_t *e);
 static void on_admin_menu_cmd_tap(lv_event_t *e);
 static void on_admin_menu_settings_tap(lv_event_t *e);
@@ -2033,6 +2113,117 @@ static bool dm_ring_persist_ack_if_needed(int contact_idx,
 }
 
 // ============================================================================
+// Post ring helpers (Piece B)
+// ----------------------------------------------------------------------------
+// Same shape as the dm_ring_* helpers, scoped per room contact. Storage
+// is PSRAM (consistent with DMs). All three are called only from the
+// LVGL task (post recv dispatch runs there, screen-entry runs there).
+// ============================================================================
+
+static PostRing* post_ring_get_or_alloc(int contact_idx) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return nullptr;
+    if (g_post_rings[contact_idx]) return g_post_rings[contact_idx];
+
+    PostRing* r = (PostRing*)heap_caps_calloc(1, sizeof(PostRing), MALLOC_CAP_SPIRAM);
+    if (!r) {
+        printf("post_ring_get_or_alloc: PSRAM alloc PostRing failed for idx=%d\n", contact_idx);
+        return nullptr;
+    }
+    r->messages = (PostMessage*)heap_caps_calloc(MECK_POST_PER_ROOM,
+                                                 sizeof(PostMessage),
+                                                 MALLOC_CAP_SPIRAM);
+    if (!r->messages) {
+        printf("post_ring_get_or_alloc: PSRAM alloc messages failed for idx=%d\n", contact_idx);
+        free(r);
+        return nullptr;
+    }
+    r->count      = 0;
+    r->newest_idx = -1;
+    g_post_rings[contact_idx] = r;
+    return r;
+}
+
+static int post_ring_append(int contact_idx, const PostMessage& msg) {
+    PostRing* r = post_ring_get_or_alloc(contact_idx);
+    if (!r) return -1;
+    int idx = (r->newest_idx + 1) % MECK_POST_PER_ROOM;
+    r->messages[idx] = msg;
+    r->newest_idx = idx;
+    if (r->count < MECK_POST_PER_ROOM) r->count++;
+    return idx;
+}
+
+// Copy chronological (oldest first). Mirrors dm_ring_copy_chronological.
+static int post_ring_copy_chronological(int contact_idx, PostMessage* out, int max_out) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return 0;
+    PostRing* r = g_post_rings[contact_idx];
+    if (!r || r->count == 0) return 0;
+    int count = (r->count < max_out) ? r->count : max_out;
+    int start = (r->newest_idx - count + 1 + MECK_POST_PER_ROOM) % MECK_POST_PER_ROOM;
+    for (int i = 0; i < count; i++) {
+        out[i] = r->messages[(start + i) % MECK_POST_PER_ROOM];
+    }
+    return count;
+}
+
+// Dedup probe: returns true if the ring already holds a post matching
+// the given (timestamp, sender_prefix) tuple. Used to drop both
+// in-session retransmits (server retries when its ACK to us times out)
+// and cross-login re-pushes (sendLogin resets sync_since so the server
+// pushes everything from scratch on each login). Also used by the
+// startup loader to dedup the on-disk record list which may contain
+// duplicates from sessions before this fix landed.
+static bool post_ring_has_post(int contact_idx, uint32_t timestamp,
+                                const uint8_t* sender_prefix) {
+    if (contact_idx < 0 || contact_idx >= MAX_CONTACTS) return false;
+    PostRing* r = g_post_rings[contact_idx];
+    if (!r || r->count == 0) return false;
+    for (int i = 0; i < r->count; i++) {
+        if (r->messages[i].timestamp == timestamp &&
+            memcmp(r->messages[i].sender_prefix, sender_prefix, 4) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Resolve a 4-byte sender_prefix to a displayable author label. Walks
+// the contact list looking for a matching pub_key prefix; if found
+// returns the contact name. Falls back to "Unknown <hex>" mirroring
+// the MeshCore app convention (Image 4 in the room-server reference
+// screenshots).
+static void resolve_post_author(const uint8_t* sender_prefix, char* out, int out_len) {
+    if (!out || out_len <= 0) return;
+    out[0] = '\0';
+
+    Meck* mesh = meck_get_instance();
+    if (mesh) {
+        int n = mesh->getNumContacts();
+        ContactInfo ci;
+        for (int i = 0; i < n; i++) {
+            if (!mesh->getContactByIdx((uint32_t)i, ci)) continue;
+            if (memcmp(ci.id.pub_key, sender_prefix, 4) == 0) {
+                strncpy(out, ci.name, out_len - 1);
+                out[out_len - 1] = '\0';
+                return;
+            }
+        }
+    }
+    snprintf(out, out_len, "Unknown <%02x%02x%02x%02x>",
+             sender_prefix[0], sender_prefix[1], sender_prefix[2], sender_prefix[3]);
+}
+
+// Returns true if the 4-byte sender_prefix matches our own self_id
+// pub_key prefix — i.e. this post is one we sent ourselves. Used by
+// rebuild_room_bubbles to render our own posts right-aligned (cyan,
+// no author label) mirroring DM "me" bubbles.
+static bool post_is_outgoing(const uint8_t* sender_prefix) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return false;
+    return memcmp(mesh->self_id.pub_key, sender_prefix, 4) == 0;
+}
+
+// ============================================================================
 // rebuild_message_bubbles
 // ----------------------------------------------------------------------------
 // Tear down and rebuild the message list inside obj_msg_scroll. Each message
@@ -2430,6 +2621,136 @@ static void rebuild_dm_bubbles(int contact_idx) {
 }
 
 // ============================================================================
+// rebuild_room_bubbles (Piece B)
+// ----------------------------------------------------------------------------
+// Renders the per-room post ring as bubbles inside obj_room_scroll.
+// Bubble-style mirroring rebuild_dm_bubbles; differences:
+//   - All posts are "incoming" (received from the room) — bubbles
+//     left-align. The composer (Piece C) will introduce outgoing
+//     bubbles right-aligned.
+//   - Each bubble has an author chip above showing the resolved
+//     sender name (or "Unknown <hex>" fallback).
+//   - No ACK status footer — only timestamp + hops/direct.
+// ============================================================================
+
+static void rebuild_room_bubbles(int contact_idx) {
+    if (!obj_room_scroll) return;
+
+    lv_obj_clean(obj_room_scroll);
+
+    lv_obj_set_layout(obj_room_scroll, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(obj_room_scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(obj_room_scroll, 6, 0);
+
+    PostMessage msgs[MECK_POST_PER_ROOM];
+    int n = post_ring_copy_chronological(contact_idx, msgs, MECK_POST_PER_ROOM);
+
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(obj_room_scroll);
+        lv_label_set_text(empty, "No posts yet.");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(empty, &meck_montserrat_18, 0);
+        return;
+    }
+
+    int row_max_w    = (SCREEN_WIDTH - 20) - 20;
+    int bubble_max_w = (int)((float)row_max_w * 0.78f);
+
+    // Incoming posts (from other authors): left-aligned, teal, author
+    // label above. Outgoing (our own, post_is_outgoing matches self_id
+    // prefix): right-aligned, cyan, no author label — same convention
+    // as DM bubbles where alignment alone identifies the sender.
+    lv_color_t color_me   = lv_palette_main(LV_PALETTE_CYAN);
+    lv_color_t color_them = lv_palette_main(LV_PALETTE_TEAL);
+
+    for (int i = 0; i < n; i++) {
+        const PostMessage& m = msgs[i];
+        bool is_outgoing = post_is_outgoing(m.sender_prefix);
+
+        char clean_text[256];
+        strip_unrenderable(m.text, clean_text, sizeof(clean_text));
+
+        // Row: full-width, transparent, alignment by sender direction.
+        lv_obj_t *row = lv_obj_create(obj_room_scroll);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_scroll_dir(row, LV_DIR_NONE);
+        lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row,
+            is_outgoing ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
+            LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+        // Author label — above the bubble, incoming only.
+        if (!is_outgoing) {
+            char author[64];
+            resolve_post_author(m.sender_prefix, author, sizeof(author));
+            lv_obj_t *lbl_author = lv_label_create(row);
+            lv_label_set_text(lbl_author, author);
+            lv_obj_set_style_text_color(lbl_author,
+                                        lv_palette_main(LV_PALETTE_GREY), 0);
+            meck_set_font(lbl_author, &meck_montserrat_14, 0);
+        }
+
+        // Bubble.
+        lv_obj_t *bubble = lv_obj_create(row);
+        lv_obj_set_width(bubble, LV_SIZE_CONTENT);
+        lv_obj_set_height(bubble, LV_SIZE_CONTENT);
+        lv_obj_set_style_max_width(bubble, bubble_max_w, 0);
+        lv_obj_set_style_radius(bubble, 12, 0);
+        lv_obj_set_style_pad_all(bubble, 10, 0);
+        lv_obj_set_style_border_width(bubble, 0, 0);
+        lv_obj_set_scroll_dir(bubble, LV_DIR_NONE);
+        lv_obj_set_style_bg_color(bubble, is_outgoing ? color_me : color_them, 0);
+        lv_obj_set_layout(bubble, LV_LAYOUT_FLEX);
+        lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(bubble, 2, 0);
+
+        // Body.
+        lv_obj_t *lbl_body = lv_label_create(bubble);
+        lv_label_set_text(lbl_body, clean_text);
+        lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
+        meck_set_font(lbl_body, &meck_montserrat_22, 0);
+        lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(lbl_body, bubble_max_w - 22);
+
+        // Footer: timestamp + hops/direct.
+        char timebuf[32];
+        format_local_time(m.timestamp, timebuf, sizeof(timebuf));
+        char meta[64];
+        meta[0] = '\0';
+        if (m.path_len == 0xFF) {
+            snprintf(meta, sizeof(meta), "direct");
+        } else {
+            unsigned hops = m.path_len & 63;
+            snprintf(meta, sizeof(meta), "%u hop%s",
+                     hops, hops == 1 ? "" : "s");
+        }
+        char footer[96];
+        if (timebuf[0] && meta[0]) {
+            snprintf(footer, sizeof(footer), "%s  ·  %s", timebuf, meta);
+        } else if (timebuf[0]) {
+            snprintf(footer, sizeof(footer), "%s", timebuf);
+        } else {
+            snprintf(footer, sizeof(footer), "%s", meta);
+        }
+        if (footer[0]) {
+            lv_obj_t *lbl_time = lv_label_create(bubble);
+            lv_label_set_text(lbl_time, footer);
+            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0x424242), 0);
+            meck_set_font(lbl_time, &meck_montserrat_14, 0);
+            lv_obj_set_style_text_align(lbl_time,
+                is_outgoing ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
+        }
+    }
+
+    lv_obj_scroll_to_y(obj_room_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+// ============================================================================
 // update_radio_detail_label
 // ============================================================================
 
@@ -2742,6 +3063,135 @@ static void on_kb_event(lv_event_t *e) {
 }
 
 // ============================================================================
+// Room composer handlers (Piece C)
+// ----------------------------------------------------------------------------
+// Independent set of widgets from the DM/channel composer so a focused
+// textarea on the room screen doesn't try to drive the messages-screen
+// keyboard. Same layout idioms; the keyboard rises when ta_room_compose
+// is focused and the bubble scroll shrinks to fit.
+//
+// Send path: meck_request_send_dm with the room contact_idx. The mesh
+// task transmits a TXT_TYPE_PLAIN packet to the room; the room server
+// (upstream MyMesh) calls addPost on receipt. Local echo is appended to
+// the per-room PostRing immediately so the user sees their post; the
+// server intentionally does not push the post back to the original
+// author (MyMesh.cpp getUnsyncedCount excludes self), so no dedupe.
+// ============================================================================
+
+static void meck_relayout_room_compose(void) {
+    if (!obj_room_scroll || !ta_room_compose) return;
+    int ta_h = lv_obj_get_height(ta_room_compose);
+    bool kb_shown = kb_room_compose &&
+                    !lv_obj_has_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
+    // 110 px top reserve (clock/battery header + title row) + composer
+    // height + bottom margin. Keyboard adds MECK_KB_HEIGHT when shown.
+    int reserved = 130 + ta_h;
+    if (kb_shown) reserved += MECK_KB_HEIGHT;
+    lv_obj_set_height(obj_room_scroll, SCREEN_HEIGHT - reserved);
+}
+
+static void on_room_compose_size_changed(lv_event_t *e) {
+    meck_relayout_room_compose();
+}
+
+static void on_room_compose_focused(lv_event_t *e) {
+    if (kb_room_compose) {
+        lv_keyboard_set_textarea(kb_room_compose, ta_room_compose);
+        lv_obj_remove_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
+        if (ta_room_compose) lv_obj_align(ta_room_compose,
+            LV_ALIGN_BOTTOM_LEFT, 10, -(15 + MECK_KB_HEIGHT));
+        if (btn_room_send)   lv_obj_align(btn_room_send,
+            LV_ALIGN_BOTTOM_RIGHT, -10, -(15 + MECK_KB_HEIGHT));
+        meck_relayout_room_compose();
+    }
+}
+
+static void on_room_compose_defocused(lv_event_t *e) {
+    if (kb_room_compose) {
+        lv_obj_add_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
+        if (ta_room_compose) lv_obj_align(ta_room_compose,
+            LV_ALIGN_BOTTOM_LEFT, 10, -10);
+        if (btn_room_send)   lv_obj_align(btn_room_send,
+            LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+        meck_relayout_room_compose();
+    }
+}
+
+static void on_room_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY) {
+        on_room_send_clicked(NULL);
+    } else if (code == LV_EVENT_CANCEL) {
+        if (kb_room_compose) lv_obj_add_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
+        if (ta_room_compose) lv_obj_align(ta_room_compose,
+            LV_ALIGN_BOTTOM_LEFT, 10, -10);
+        if (btn_room_send)   lv_obj_align(btn_room_send,
+            LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+        meck_relayout_room_compose();
+    }
+}
+
+static void on_room_send_clicked(lv_event_t *e) {
+    if (!ta_room_compose) return;
+    if (g_active_room_contact_idx < 0) return;
+
+    const char *text = lv_textarea_get_text(ta_room_compose);
+    if (!text || !text[0]) return;
+
+    // Send via the existing DM bridge — the wire format is the same
+    // TXT_TYPE_PLAIN packet to the contact's pub_key, and the room
+    // server (upstream MyMesh::onPeerDataRecv) processes it as a new
+    // post via addPost(). meck_dm_sent_dispatch will fire on completion
+    // and harmlessly log "no ring" since we don't allocate a DMRing
+    // for the room contact.
+    meck_request_send_dm(g_active_room_contact_idx, text);
+
+    // Local echo into the per-room PostRing so the bubble appears
+    // immediately. sender_prefix = first 4 bytes of our own pub_key,
+    // which post_is_outgoing matches at render time to right-align.
+    Meck* mesh = meck_get_instance();
+    if (mesh) {
+        ContactInfo ci;
+        if (mesh->getContactByIdx((uint32_t)g_active_room_contact_idx, ci)) {
+            PostMessage pm = {};
+            pm.timestamp = meck_clock_get_utc();
+            memcpy(pm.sender_prefix, mesh->self_id.pub_key, 4);
+            pm.path_len = 0xFF;
+            pm.snr_x4 = 0;
+            pm.file_offset = 0;
+            pm.from_disk = false;
+            strncpy(pm.text, text, sizeof(pm.text) - 1);
+            pm.text[sizeof(pm.text) - 1] = '\0';
+
+            // Persist immediately so the echoed post survives a
+            // reboot. room_pub_key_prefix = first 4 bytes of room
+            // contact pub_key (matches the loader's demux key).
+            P4PostFileRecord rec = {};
+            rec.timestamp = pm.timestamp;
+            memcpy(rec.room_pub_key_prefix, ci.id.pub_key, 4);
+            memcpy(rec.sender_prefix, mesh->self_id.pub_key, 4);
+            rec.flags = P4_POST_FLAG_VALID;
+            rec.path_len = pm.path_len;
+            rec.snr_x4 = pm.snr_x4;
+            rec.reserved = 0;
+            strncpy(rec.text, text, sizeof(rec.text) - 1);
+            rec.text[sizeof(rec.text) - 1] = '\0';
+            uint32_t saved_offset = 0;
+            if (!mesh->savePostRecord(rec, &saved_offset)) {
+                printf("on_room_send_clicked: SD save failed for outgoing post\n");
+            }
+            pm.file_offset = saved_offset;
+
+            post_ring_append(g_active_room_contact_idx, pm);
+            rebuild_room_bubbles(g_active_room_contact_idx);
+        }
+    }
+
+    lv_textarea_set_text(ta_room_compose, "");
+    if (kb_room_compose) lv_obj_add_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ============================================================================
 // Contacts screen handlers (lifted from old:369-415)
 // ============================================================================
 
@@ -2789,6 +3239,16 @@ static void on_contact_tap(lv_event_t *e) {
     if (btn_contact_admin) {
         if (show_admin) lv_obj_clear_flag(btn_contact_admin, LV_OBJ_FLAG_HIDDEN);
         else            lv_obj_add_flag(btn_contact_admin, LV_OBJ_FLAG_HIDDEN);
+    }
+    // Button label: "Admin" for repeaters, "Login" for room servers. The
+    // post-login dispatch branches on contact type so room login lands on
+    // scr_room_messages while repeater login lands on scr_admin_home.
+    if (lbl_contact_admin_btn) {
+        if (ci.type == 3) {
+            lv_label_set_text(lbl_contact_admin_btn, LV_SYMBOL_SETTINGS " Login");
+        } else {
+            lv_label_set_text(lbl_contact_admin_btn, LV_SYMBOL_SETTINGS " Admin");
+        }
     }
 
     if (scr_contact_detail) lv_screen_load(scr_contact_detail);
@@ -5293,6 +5753,7 @@ static void create_contact_detail_screen() {
         lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
     lv_obj_set_style_radius(btn_contact_admin, 8, 0);
     lv_obj_t *adm_lbl = lv_label_create(btn_contact_admin);
+    lbl_contact_admin_btn = adm_lbl;
     lv_label_set_text(adm_lbl, LV_SYMBOL_SETTINGS " Admin");
     lv_obj_set_style_text_color(adm_lbl, lv_color_white(), 0);
     meck_set_font(adm_lbl, &meck_montserrat_16, 0);
@@ -5424,6 +5885,11 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // expected_ack after a successful transmit, the UI thread picks it
     // up here and writes it onto the matching outgoing bubble.
     meck_drain_pending_dm_sends();
+    // Room post receive drain (Piece B). Posts pushed by a room server
+    // after a successful login arrive on meck_task via
+    // onSignedMessageRecv; LVGL task drains here and dispatches to the
+    // per-room PostRing.
+    meck_drain_pending_posts();
     // Admin response drain — piece 2 bridge. Cheap when nothing is
     // queued (early-return on empty rings).
     meck_drain_pending_admin_responses();
@@ -6132,6 +6598,203 @@ static void meck_dm_recv_dispatch(const uint8_t* from_pub_key,
 
     printf("meck_dm_recv_dispatch: stored DM from %s (idx=%d)\n",
            from_name, contact_idx);
+}
+
+// ============================================================================
+// Room post receive dispatcher (Piece B)
+// ----------------------------------------------------------------------------
+// Invoked by meck_drain_pending_posts on the LVGL task. Locates the
+// room contact by pub_key, appends the post to that contact's PostRing,
+// persists to /sdcard/meshcore/posts.bin, and if the user is currently
+// sitting on the room messages view for that exact room, triggers a
+// live re-render.
+//
+// Drops the post if there's no matching contact (server pushed a post
+// from a room we don't have in our contact list — shouldn't happen
+// since login implies the contact exists, but defensive).
+// ============================================================================
+
+static void meck_post_recv_dispatch(const uint8_t* room_pub_key,
+                                    const char* room_name,
+                                    const uint8_t* sender_prefix,
+                                    const char* text,
+                                    uint32_t sender_timestamp,
+                                    uint8_t path_len,
+                                    int8_t snr_x4) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+
+    int contact_idx = -1;
+    int n = mesh->getNumContacts();
+    ContactInfo ci;
+    for (int i = 0; i < n; i++) {
+        if (!mesh->getContactByIdx((uint32_t)i, ci)) continue;
+        if (memcmp(ci.id.pub_key, room_pub_key, PUB_KEY_SIZE) == 0) {
+            contact_idx = i;
+            break;
+        }
+    }
+    if (contact_idx < 0) {
+        printf("meck_post_recv_dispatch: no contact for room %s, dropping post\n",
+               room_name);
+        return;
+    }
+
+    // Dedup against existing ring entries by (timestamp, sender_prefix).
+    // Two sources of duplicates we need to swallow here:
+    //   1. Server retransmits the post when its ACK to us times out
+    //      (visible in logs as onSendTimeout followed by the same post
+    //      arriving again with the same timestamp).
+    //   2. sendLogin resets sync_since to 0 for room contacts (see
+    //      MeckMesh.h sendLogin's room-server branch), so every login
+    //      causes the server to re-push every post we've ever seen.
+    // Skip BEFORE persisting so we don't bloat posts.bin with copies.
+    if (post_ring_has_post(contact_idx, sender_timestamp, sender_prefix)) {
+        printf("meck_post_recv_dispatch: duplicate post (ts=%u sender=%02X%02X%02X%02X) "
+               "for room %s, skipping\n",
+               (unsigned)sender_timestamp,
+               sender_prefix[0], sender_prefix[1], sender_prefix[2], sender_prefix[3],
+               room_name);
+        return;
+    }
+
+    PostMessage pm = {};
+    pm.timestamp   = sender_timestamp;
+    memcpy(pm.sender_prefix, sender_prefix, 4);
+    pm.path_len    = path_len;
+    pm.snr_x4      = snr_x4;
+    pm.file_offset = 0;
+    pm.from_disk   = false;
+    strncpy(pm.text, text, sizeof(pm.text) - 1);
+    pm.text[sizeof(pm.text) - 1] = '\0';
+
+    // Persist to /sdcard/meshcore/posts.bin.
+    P4PostFileRecord rec = {};
+    rec.timestamp = sender_timestamp;
+    memcpy(rec.room_pub_key_prefix, room_pub_key, 4);
+    memcpy(rec.sender_prefix, sender_prefix, 4);
+    rec.flags     = P4_POST_FLAG_VALID;
+    rec.path_len  = path_len;
+    rec.snr_x4    = snr_x4;
+    rec.reserved  = 0;
+    strncpy(rec.text, text, sizeof(rec.text) - 1);
+    rec.text[sizeof(rec.text) - 1] = '\0';
+    uint32_t saved_offset = 0;
+    if (!mesh->savePostRecord(rec, &saved_offset)) {
+        printf("meck_post_recv_dispatch: SD save failed for post from %s\n", room_name);
+    }
+    pm.file_offset = saved_offset;
+
+    post_ring_append(contact_idx, pm);
+
+    // Live re-render if the user is on this room's screen.
+    if (g_in_room_mode && g_active_room_contact_idx == contact_idx) {
+        rebuild_room_bubbles(contact_idx);
+    }
+
+    printf("meck_post_recv_dispatch: stored post from room %s (idx=%d)\n",
+           room_name, contact_idx);
+}
+
+// ============================================================================
+// Persisted post loader (Piece B)
+// ----------------------------------------------------------------------------
+// Hydrate per-room PostRings from /sdcard/meshcore/posts.bin on boot.
+// Same demux strategy as load_persisted_dms_into_rings: build a
+// 4-byte-prefix → contact_idx lookup table, walk records, match on
+// room_pub_key_prefix.
+// ============================================================================
+#define MECK_POST_LOAD_CAP 2000
+
+static void load_persisted_posts_into_rings() {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+
+    P4PostFileRecord* recs = (P4PostFileRecord*)heap_caps_calloc(
+        MECK_POST_LOAD_CAP, sizeof(P4PostFileRecord), MALLOC_CAP_SPIRAM);
+    if (!recs) {
+        printf("load_persisted_posts_into_rings: PSRAM alloc failed\n");
+        return;
+    }
+
+    int loaded = mesh->loadPostRecords(recs, MECK_POST_LOAD_CAP);
+    if (loaded <= 0) {
+        free(recs);
+        return;
+    }
+    printf("load_persisted_posts_into_rings: loaded %d records from SD\n", loaded);
+
+    int num_contacts = mesh->getNumContacts();
+    uint32_t* hashes = (uint32_t*)heap_caps_calloc(
+        num_contacts > 0 ? num_contacts : 1, sizeof(uint32_t),
+        MALLOC_CAP_SPIRAM);
+    int* idx_table = (int*)heap_caps_calloc(
+        num_contacts > 0 ? num_contacts : 1, sizeof(int),
+        MALLOC_CAP_SPIRAM);
+    if (!hashes || !idx_table) {
+        printf("load_persisted_posts_into_rings: PSRAM alloc for lookup failed\n");
+        if (hashes) free(hashes);
+        if (idx_table) free(idx_table);
+        free(recs);
+        return;
+    }
+    {
+        ContactInfo ci;
+        for (int c = 0; c < num_contacts; c++) {
+            if (!mesh->getContactByIdx((uint32_t)c, ci)) continue;
+            memcpy(&hashes[c], ci.id.pub_key, sizeof(uint32_t));
+            idx_table[c] = c;
+        }
+    }
+
+    int demuxed = 0;
+    int dropped = 0;
+    for (int r = 0; r < loaded; r++) {
+        const P4PostFileRecord& rec = recs[r];
+        if ((rec.flags & P4_POST_FLAG_VALID) == 0) continue;
+
+        uint32_t target = 0;
+        memcpy(&target, rec.room_pub_key_prefix, sizeof(target));
+        int contact_idx = -1;
+        for (int c = 0; c < num_contacts; c++) {
+            if (hashes[c] == target) {
+                contact_idx = idx_table[c];
+                break;
+            }
+        }
+        if (contact_idx < 0) {
+            dropped++;
+            continue;
+        }
+
+        // Dedup against the in-progress ring. The on-disk file may
+        // contain duplicate records from sessions before the dispatch
+        // dedup landed (server retransmits + re-pushes on each login).
+        // Skipping here means the first occurrence per (ts, sender)
+        // wins and subsequent copies are dropped silently.
+        if (post_ring_has_post(contact_idx, rec.timestamp, rec.sender_prefix)) {
+            dropped++;
+            continue;
+        }
+
+        PostMessage pm = {};
+        pm.timestamp   = rec.timestamp;
+        memcpy(pm.sender_prefix, rec.sender_prefix, 4);
+        pm.path_len    = rec.path_len;
+        pm.snr_x4      = rec.snr_x4;
+        pm.file_offset = 0;
+        pm.from_disk   = true;
+        strncpy(pm.text, rec.text, sizeof(pm.text) - 1);
+        pm.text[sizeof(pm.text) - 1] = '\0';
+        post_ring_append(contact_idx, pm);
+        demuxed++;
+    }
+
+    printf("load_persisted_posts_into_rings: demuxed=%d dropped=%d\n",
+           demuxed, dropped);
+    free(hashes);
+    free(idx_table);
+    free(recs);
 }
 
 // ============================================================================
@@ -6969,7 +7632,15 @@ static void meck_admin_login_dispatch(bool success, uint8_t is_admin,
         lv_obj_clear_state(btn_admin_neighbours_refresh, LV_STATE_DISABLED);
     }
 
-    if (scr_admin_home) lv_screen_load(scr_admin_home);
+    // Post-login routing: room contacts land on scr_room_messages (post
+    // history view, with optional top-right Admin overlay when
+    // g_admin_session_is_admin is true). Repeater contacts keep the
+    // existing path into scr_admin_home.
+    if (ci.type == 3) {
+        room_messages_screen_enter(contact_idx, contact_name);
+    } else {
+        if (scr_admin_home) lv_screen_load(scr_admin_home);
+    }
 }
 
 // Status response dispatch — fired by the bridge when a
@@ -8556,6 +9227,167 @@ static void create_admin_home_screen() {
     create_admin_neighbours_screen();
 }
 
+// ============================================================================
+// Room messages screen (Piece A: stub)
+// ----------------------------------------------------------------------------
+// Stand-in landing screen for room-server contacts after a successful login.
+// Has the header (room name, top-right Admin overlay button) and a back
+// button. The body is a "Coming soon" placeholder until Piece B wires up
+// post storage + rendering and Piece C adds the composer.
+//
+// Routing into this screen happens from the login dispatch via
+// room_messages_screen_enter(). The Admin overlay button is shown only when
+// g_admin_session_is_admin is true (admin password used), and tapping it
+// loads scr_admin_home (the existing admin menu list).
+// ============================================================================
+
+static void on_room_back(lv_event_t *e) {
+    printf("Room: back from room messages screen\n");
+    meck_admin_clear_session();
+    g_admin_ui_state = ADMIN_STATE_IDLE;
+    memset(g_admin_pwd_raw, 0, sizeof(g_admin_pwd_raw));
+    g_admin_pwd_len = 0;
+    g_in_room_mode = false;
+    g_active_room_contact_idx = -1;
+    if (kb_room_compose) lv_obj_add_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
+    if (ta_room_compose) lv_textarea_set_text(ta_room_compose, "");
+    if (scr_contact_detail) lv_screen_load(scr_contact_detail);
+}
+
+static void on_room_admin_tap(lv_event_t *e) {
+    printf("Room: admin overlay tapped\n");
+    if (scr_admin_home) lv_screen_load(scr_admin_home);
+}
+
+static void room_messages_screen_enter(int contact_idx, const char* contact_name) {
+    g_active_room_contact_idx = contact_idx;
+    g_in_room_mode = true;
+    if (lbl_room_messages_title) {
+        lv_label_set_text(lbl_room_messages_title,
+                          contact_name && contact_name[0] ? contact_name : "Room");
+    }
+    if (btn_room_admin) {
+        if (g_admin_session_is_admin) {
+            lv_obj_clear_flag(btn_room_admin, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(btn_room_admin, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    rebuild_room_bubbles(contact_idx);
+    if (scr_room_messages) lv_screen_load(scr_room_messages);
+}
+
+static void create_room_messages_screen() {
+    scr_room_messages = lv_obj_create(NULL);
+    lock_screen_scroll(scr_room_messages);
+    lv_obj_set_style_bg_color(scr_room_messages, lv_color_black(), 0);
+    // Slot 10 — same header slot as scr_admin_home.
+    screen_attach_clock_battery(scr_room_messages, 10, &meck_montserrat_22, 30);
+
+    // Back button — top-left, mirroring the messages screen so the
+    // composer can claim the bottom edge.
+    lv_obj_t *btn_back = lv_button_create(scr_room_messages);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_room_back, LV_EVENT_CLICKED, NULL);
+
+    // Title — room contact name. Populated by room_messages_screen_enter
+    // on each entry. Positioned to the right of the back button.
+    lbl_room_messages_title = lv_label_create(scr_room_messages);
+    lv_label_set_text(lbl_room_messages_title, "Room");
+    lv_obj_set_style_text_color(lbl_room_messages_title,
+                                lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(lbl_room_messages_title, &meck_montserrat_24, 0);
+    lv_obj_align(lbl_room_messages_title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Top-right Admin overlay button. Visible only when
+    // g_admin_session_is_admin is true; toggled in room_messages_screen_enter.
+    btn_room_admin = lv_button_create(scr_room_messages);
+    lv_obj_set_size(btn_room_admin, 120, 60);
+    lv_obj_align(btn_room_admin, LV_ALIGN_TOP_RIGHT, -10, 30);
+    lv_obj_set_style_bg_color(btn_room_admin,
+        lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_room_admin, 8, 0);
+    lv_obj_t *ra_lbl = lv_label_create(btn_room_admin);
+    lv_label_set_text(ra_lbl, LV_SYMBOL_SETTINGS " Admin");
+    lv_obj_set_style_text_color(ra_lbl, lv_color_white(), 0);
+    meck_set_font(ra_lbl, &meck_montserrat_16, 0);
+    lv_obj_center(ra_lbl);
+    lv_obj_add_event_cb(btn_room_admin, on_room_admin_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_room_admin, LV_OBJ_FLAG_HIDDEN);
+
+    // Bubble scroll container — fills the area between header row and
+    // the composer at the bottom. rebuild_room_bubbles populates it on
+    // room_messages_screen_enter; meck_relayout_room_compose resizes it
+    // when the textarea grows or the keyboard appears.
+    obj_room_scroll = lv_obj_create(scr_room_messages);
+    lv_obj_set_size(obj_room_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 180);
+    lv_obj_set_pos(obj_room_scroll, 10, 110);
+    lv_obj_set_style_bg_color(obj_room_scroll, lv_color_make(10, 10, 15), 0);
+    lv_obj_set_style_border_width(obj_room_scroll, 0, 0);
+    lv_obj_set_style_radius(obj_room_scroll, 8, 0);
+    lv_obj_set_style_pad_all(obj_room_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_room_scroll, LV_DIR_VER);
+
+    // Composer textarea. Same styling/limits as the DM composer for
+    // consistency. The room server in default mode accepts posts from
+    // any logged-in user (incl. guests), so the composer is always
+    // visible — no gating on g_admin_session_is_admin.
+    ta_room_compose = lv_textarea_create(scr_room_messages);
+    lv_obj_set_width(ta_room_compose, SCREEN_WIDTH - 100);
+    lv_obj_set_height(ta_room_compose, LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(ta_room_compose, 50, 0);
+    lv_obj_set_style_max_height(ta_room_compose, 150, 0);
+    lv_obj_align(ta_room_compose, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_textarea_set_placeholder_text(ta_room_compose, "Type post...");
+    lv_textarea_set_one_line(ta_room_compose, false);
+    lv_obj_set_scrollbar_mode(ta_room_compose, LV_SCROLLBAR_MODE_OFF);
+    // Cap at MAX_POST_TEXT_LEN-ish so we don't exceed upstream
+    // MyMesh::addPost's 151-char ceiling on the wire.
+    lv_textarea_set_max_length(ta_room_compose, 150);
+    lv_obj_set_style_bg_color(ta_room_compose, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_room_compose, lv_color_white(), 0);
+    meck_set_font(ta_room_compose, &meck_montserrat_16, 0);
+    lv_obj_set_style_border_color(ta_room_compose, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_border_width(ta_room_compose, 1, 0);
+    lv_obj_set_style_radius(ta_room_compose, 8, 0);
+    lv_obj_set_style_border_color(ta_room_compose, lv_color_white(),       LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_room_compose, 2,                       LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_room_compose,  LV_BORDER_SIDE_LEFT,     LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_room_compose,   LV_OPA_COVER,            LV_PART_CURSOR);
+    lv_obj_add_event_cb(ta_room_compose, on_room_compose_focused,      LV_EVENT_FOCUSED,      NULL);
+    lv_obj_add_event_cb(ta_room_compose, on_room_compose_defocused,    LV_EVENT_DEFOCUSED,    NULL);
+    lv_obj_add_event_cb(ta_room_compose, on_room_compose_size_changed, LV_EVENT_SIZE_CHANGED, NULL);
+
+    btn_room_send = lv_button_create(scr_room_messages);
+    lv_obj_set_size(btn_room_send, 70, 50);
+    lv_obj_align(btn_room_send, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(btn_room_send, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_room_send, 8, 0);
+    lv_obj_t *send_lbl = lv_label_create(btn_room_send);
+    lv_label_set_text(send_lbl, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(send_lbl, lv_color_black(), 0);
+    meck_set_font(send_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(send_lbl);
+    lv_obj_add_event_cb(btn_room_send, on_room_send_clicked, LV_EVENT_CLICKED, NULL);
+
+    kb_room_compose = lv_keyboard_create(scr_room_messages);
+    meck_style_keyboard(kb_room_compose);
+    lv_keyboard_set_textarea(kb_room_compose, ta_room_compose);
+    lv_obj_add_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(kb_room_compose, on_room_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_room_compose, on_room_kb_event, LV_EVENT_CANCEL, NULL);
+    lv_obj_add_event_cb(kb_room_compose, on_kb_long_press,
+                        LV_EVENT_LONG_PRESSED, NULL);
+}
+
 extern "C" void meck_ui_init() {
     printf("MeckUI: building home screen\n");
 
@@ -8602,6 +9434,7 @@ extern "C" void meck_ui_init() {
     create_discover_screen();
     create_admin_login_screen();
     create_admin_home_screen();
+    create_room_messages_screen();
     meck_audio_ui_init();
     meck_map_ui_init();
 
@@ -8643,6 +9476,7 @@ extern "C" void meck_ui_init() {
     // so they're not silently lost.
     meck_register_dm_recv_callback(meck_dm_recv_dispatch);
     meck_register_dm_sent_callback(meck_dm_sent_dispatch);
+    meck_register_post_recv_callback(meck_post_recv_dispatch);
 
     // Repeater admin callbacks. Login + send-result wired in piece 3,
     // status + CLI dispatch wired in piece 4. Telemetry callback lands
@@ -8659,6 +9493,10 @@ extern "C" void meck_ui_init() {
     // dispatching events so partial state isn't visible to a user
     // already tapping through to the inbox.
     load_persisted_dms_into_rings();
+    // Same for room posts (Piece B) — hydrate per-room rings from
+    // /sdcard/meshcore/posts.bin before any LVGL events can reach
+    // room_messages_screen_enter.
+    load_persisted_posts_into_rings();
 
     _lock_release(&lvgl_api_lock);
 

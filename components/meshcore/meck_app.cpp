@@ -320,6 +320,35 @@ extern "C" void meck_drain_pending_dms() {
 }
 
 // ============================================================================
+// Room post receive bridge (Piece B)
+// ----------------------------------------------------------------------------
+// Same pattern as the DM receive bridge. meck_task fills Meck's pending
+// post ring inside onSignedMessageRecv; the LVGL task drains here via
+// meck_drain_pending_posts() and invokes the registered callback.
+// ============================================================================
+static meck_post_recv_cb_t g_post_recv_cb = nullptr;
+
+extern "C" void meck_register_post_recv_callback(meck_post_recv_cb_t cb) {
+    g_post_recv_cb = cb;
+    printf("meck_register_post_recv_callback: %s\n", cb ? "registered" : "cleared");
+}
+
+extern "C" void meck_drain_pending_posts() {
+    if (!g_the_mesh) return;
+    Meck::PendingPostRecv post;
+    while (g_the_mesh->drainPendingPost(post)) {
+        if (g_post_recv_cb) {
+            g_post_recv_cb(post.room_pub_key, post.room_name, post.sender_prefix,
+                           post.text, post.sender_timestamp,
+                           post.path_len, post.snr_x4);
+        } else {
+            printf("meck_drain_pending_posts: no callback, dropping post from %s: %s\n",
+                   post.room_name, post.text);
+        }
+    }
+}
+
+// ============================================================================
 // Repeater Admin bridge
 // ----------------------------------------------------------------------------
 // Send-side: four one-deep queues, one per request type. LVGL queues via

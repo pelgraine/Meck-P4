@@ -383,6 +383,33 @@ struct __attribute__((packed)) P4MsgFileRecord {
 // Total: 4 + 4 + 1 + 1 + 1 + 1 + 1 + 7 + 300 = 320 bytes (identical to v1)
 static_assert(sizeof(P4MsgFileRecord) == 320, "P4MsgFileRecord size must stay 320 bytes for v1 compatibility");
 
+// ---- Room post persistence schema (Piece B) ----
+//
+// Posts pushed from a room server via TXT_TYPE_SIGNED_PLAIN. Distinct
+// magic + file from dms.bin so the two stores don't get mixed on disk.
+// room_pub_key_prefix is the demux key (first 4 bytes of room contact's
+// pub_key); sender_prefix is the original author's prefix passed by the
+// signed-message protocol for attribution.
+#define P4_POST_FILE_MAGIC          0x4D435053U  // 'MCPS' little-endian
+#define P4_POST_FILE_VERSION        1
+
+#define P4_POST_FLAG_VALID          0x01
+
+#define P4_POST_TEXT_LEN  160   // covers MyMesh's MAX_POST_TEXT_LEN (151) with headroom
+
+struct __attribute__((packed)) P4PostFileRecord {
+    uint32_t timestamp;                     // post's original timestamp (sender's RTC)
+    uint8_t  room_pub_key_prefix[4];        // demux key: first 4 bytes of room contact's pub_key
+    uint8_t  sender_prefix[4];              // original author's pub_key prefix
+    uint8_t  flags;                         // bit 0 = valid; rest reserved
+    uint8_t  path_len;                      // 0xFF direct, else hop count
+    int8_t   snr_x4;                        // SNR x 4 of the push packet
+    uint8_t  reserved;                      // pad; future use
+    char     text[P4_POST_TEXT_LEN];
+};
+// Total: 4 + 4 + 4 + 1 + 1 + 1 + 1 + 160 = 176 bytes
+static_assert(sizeof(P4PostFileRecord) == 176, "P4PostFileRecord size must stay 176 bytes");
+
 // ---- Recent heard ring buffer ----
 
 #define P4_RECENT_HEARD_SIZE  16
@@ -778,6 +805,46 @@ public:
             _pending_dm_recv[_pending_dm_tail].valid = false;
             _pending_dm_tail = (_pending_dm_tail + 1) % P4_PENDING_DM_RING;
             _pending_dm_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    // =====================================================================
+    // Pending received room posts ring (Piece B)
+    // ---------------------------------------------------------------------
+    // Mirror of the DM pending ring. onSignedMessageRecv runs on
+    // meck_task and stashes incoming room posts here; the LVGL task
+    // drains via drainPendingPost() and dispatches to per-room rings +
+    // SD persistence. Same ring depth as DMs (8) — room post arrival
+    // bursts after a login average around 32 over several seconds, well
+    // within the drain rate.
+    // =====================================================================
+    static constexpr int P4_PENDING_POST_RING = 8;
+
+    struct PendingPostRecv {
+        bool     valid;
+        uint32_t sender_timestamp;
+        uint32_t recv_millis;
+        uint8_t  path_len;
+        int8_t   snr_x4;
+        uint8_t  room_pub_key[PUB_KEY_SIZE];   // pub_key of the room contact that pushed the post
+        char     room_name[32];                // room contact display name (for logging)
+        uint8_t  sender_prefix[4];             // original author's pub_key prefix
+        char     text[P4_POST_TEXT_LEN];
+    };
+
+    // Pop the oldest pending post into `out`. Same threading model as
+    // drainPendingDM — LVGL task drains, meck_task fills.
+    bool drainPendingPost(PendingPostRecv& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_post_count > 0) {
+            out = _pending_post_recv[_pending_post_tail];
+            _pending_post_recv[_pending_post_tail].valid = false;
+            _pending_post_tail = (_pending_post_tail + 1) % P4_PENDING_POST_RING;
+            _pending_post_count--;
             ok = true;
         }
         xSemaphoreGive(_mutex);
@@ -2222,7 +2289,50 @@ protected:
     void onSignedMessageRecv(const ContactInfo& from, mesh::Packet* pkt,
                               uint32_t sender_timestamp,
                               const uint8_t* sender_prefix, const char* text) override {
-        printf("Meck: signed msg from %s: %s\n", from.name, text);
+        // Room post receive path. BaseChatMesh auto-updates from.sync_since
+        // and auto-ACKs (see BaseChatMesh.cpp onPeerDataRecv TXT_TYPE_SIGNED_PLAIN).
+        // We stash the post into the pending ring; the LVGL task drains
+        // via drainPendingPost(), demultiplexes by from.id.pub_key into a
+        // per-room ring, persists to /sdcard/meshcore/posts.bin, and
+        // re-renders if the room view is currently open.
+        //
+        // path_len convention matches the DM ring: 0xFF for direct route,
+        // raw hop count for flooded.
+        uint8_t path_len = 0xFF;
+        float   snr      = 0.0f;
+        if (pkt) {
+            path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
+            snr      = pkt->getSNR();
+        }
+
+        printf("Meck: signed msg from %s (ts=%u path=%u snr=%.1f sender_prefix=%02X%02X%02X%02X): %s\n",
+               from.name, (unsigned)sender_timestamp,
+               (unsigned)path_len, (double)snr,
+               sender_prefix[0], sender_prefix[1], sender_prefix[2], sender_prefix[3],
+               text);
+
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        PendingPostRecv& slot = _pending_post_recv[_pending_post_head];
+        slot.valid = true;
+        slot.sender_timestamp = sender_timestamp;
+        slot.recv_millis = millis();
+        slot.path_len = path_len;
+        slot.snr_x4 = (int8_t)(snr * 4.0f);
+        memcpy(slot.room_pub_key, from.id.pub_key, PUB_KEY_SIZE);
+        strncpy(slot.room_name, from.name, sizeof(slot.room_name) - 1);
+        slot.room_name[sizeof(slot.room_name) - 1] = '\0';
+        memcpy(slot.sender_prefix, sender_prefix, 4);
+        strncpy(slot.text, text, sizeof(slot.text) - 1);
+        slot.text[sizeof(slot.text) - 1] = '\0';
+
+        _pending_post_head = (_pending_post_head + 1) % P4_PENDING_POST_RING;
+        if (_pending_post_count < P4_PENDING_POST_RING) {
+            _pending_post_count++;
+        } else {
+            _pending_post_tail = (_pending_post_tail + 1) % P4_PENDING_POST_RING;
+            printf("Meck: pending post ring full, dropping oldest unread\n");
+        }
+        xSemaphoreGive(_mutex);
     }
 
     uint32_t calcFloodTimeoutMillisFor(uint32_t pkt_airtime_millis) const override {
@@ -3023,6 +3133,30 @@ public:
                                      max_records);
     }
 
+    // UI bridge: persist a single received room post (Piece B). Same
+    // shape as saveDMRecord. The dispatch in MeckUI populates room
+    // pub_key prefix + sender prefix + text and calls this; the data
+    // store appends to /sdcard/meshcore/posts.bin under P4_POST_FILE_MAGIC.
+    bool savePostRecord(const P4PostFileRecord& rec, uint32_t* out_offset = nullptr) {
+        if (!_store) return false;
+        return _store->appendPostRecord(P4_POST_FILE_MAGIC,
+                                        P4_POST_FILE_VERSION,
+                                        sizeof(P4PostFileRecord),
+                                        &rec,
+                                        out_offset);
+    }
+
+    // UI bridge: load persisted room posts on boot. The UI demuxes by
+    // room_pub_key_prefix into the per-room ring.
+    int loadPostRecords(P4PostFileRecord* out, int max_records) {
+        if (!_store) return 0;
+        return _store->loadPostRecords(P4_POST_FILE_MAGIC,
+                                       P4_POST_FILE_VERSION,
+                                       sizeof(P4PostFileRecord),
+                                       out,
+                                       max_records);
+    }
+
 protected:
     uint8_t getPathHashSize() const override {
         // path_hash_mode is a 0-indexed mode per the MeshCore companion
@@ -3088,6 +3222,14 @@ private:
     int  _pending_dm_head  = 0;  // next slot to write (producer)
     int  _pending_dm_tail  = 0;  // next slot to read  (consumer)
     int  _pending_dm_count = 0;
+
+    // ---- Pending room post receive ring (Piece B) ----
+    // Same shape as the DM ring. Filled by onSignedMessageRecv on
+    // meck_task, drained by UI thread via drainPendingPost().
+    PendingPostRecv _pending_post_recv[P4_PENDING_POST_RING] = {};
+    int  _pending_post_head  = 0;
+    int  _pending_post_tail  = 0;
+    int  _pending_post_count = 0;
 
     // ---- Expected-ACK tracking table for outgoing DMs ----
     // Direct port of upstream MyMesh's circular ack table. Each entry
