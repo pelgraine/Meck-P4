@@ -2222,7 +2222,7 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
         if (footer[0]) {
             lv_obj_t *lbl_time = lv_label_create(bubble);
             lv_label_set_text(lbl_time, footer);
-            lv_obj_set_style_text_color(lbl_time, lv_palette_main(LV_PALETTE_GREY), 0);
+            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0x424242), 0);
             meck_set_font(lbl_time, &meck_montserrat_14, 0);
             // Right-justify on sent bubbles to mirror chat-app convention.
             lv_obj_set_style_text_align(lbl_time,
@@ -2418,7 +2418,7 @@ static void rebuild_dm_bubbles(int contact_idx) {
         if (footer[0]) {
             lv_obj_t *lbl_time = lv_label_create(bubble);
             lv_label_set_text(lbl_time, footer);
-            lv_obj_set_style_text_color(lbl_time, lv_palette_main(LV_PALETTE_GREY), 0);
+            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0x424242), 0);
             meck_set_font(lbl_time, &meck_montserrat_14, 0);
             lv_obj_set_style_text_align(lbl_time,
                 is_sent ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
