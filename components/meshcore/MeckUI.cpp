@@ -590,6 +590,50 @@ static lv_obj_t *cb_export_contacts     = NULL;
 static lv_obj_t *cb_export_radio        = NULL;
 static lv_obj_t *lbl_export_warn        = NULL;
 
+// ----------------------------------------------------------------------------
+// Retry-send modal (channel + DM)
+// ----------------------------------------------------------------------------
+// Long-pressing a sent bubble that hasn't been relayed/acked within the
+// threshold opens this modal with a single "Retry Send" button. Confirming
+// re-queues the body text via the normal send path (new timestamp; the
+// recipient may see a duplicate if the original arrives late).
+//
+// Channel threshold: heard_count==0 and (now_utc - msg.timestamp) >= 18 s.
+// DM threshold: lookupDMAckStatus reports a non-acked entry whose
+// (now - sent_ms) >= timeout_ms (i.e. the "Failed" state rebuild_dm_bubbles
+// already shows).
+
+// Channel-side threshold in seconds. DM side reuses the existing per-DM
+// ACK timeout from lookupDMAckStatus.
+static const uint32_t MECK_RETRY_CHANNEL_THRESHOLD_SEC = 18;
+
+// Per-bubble retry context, attached as user_data on each sent bubble at
+// rebuild time and freed via LV_EVENT_DELETE when the bubble is destroyed
+// (next rebuild or screen unload).
+struct BubbleRetryCtx {
+    bool     is_dm;             // false = channel send, true = DM send
+    int      target_idx;        // channel_idx (channel) or contact_idx (DM)
+    uint32_t timestamp;         // message timestamp — matching key for current
+                                // state lookup at long-press time
+    uint32_t expected_ack;      // DM only; 0 for channel. Used with
+                                // lookupDMAckStatus for the Failed check.
+    char     body[200];         // text to resend. For channel, the
+                                // "sender: " prefix has been stripped.
+};
+
+// Modal widgets — created once and attached to scr_messages so they
+// overlay both channel and DM views (DM reuses scr_messages, see note
+// near scr_messages declaration).
+static lv_obj_t *obj_retry_panel  = NULL;
+static lv_obj_t *lbl_retry_prompt = NULL;
+
+// Populated by on_bubble_long_pressed when eligibility passes, read by
+// on_retry_modal_send. Body must outlive the modal open since the bubble
+// (and its ctx) could be freed by a rebuild between long-press and tap.
+static bool g_retry_pending_is_dm    = false;
+static int  g_retry_pending_idx      = -1;
+static char g_retry_pending_body[200] = "";
+
 // Discover (repeaters-only, mirrors Meck T-Deck Pro's F-key Discover)
 static lv_obj_t *scr_discover         = NULL;
 static lv_obj_t *obj_discover_scroll  = NULL;
@@ -964,6 +1008,12 @@ static void debug_log_update_status();
 static void on_export_modal_identity_changed(lv_event_t *e);
 static void on_export_modal_cancel(lv_event_t *e);
 static void on_export_modal_export(lv_event_t *e);
+// Retry-send long-press feature (channel + DM)
+static void on_bubble_long_pressed(lv_event_t *e);
+static void on_bubble_retry_ctx_delete(lv_event_t *e);
+static void on_retry_modal_send(lv_event_t *e);
+static void on_retry_modal_cancel(lv_event_t *e);
+static void create_retry_modal();
 static void on_settings_brightness_slider_event(lv_event_t *e);
 static void on_settings_screen_off_tap(lv_event_t *e);
 static void on_settings_kb_theme_tap(lv_event_t *e);
@@ -2442,11 +2492,31 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
         if (footer[0]) {
             lv_obj_t *lbl_time = lv_label_create(bubble);
             lv_label_set_text(lbl_time, footer);
-            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0x424242), 0);
+            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0xF5F5DC), 0);
             meck_set_font(lbl_time, &meck_montserrat_14, 0);
             // Right-justify on sent bubbles to mirror chat-app convention.
             lv_obj_set_style_text_align(lbl_time,
                 is_sent ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
+        }
+
+        // Retry-send: attach a long-press handler + per-bubble retry
+        // context on every sent channel bubble. Eligibility is checked
+        // at press time (not here) so the 18-second elapsed transition
+        // doesn't depend on a rebuild firing first. ctx is freed via
+        // LV_EVENT_DELETE when the bubble is destroyed on next rebuild.
+        if (is_sent) {
+            BubbleRetryCtx *ctx = new BubbleRetryCtx();
+            ctx->is_dm        = false;
+            ctx->target_idx   = (int)ch_idx;
+            ctx->timestamp    = msgs[i].timestamp;
+            ctx->expected_ack = 0;
+            strncpy(ctx->body, body, sizeof(ctx->body) - 1);
+            ctx->body[sizeof(ctx->body) - 1] = '\0';
+            lv_obj_set_user_data(bubble, ctx);
+            lv_obj_add_event_cb(bubble, on_bubble_long_pressed,
+                                LV_EVENT_LONG_PRESSED, NULL);
+            lv_obj_add_event_cb(bubble, on_bubble_retry_ctx_delete,
+                                LV_EVENT_DELETE, NULL);
         }
     }
 
@@ -2638,10 +2708,28 @@ static void rebuild_dm_bubbles(int contact_idx) {
         if (footer[0]) {
             lv_obj_t *lbl_time = lv_label_create(bubble);
             lv_label_set_text(lbl_time, footer);
-            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0x424242), 0);
+            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0xF5F5DC), 0);
             meck_set_font(lbl_time, &meck_montserrat_14, 0);
             lv_obj_set_style_text_align(lbl_time,
                 is_sent ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
+        }
+
+        // Retry-send: attach long-press handler + per-bubble retry
+        // context on every sent DM bubble. Eligibility (Failed status)
+        // is re-checked at press time via lookupDMAckStatus.
+        if (is_sent) {
+            BubbleRetryCtx *ctx = new BubbleRetryCtx();
+            ctx->is_dm        = true;
+            ctx->target_idx   = contact_idx;
+            ctx->timestamp    = m.timestamp;
+            ctx->expected_ack = m.expected_ack;
+            strncpy(ctx->body, clean_text, sizeof(ctx->body) - 1);
+            ctx->body[sizeof(ctx->body) - 1] = '\0';
+            lv_obj_set_user_data(bubble, ctx);
+            lv_obj_add_event_cb(bubble, on_bubble_long_pressed,
+                                LV_EVENT_LONG_PRESSED, NULL);
+            lv_obj_add_event_cb(bubble, on_bubble_retry_ctx_delete,
+                                LV_EVENT_DELETE, NULL);
         }
     }
 
@@ -2769,7 +2857,7 @@ static void rebuild_room_bubbles(int contact_idx) {
         if (footer[0]) {
             lv_obj_t *lbl_time = lv_label_create(bubble);
             lv_label_set_text(lbl_time, footer);
-            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0x424242), 0);
+            lv_obj_set_style_text_color(lbl_time, lv_color_hex(0xF5F5DC), 0);
             meck_set_font(lbl_time, &meck_montserrat_14, 0);
             lv_obj_set_style_text_align(lbl_time,
                 is_outgoing ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
@@ -4291,6 +4379,198 @@ static void on_export_modal_export(lv_event_t *e) {
            ok ? filename : "");
 
     if (obj_export_panel) lv_obj_add_flag(obj_export_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ============================================================================
+// Retry-send long-press feature (channel + DM)
+// ----------------------------------------------------------------------------
+// rebuild_message_bubbles / rebuild_dm_bubbles attach a long-press handler
+// to every sent bubble. The handler re-checks eligibility against the
+// current ring/ACK state at press time (not at rebuild time) so 18 seconds
+// of elapsed real time becomes retryable without depending on a rebuild
+// trigger. If eligible, the retry modal opens.
+// ============================================================================
+
+// LV_EVENT_DELETE handler — frees the BubbleRetryCtx that was attached as
+// user_data on bubble creation. The bubble's user_data is owned by us;
+// LVGL doesn't free it on object destruction so the cleanup is explicit.
+static void on_bubble_retry_ctx_delete(lv_event_t *e) {
+    lv_obj_t *bubble = (lv_obj_t*)lv_event_get_target(e);
+    if (!bubble) return;
+    BubbleRetryCtx *ctx = (BubbleRetryCtx*)lv_obj_get_user_data(bubble);
+    if (ctx) {
+        delete ctx;
+        lv_obj_set_user_data(bubble, NULL);
+    }
+}
+
+// Look up current heard_count for a channel message by (ch_idx, timestamp).
+// Returns -1 if not found, otherwise the count. Iterates the channel's
+// ring snapshot via getMessages — cheap (only called on long-press).
+static int find_channel_msg_heard_count(uint8_t ch_idx, uint32_t timestamp) {
+    Meck *mesh = meck_get_instance();
+    if (!mesh) return -1;
+    // P4_MSG_PER_CHANNEL is 500; one snapshot is ~100 KB — too big for
+    // stack. Allocate in PSRAM for the duration of the lookup.
+    P4ChannelMessage *snap = (P4ChannelMessage*)heap_caps_malloc(
+        P4_MSG_PER_CHANNEL * sizeof(P4ChannelMessage), MALLOC_CAP_SPIRAM);
+    if (!snap) return -1;
+    int n = mesh->getMessages(snap, P4_MSG_PER_CHANNEL, ch_idx);
+    int out = -1;
+    for (int i = 0; i < n; i++) {
+        if (snap[i].timestamp == timestamp) {
+            out = (int)snap[i].heard_count;
+            break;
+        }
+    }
+    heap_caps_free(snap);
+    return out;
+}
+
+// Re-check eligibility against current state. Returns true if the
+// retry modal should open for this context.
+static bool retry_is_eligible(const BubbleRetryCtx *ctx) {
+    if (!ctx) return false;
+    if (ctx->is_dm) {
+        Meck *mesh = meck_get_instance();
+        if (!mesh) return false;
+        if (ctx->expected_ack == 0) return false;   // no live ACK table entry
+        bool          acked      = false;
+        unsigned long sent_ms    = 0;
+        uint32_t      timeout_ms = 0;
+        if (!mesh->lookupDMAckStatus(ctx->expected_ack, acked,
+                                     sent_ms, timeout_ms)) {
+            return false;                            // rolled out — unknown
+        }
+        if (acked) return false;                     // delivered
+        unsigned long now = (unsigned long)esp_log_timestamp();
+        return (now - sent_ms) >= timeout_ms;        // Failed
+    } else {
+        int hc = find_channel_msg_heard_count((uint8_t)ctx->target_idx,
+                                              ctx->timestamp);
+        if (hc < 0) return false;                    // not found
+        if (hc > 0) return false;                    // already echoed
+        uint32_t now = meck_clock_get_utc();
+        if (now < ctx->timestamp) return false;      // clock skew
+        return (now - ctx->timestamp) >= MECK_RETRY_CHANNEL_THRESHOLD_SEC;
+    }
+}
+
+// LV_EVENT_LONG_PRESSED handler — attached to every sent bubble. Reads
+// the BubbleRetryCtx attached as user_data, checks eligibility against
+// current state, and opens the retry modal if eligible. If not, silently
+// returns (per the "no menu when retry isn't available" UX choice).
+static void on_bubble_long_pressed(lv_event_t *e) {
+    lv_obj_t *bubble = (lv_obj_t*)lv_event_get_target(e);
+    if (!bubble) return;
+    BubbleRetryCtx *ctx = (BubbleRetryCtx*)lv_obj_get_user_data(bubble);
+    if (!ctx) return;
+    if (!retry_is_eligible(ctx)) return;
+
+    // Snapshot the body + target into the modal-pending statics. The
+    // bubble (and its ctx) may be freed by a rebuild between now and
+    // the modal's Send tap.
+    g_retry_pending_is_dm = ctx->is_dm;
+    g_retry_pending_idx   = ctx->target_idx;
+    strncpy(g_retry_pending_body, ctx->body, sizeof(g_retry_pending_body) - 1);
+    g_retry_pending_body[sizeof(g_retry_pending_body) - 1] = '\0';
+
+    if (lbl_retry_prompt) {
+        char preview[80];
+        snprintf(preview, sizeof(preview), "Retry sending:\n\"%s\"",
+                 g_retry_pending_body);
+        lv_label_set_text(lbl_retry_prompt, preview);
+    }
+    if (obj_retry_panel) {
+        lv_obj_clear_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(obj_retry_panel);
+    }
+}
+
+static void on_retry_modal_cancel(lv_event_t *e) {
+    if (obj_retry_panel) lv_obj_add_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
+    g_retry_pending_idx = -1;
+    g_retry_pending_body[0] = '\0';
+}
+
+static void on_retry_modal_send(lv_event_t *e) {
+    if (g_retry_pending_idx < 0 || g_retry_pending_body[0] == '\0') {
+        if (obj_retry_panel) lv_obj_add_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if (g_retry_pending_is_dm) {
+        meck_request_send_dm(g_retry_pending_idx, g_retry_pending_body);
+    } else {
+        meck_request_send_text((uint8_t)g_retry_pending_idx,
+                               g_retry_pending_body);
+    }
+    if (obj_retry_panel) lv_obj_add_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
+    g_retry_pending_idx = -1;
+    g_retry_pending_body[0] = '\0';
+}
+
+// Build the retry confirmation modal as an overlay on scr_messages.
+// scr_messages is reused by the DM conversation view, so one modal
+// covers both channel and DM long-press cases.
+static void create_retry_modal() {
+    if (!scr_messages) return;
+
+    obj_retry_panel = lv_obj_create(scr_messages);
+    lv_obj_set_size(obj_retry_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_retry_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_retry_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_retry_panel, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(obj_retry_panel, 0, 0);
+    lv_obj_add_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_retry_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_retry_panel, LV_SCROLLBAR_MODE_OFF);
+
+    // Inner panel — centred card with the prompt and two buttons.
+    int card_w = SCREEN_WIDTH - 80;
+    int card_h = 280;
+    lv_obj_t *card = lv_obj_create(obj_retry_panel);
+    lv_obj_set_size(card, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_make(60, 60, 80), 0);
+    lv_obj_set_style_pad_all(card, 16, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lbl_retry_prompt = lv_label_create(card);
+    lv_label_set_text(lbl_retry_prompt, "Retry sending?");
+    lv_obj_set_style_text_color(lbl_retry_prompt, lv_color_white(), 0);
+    meck_set_font(lbl_retry_prompt, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_retry_prompt, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_retry_prompt, card_w - 32);
+    lv_obj_align(lbl_retry_prompt, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    // Retry Send button — cyan, matches the existing send button colour.
+    lv_obj_t *btn_send = lv_button_create(card);
+    lv_obj_set_size(btn_send, card_w - 32, 60);
+    lv_obj_align(btn_send, LV_ALIGN_BOTTOM_MID, 0, -70);
+    lv_obj_set_style_bg_color(btn_send, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_send, 8, 0);
+    lv_obj_t *lbl_send = lv_label_create(btn_send);
+    lv_label_set_text(lbl_send, "Retry Send");
+    lv_obj_set_style_text_color(lbl_send, lv_color_white(), 0);
+    meck_set_font(lbl_send, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_send);
+    lv_obj_add_event_cb(btn_send, on_retry_modal_send, LV_EVENT_CLICKED, NULL);
+
+    // Cancel button — neutral grey.
+    lv_obj_t *btn_cancel = lv_button_create(card);
+    lv_obj_set_size(btn_cancel, card_w - 32, 60);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(btn_cancel, lv_color_make(60, 60, 70), 0);
+    lv_obj_set_style_radius(btn_cancel, 8, 0);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, "Cancel");
+    lv_obj_set_style_text_color(lbl_cancel, lv_color_white(), 0);
+    meck_set_font(lbl_cancel, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_cancel);
+    lv_obj_add_event_cb(btn_cancel, on_retry_modal_cancel, LV_EVENT_CLICKED, NULL);
 }
 
 // Slider event handler. LV_EVENT_VALUE_CHANGED fires continuously as the
@@ -9817,6 +10097,7 @@ extern "C" void meck_ui_init() {
     create_radio_picker_screen();
     create_channel_picker_screen();
     create_messages_screen();
+    create_retry_modal();
     create_dm_inbox_screen();
     create_contacts_screen();
     create_contact_detail_screen();

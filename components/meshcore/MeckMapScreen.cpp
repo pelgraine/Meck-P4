@@ -799,7 +799,7 @@ static uint8_t resolve_filter_mask(void) {
 static lv_color_t color_for_adv_type(uint8_t adv_type) {
     switch (adv_type) {
         case ADV_TYPE_CHAT:      return lv_color_make( 80, 220, 120); // companion: green
-        case ADV_TYPE_REPEATER:  return lv_color_make( 90, 200, 200); // cyan-teal
+        case ADV_TYPE_REPEATER:  return lv_color_make( 20,  60, 180); // navy
         case ADV_TYPE_ROOM:      return lv_color_make(110,  60, 180); // dark purple
         case ADV_TYPE_SENSOR:    return lv_color_make(240, 220,  80); // yellow
         default:                 return lv_color_make(160, 160, 160); // grey fallback
