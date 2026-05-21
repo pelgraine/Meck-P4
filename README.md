@@ -21,8 +21,14 @@ with a `meshcore` ESP-IDF component added on top.
 - [Channel Messages](#channel-messages)
 - [Channel Picker](#channel-picker)
 - [Contacts](#contacts)
+- [Direct Messages](#direct-messages)
+- [Repeater Admin](#repeater-admin)
+- [Room Servers](#room-servers)
+- [Per-Contact Path Editor](#per-contact-path-editor)
+- [Trace Route](#trace-route)
 - [Discover](#discover)
 - [Audio Player](#audio-player)
+- [Maps](#maps)
 - [Settings](#settings)
 - [GPS](#gps)
 - [Battery](#battery)
@@ -141,13 +147,14 @@ This generates `release/meck-p4-0.1.bin` along with a SHA-256 checksum.
 ## Home Screen
 
 The home screen is a horizontal seven-tile layout. Swipe left or right to
-navigate between tiles. The Home tile (tile 0) shows node name, frequency,
-spreading factor, RSSI, and a six-button navigation grid linking to
-Messages, Contacts, Settings, Reader, Notes, and Discover.
+navigate between tiles. The Home tile (tile 0) shows node name, unread
+message count, battery percentage and clock in the top-right corner, and
+a ten-tile navigation grid (2 columns × 5 rows) linking to Messages,
+Contacts, Settings, Reader, Notes, Discover, Trace, Maps, Audio, and Web.
 
 | Tile | Purpose |
 | --- | --- |
-| 0 Home | Node name, freq/SF/RSSI/RX counters, six-button navigation grid |
+| 0 Home | Node name, unread message count, clock + battery, ten-tile navigation grid |
 | 1 Recent Heard | Live list of nodes whose adverts have been received |
 | 2 Radio Details | Current frequency, bandwidth, spreading factor, coding rate, TX power, sync word |
 | 3 Advert | Long-press to send a manual advert |
@@ -310,9 +317,81 @@ contacts table reaches its 2,000-entry limit.
 
 To add a contact that hasn't broadcast an advert recently (so it's not in your auto-add list), use the **Discover** screen below to send an active discovery probe and add the node from the response. This is the easiest way to pick up a nearby repeater you've just brought online or one whose advert your device missed.
 
-> **Note:** Direct messaging is not yet implemented in Meck-P4. The
-> contact detail screen does not yet have a compose action. See the
-> [Road-Map](#road-map--to-do) for status.
+The contact detail screen branches by contact type:
+
+- **Chat contacts** get a cyan **Send DM** button (see [Direct Messages](#direct-messages)) and a teal **Edit Path** button (see [Per-Contact Path Editor](#per-contact-path-editor)).
+- **Repeater contacts** get a cyan **Admin** button (see [Repeater Admin](#repeater-admin)) and the **Edit Path** button.
+- **Room server contacts** get the same **Admin** button (see [Room Servers](#room-servers)) and the **Edit Path** button.
+
+---
+
+## Direct Messages
+
+Tap a chat contact and press **Send DM** on its detail screen to open the DM conversation. The view follows the standard chat layout — keyboard along the bottom half of the screen, message bubbles scrolling above it.
+
+Per-contact DM history is held in a 20-message ring buffer in PSRAM (lazy-allocated, so contacts you've never DM'd cost nothing) and persisted to `/sdcard/meshcore/dms/`, so messages survive reboots when an SD card is present.
+
+**ACK tracking:** outgoing bubbles update from "Sending..." through to "Delivered" or "Failed" as the ACK round-trip completes. A direct path produces a near-instant delivered state; a flooded send waits the path-length-derived timeout before either confirming or marking failed.
+
+**Reading received DMs:** the **Channel Picker** (swipe left/right on Messages) shows a **DM Inbox** row alongside your channels, with a per-contact unread badge. Tap a contact's row to jump into that conversation.
+
+---
+
+## Repeater Admin
+
+Tap a Repeater contact to open its contact detail screen. Tap the cyan **Admin** button to open the login screen.
+
+The login screen shows the contact name in the title bar, a password field with reveal-while-typing (the last character shows for 1.5s before being masked — easier than blind-typing symbols and numbers), a full Show/Hide toggle, a Remember Password checkbox, and a routing-mode badge showing **Flood** vs **Direct** (picked from the contact's known path at entry).
+
+On successful login, the admin home shows a persistent banner across the top — **green for admin**, **yellow for guest** — with the contact name and session role. Below the banner, a scrollable menu:
+
+| Menu item | What it does |
+| --- | --- |
+| **Status** | Full RepeaterStats view: battery, clock-at-login, uptime, TX/RX airtime, last RSSI/SNR, noise floor, packet counts, duplicates, errors, queue length, debug flags. A Refresh button re-issues the request. |
+| **Send Advert** | Single big button that triggers the repeater to broadcast an advertisement. Status line goes yellow during in-flight, green on success with the repeater's response text, red on send failure. |
+| **Cmd Line** | Free-form 100-character text input + Send button. Virtual keyboard slides up on focus. Scrollback shows command in cyan and response in white (or red on failure). Trimmed at 50 entries. |
+| **Settings** | Scrollable menu list of setting categories — Position, Sync Clock, Admin Password, Guest Password, Change Identity Key, Manage Regions, Neighbours, Repeat Settings. Guest sessions see only Neighbours. |
+
+**Single-session policy:** logging into a new repeater tears down the prior session. **Remember Password** persists the entered password for that contact, so subsequent visits skip the prompt.
+
+---
+
+## Room Servers
+
+Tap a Room-type contact in the contacts list (filter to **Room** to find them quickly) to open the same admin login flow as repeaters. After login, the room's post timeline appears as a scrollable bubble list:
+
+- Bubbles are left-aligned, with the original **author name** above each bubble and a **timestamp and hop count footer** below
+- Author resolution walks your contacts looking for a matching 4-byte pubkey prefix; unknown authors render as `Unknown <hex>`
+- A composer at the bottom of the screen lets you post back to the room
+
+**Persistence:** post history is saved per-room to `/sdcard/meshcore/posts/` and reloaded into PSRAM on boot, so you don't need to re-login to see what's already been received.
+
+**Live re-render:** posts arriving while you're sitting on the room view land in the bubble list without leaving the screen — no need to refresh.
+
+---
+
+## Per-Contact Path Editor
+
+A teal **Edit Path** button on the contact detail screen opens an editor for the contact's outgoing route.
+
+| Control | Effect |
+| --- | --- |
+| **Path Size** dropdown | 1-byte or 2-byte path hash. Match the path hash mode the network is using. |
+| **Hex hops** text field | Comma-separated hex bytes — one byte per hop for 1-byte mode, two per hop for 2-byte. |
+| **Save** | Stores the entered path for this contact. Empty path = saved as a 0-hop direct path. |
+| **Reset to Flood** | Clears the stored path so the next send floods. |
+
+Useful when you've manually picked a working route via Trace Path and want to lock it in, or when a contact's auto-acquired path has gone stale and you want to revert to flooding while a new path settles.
+
+---
+
+## Trace Route
+
+A standalone Trace Path screen — tap the **Trace** tile on the home grid — lets you probe a specific route hop by hop. Enter the path as comma-separated hex bytes (the same format as the Per-Contact Path Editor), pick the Path Size (1-byte or 2-byte), and tap **Run Trace**.
+
+The result list below shows the per-hop SNR as 3-bar icons as TRACE replies come in, with a 30-second pending timeout.
+
+Useful for diagnosing where in a chain a route is breaking down — if you get replies for the first two hops but the third never comes back, that's where the link is failing.
 
 ---
 
@@ -368,13 +447,40 @@ Tap **Audio** from the home grid to open the audio player. Plays WAV and MP3 fil
 
 Inside each, organise however you like (typically Artist / Album / track, or Author / Book / chapter). The audio browser shows breadcrumbs and lets you tap a track to play, with transport controls (-30s, play/pause, +30s), volume, and a progress bar on the Now Playing screen.
 
-**Cover art** support is partial in v0.2: the player looks for `cover.png` / `folder.png` / `front.png` / `album.png` (case-insensitive) alongside your tracks and pre-flights the decoder, but typical cover dimensions exceed what LVGL's heap can allocate for the decoded framebuffer, so the music-note placeholder is shown instead in this release. A future build will downscale at decode time. Exported sidecar covers don't display on-device yet but are read automatically once support lands.
+**Cover art** displays when a **256x256 `cover.png`** is placed alongside your tracks. Other filenames (`folder.png`, `front.png`, `album.png`) are also recognised, case-insensitive. Larger PNGs are read by the file scanner but fail to allocate at decode time — see the audio player guide for the working recipe and a downscale command if you have higher-resolution covers on hand.
+
+**Audio format requirements:** MP3 files must be at 44.1 kHz; WAV files must be 16-bit PCM (format code 0x0001) at 44.1 kHz, mono or stereo. Files outside this window fail the format check. See the audio player guide for `ffprobe` checks and `ffmpeg` conversion commands.
 
 **Watchdog crash on first play:** if a file with large embedded album art crashes the device during playback startup, you've hit the libhelix-mp3 sync-word scan issue documented in the audio player guide. The firmware has a defensive ID3v2-skip patch that should prevent this, but the durable fix is to clean your files at the source with the `tools/mp3_clean.py` script before copying them to the SD card.
 
 For full setup instructions including the `mp3_clean.py` script usage, SD card layout, troubleshooting, and developer notes, see:
 
 **[Audio player guide](https://github.com/pelgraine/Meck-P4/blob/main/information/Meck%20Docs/audioplayerguide.md)**
+
+---
+
+## Maps
+
+Tap the **Maps** tile on the home grid to open an offline slippy-tile map of your area. The map renders OSM PNG tiles from `/sdcard/tiles/{z}/{x}/{y}.png` via LVGL's image widget plus LV_USE_LODEPNG. Pan and zoom by touch. A GPS dot follows your fix when GPS is enabled; markers overlay contact positions filtered by type (repeaters by default), with a filter modal for switching to other types.
+
+### Getting map tiles
+
+You need to provide your own map tiles. There are a couple of ways to get them:
+
+- **Pre-downloaded tile bundles** (a good way to support MeshCore development):
+  - <https://buymeacoffee.com/ripplebiz/e/342543> (Europe)
+  - <https://buymeacoffee.com/ripplebiz/e/342542> (US)
+- **Roll your own** with a Python downloader script that fetches the areas you want:
+  - <https://github.com/fistulareffigy/MTD-Script>
+  - <https://github.com/TheBestJohn/MTD-Script> — a modified fork with parallel downloads and additional error handling
+
+### Where the tiles go
+
+Once you've downloaded them, copy the `tiles/` folder to the **root of your SD card** so the path on the device is `/sdcard/tiles/{z}/{x}/{y}.png`.
+
+### SD card sizing
+
+Meck-P4 works with SD cards up to 1 TB. Very large tile folders (tens of GB) can make the maps screen feel sluggish — tile lookup walks the FAT directory structure, and on huge cards the seek overhead becomes noticeable. If you only need tiles for your local area, downloading just the zoom levels and bounding box you actually care about keeps things snappier than dumping the whole continent on the card.
 
 ---
 
@@ -391,7 +497,7 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 | **UTC Offset** | Tap to adjust (-12 to +14) |
 | **Home Color** | Tap to cycle: Plain / Multi |
 | **Brightness** | Tap to cycle: eight-step ladder (13% / 25% / 38% / 50% / 63% / 75% / 88% / 100%) — applies live |
-| **Auto Off** | Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — screen fades to black when idle, any touch wakes it |
+| **Auto Off** | Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — when idle, the screen tears down the MIPI-DSI bus and CPU usage drops from ~94% to ~57% CPU_MAX. Wake with the **boot button** (touch wake is not yet supported) |
 | **KB Theme** | Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details. |
 | **KB Layout** | Tap to cycle: QWERTY / AZERTY / QWERTZ. Layout switches apply live to every keyboard instance. |
 | **Contacts >>** | Opens the Contacts sub-screen (auto-add policies, type toggles) |
@@ -595,34 +701,39 @@ no particular timeframes attached.
 - [x] Clock sync from MeshCore advert timestamps
 - [x] Clock sync from GPS RMC sentences
 - [x] Adjustable screen brightness (eight-step ladder)
-- [x] Auto screen-off with touch wake (Never / 1 / 2 / 5 / 10 / 30 min)
+- [x] Auto screen-off with boot-button wake (Never / 1 / 2 / 5 / 10 / 30 min) — tears down the MIPI-DSI bus to reduce CPU usage from ~94% to ~57% CPU_MAX
 - [x] Tools script for one-command merged release builds
+- [x] **Direct messaging** — DM compose, DM conversation view with ACK tracking, DM Inbox in the channel picker with per-contact unread badges, per-contact persistence to SD
+- [x] **Roomserver access** — login via Admin button on Room contacts, post timeline as left-aligned bubbles with author + timestamp + hops, live re-render, composer, per-room persistence to SD
+- [x] **Repeater admin** — login (admin + guest sessions), Status / Send Advert / Cmd Line / Settings menu with Remember Password
+- [x] **Trace route** — standalone Trace Path screen with manual hex hop entry and per-hop SNR results
+- [x] **Per-contact path editor** — Edit Path button on contact detail with Save / Reset to Flood, supports 1-byte and 2-byte path hash modes
+- [x] **Map screen** — slippy-tile viewer over `/sdcard/tiles/{z}/{x}/{y}.png` with pan, zoom, GPS dot, contact markers, filter modal
+- [x] **Config export to SD** — Settings → Export Config writes a MeshCore-app-compatible JSON file with selectable sections
+- [x] **Debug logs to SD** — Settings → Debug Logs → Start redirects printf to a per-session log file
 
 **Pending:**
 
-- [ ] Direct messaging (DM compose, DM inbox with unread indicators, DM
-      persistence to SD)
-- [ ] Roomserver access — login flow, message handling, mark-read on
-      login
-- [ ] Repeater admin — login, clock sync push, send advert, get status,
-      neighbours, version
-- [ ] Trace route — view the relay path of a received packet
 - [ ] Notes app
-- [ ] Audio cover-art rendering — pre-flight succeeds but the LVGL heap
-      can't allocate decoded framebuffers for typical cover sizes; needs
-      decode-time downscale or a streaming decoder
+- [ ] Audio cover-art rendering at >256x256 — pre-flight succeeds but the LVGL heap
+      can't allocate decoded framebuffers for larger sizes; needs decode-time
+      downscale or a streaming decoder. 256x256 works.
 - [ ] Web browser & IRC client
 - [ ] PCF8563 hardware RTC integration — read on boot, write on shutdown
       so time survives power-off
 - [ ] ESP32-C6 BLE companion firmware — make the device usable as a
       Bluetooth companion to the iOS / Android MeshCore apps
 - [ ] AMOLED variant verification
-- [ ] Deep sleep with wake-on-touch — the auto-off timer dims the screen
-      but the SoC doesn't enter deep sleep yet
-- [ ] Map tile rendering — slippy-tile viewer over the SD card's `/tiles`
-      directory, paired with GPS for an offline map
+- [ ] Light sleep actually engaging — the screen-off path releases the
+      dsi_phy NO_LIGHT_SLEEP PM lock, but other PM locks still prevent
+      automatic light sleep entry. Power saving in v0.3.5 comes from
+      dynamic frequency scaling instead.
+- [ ] Touch wake from screen-off — currently boot-button only
 - [ ] OTA firmware updates over WiFi via the ESP32-C6
 - [ ] Region scope (MeshCore v1.15+ compatibility)
+- [ ] GPS cold-boot acquisition speed-up — EASY (predicted ephemeris)
+      doesn't appear to be persisting across reboots as intended;
+      targeted for v0.3.6
 
 ---
 
