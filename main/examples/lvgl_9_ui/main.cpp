@@ -3257,6 +3257,13 @@ extern "C" void meck_screen_off()
 {
     if (meck_screen_state_off) return;  // already off, idempotent
 
+    // 0. Fade backlight to 0 first. Without this, the LEDs continue being
+    //    driven at the user's last brightness setting and the panel glows
+    //    visibly even after DISPOFF. start_pwm_gradient_time gives a 100 ms
+    //    smooth fade rather than a snap-off. Safe to call before the panel
+    //    teardown — it only touches the LEDC PWM channel, not the DSI bus.
+    meck_screen_set_brightness(0);
+
     // Lazy wake-source registration. gpio_wakeup_enable requires the pin
     // already configured as input, which meck_boot_button_init does at
     // boot. By the time this function is first called (after the screen-
