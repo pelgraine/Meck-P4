@@ -7,8 +7,10 @@ This guide exists because the path from "I have a folder of MP3s" to "they play 
 ## TL;DR
 
 1. Put MP3s under `/sdcard/audio/music/<Artist>/<Album>/`.
-2. Run `tools/mp3_clean.py` over them before copying to the SD card.
-3. Cover art does not display in v0.2 (see [Known issues](#known-issues)).
+2. MP3s must be at **44.1 kHz**. Tracks at other sample rates won't play; see [Sample rate](#sample-rate) for conversion.
+3. Run `tools/mp3_clean.py` over them before copying to the SD card.
+4. For cover art, save a **256x256 `cover.png`** in the album folder. Larger PNGs are still not supported; see [Cover art](#cover-art).
+5. WAV files do play, but only as **16-bit PCM at 44.1 kHz**. See [WAV files](#wav-files) for conversion.
 
 ## Directory layout on the SD card
 
@@ -20,11 +22,13 @@ The audio browser expects this tree:
 │   └── <Artist>/
 │       └── <Album>/
 │           ├── 01 Track Name.mp3
-│           └── 02 Another.mp3
+│           ├── 02 Another.mp3
+│           └── cover.png            (256x256)
 └── audiobooks/
     └── <Author>/
         └── <Book Title>/
-            └── Chapter 01.mp3
+            ├── Chapter 01.mp3
+            └── cover.png            (256x256)
 ```
 
 The firmware creates `/sdcard/audio`, `/sdcard/audio/music`, and `/sdcard/audio/audiobooks` on first boot if they don't exist. You're free to organise inside however you like, but the two top-level distinction matters: the player applies different defaults to `audiobooks/` content (sleep timer enabled, bookmark resume on by default, position-tracking through the playlist).
@@ -107,6 +111,95 @@ This walks the directory, drops every `APIC` frame larger than 64 KB from each M
 
 The 64 KB threshold is the operative one. Below that, art is small enough that libhelix's sync-word scan completes in well under a second and the watchdog never fires. Above that, the scan time grows roughly linearly with the embedded image size.
 
+### Sample rate
+
+Separate to the embedded-art problem, the MP3 decode path on Meck only handles **44.1 kHz** audio. Tracks ripped or downloaded at other rates (48 kHz is the most common one to trip you up — Bandcamp lossless, anything re-exported from a DAW, some podcast feeds) will fail to play with an error in the serial log.
+
+Check the sample rate of a file with ffprobe:
+
+```bash
+ffprobe -i "yourfile.mp3" 2>&1 | grep "Audio:"
+# Audio: mp3, 48000 Hz, stereo, fltp, 192 kb/s    ← bad
+# Audio: mp3, 44100 Hz, stereo, fltp, 192 kb/s    ← good
+```
+
+Re-encode in place if needed:
+
+```bash
+ffmpeg -i input.mp3 -ar 44100 output.mp3
+```
+
+For a whole album folder:
+
+```bash
+cd "/path/to/Album"
+mkdir converted
+for f in *.mp3; do ffmpeg -i "$f" -ar 44100 "converted/$f"; done
+```
+
+Verify by re-running `ffprobe` on a converted file and confirming `44100 Hz`. Once happy, move the contents of `converted/` up and delete the originals.
+
+`mp3_clean.py` doesn't touch sample rate — it only strips oversized art. Run the sample-rate conversion first, then `mp3_clean.py` over the results.
+
+## WAV files
+
+WAV playback works, but the player has a narrower compatibility window than MP3. Files must be:
+
+- **Format code 0x0001** (linear PCM). Not 0xFFFE (`WAVE_FORMAT_EXTENSIBLE`), which is what most DAWs export by default for 24-bit, 32-bit, or multichannel sessions.
+- **16-bit samples.** 24-bit and 32-bit PCM either produce silence or distortion.
+- **44.1 kHz sample rate.** Same constraint as MP3.
+- **Mono or stereo.** Multichannel files fail the format check.
+
+Symptom of a non-compliant WAV: the player logs `unknown file type` and refuses to start. The chmorgan `esp-audio-player` library only recognises format code 0x0001 (and in newer revisions 0x0003 IEEE float). Anything in the `EXTENSIBLE` wrapper, even if the underlying samples are plain PCM, gives up before reading the GUID subfield.
+
+Inspect a WAV's actual format with ffprobe:
+
+```bash
+ffprobe -i "yourfile.wav" 2>&1 | grep "Audio:"
+# Audio: pcm_s24le, 48000 Hz, stereo, s32, 2304 kb/s    ← won't play
+# Audio: pcm_s16le, 44100 Hz, stereo, s16, 1411 kb/s    ← will play
+```
+
+Re-encode a single file:
+
+```bash
+ffmpeg -i "input.wav" -acodec pcm_s16le -ar 44100 "output.wav"
+```
+
+For a whole album folder:
+
+```bash
+cd "/path/to/Album"
+mkdir converted
+for f in *.wav; do ffmpeg -i "$f" -acodec pcm_s16le -ar 44100 "converted/$f"; done
+```
+
+Verify with ffprobe and check the output line shows `pcm_s16le, 44100 Hz`. Once you're happy, move the contents of `converted/` up to the album folder and delete the originals.
+
+## Cover art
+
+Cover art now displays on the player screen, but **only for PNG files at 256x256 pixels**. Larger sizes (the typical "cover.jpg embedded by your tagging tool" output of 1400x1400 or larger) fail at decode time — see [Cover art does not display at full resolution](#cover-art-does-not-display-at-full-resolution) below.
+
+To get a working cover:
+
+1. In each album folder, place a file named `cover.png` sized 256x256 pixels.
+2. Other filenames (`folder.png`, `front.png`, `album.png`) are also recognised, case-insensitive. `cover.png` is the convention used in this guide.
+3. JPG is recognised by the file scanner but the LVGL JPG decoder is disabled in this build (see [Symptom: boot loop with "Stack protection fault" in `tjpgd`](#symptom-boot-loop-with-stack-protection-fault-in-tjpgdlv_tjpgdcdecoder_info)). Stick to PNG.
+
+If you have a higher-resolution cover handy and want to downscale it:
+
+```bash
+ffmpeg -i source.jpg -vf "scale=256:256" cover.png
+```
+
+Or via ImageMagick:
+
+```bash
+magick source.jpg -resize 256x256 cover.png
+```
+
+If you ran `mp3_clean.py --export-cover` earlier, Pillow will have already saved a downscaled-to-600px PNG. That's still too large for the current decoder — re-resize down to 256x256 before placing it in the album folder.
+
 ## Step 2: copy to the SD card
 
 Drag the cleaned `music/` and `audiobooks/` folders into `/Volumes/<your-sd>/audio/`. Eject the card properly, slot it into the device, power on.
@@ -123,17 +216,13 @@ I (38625) MeckAudio: playing '...01 Nebula.mp3' from 0s
 
 ## Known issues
 
-### Cover art does not display (v0.2)
+### Cover art does not display at full resolution
 
-The firmware finds cover files alongside your tracks and reads their dimensions, but the LVGL PNG decoder runs out of memory trying to allocate the decoded framebuffer for typical cover sizes (a 1400x1400 PNG needs ~4 MB contiguous, a 2500x2500 needs ~12 MB, and LVGL's heap can't reliably provide that). You'll see `lv_realloc: couldn't reallocate memory` in the log when this happens.
+Cover art displays correctly when the file is a 256x256 PNG (see [Cover art](#cover-art) for the working recipe). Larger PNGs are read by the file scanner — including dimensions and decoder pre-flight — but fail to allocate at decode time. A 1400x1400 PNG needs ~4 MB contiguous for its decoded framebuffer, a 2500x2500 PNG needs ~12 MB, and LVGL's heap can't reliably provide that. The log shows `lv_realloc: couldn't reallocate memory` when this happens.
 
-This is on the roadmap for a future firmware version. The fix involves either downscaling at decode time (via `lv_image_set_scale_to_fit` plus a streaming decoder) or restricting the cover slot to a size that's reliably allocatable.
+The proper fix (downscaling at decode time via `lv_image_set_scale_to_fit` plus a streaming decoder, or restricting the cover slot to a reliably-allocatable size) is on the roadmap. In the meantime, supply your covers pre-scaled to 256x256.
 
-In the meantime:
-
-- The audio browser still scans for cover files and the player screen still has a cover slot, so once the fix lands, no migration is needed.
-- `mp3_clean.py --export-cover` will save cover art alongside your MP3s ahead of time if you'd like to prepare. When Pillow is installed, exported covers are downscaled to 600px on their longest side, which keeps them ready for the eventual fix. Files won't display on-device until v0.3+.
-- For now, the player shows a music-note placeholder in the cover slot.
+`mp3_clean.py --export-cover` saves cover art alongside your MP3s ahead of time, downscaled to 600px on its longest side when Pillow is installed. 600px is still too large for the current decoder — resize further to 256x256 before the file lands in the album folder. The script will continue exporting at 600px so the source data is preserved for the eventual fix.
 
 ## Troubleshooting
 
@@ -162,6 +251,22 @@ idf.py build flash monitor
 Or via `idf.py menuconfig`: search (`/`) for `TJPGD`, toggle the checkbox off, save, exit.
 
 If you really need JPG support, the alternatives are increasing `CONFIG_ESP_MAIN_TASK_STACK_SIZE` to 8192 or higher, or switching to `CONFIG_LV_USE_LIBJPEG_TURBO` (which allocates from heap rather than the caller's stack).
+
+### Symptom: WAV tap shows "unknown file type" and the track refuses to start
+
+The serial log shows the audio task accepting the open but then rejecting the format. Inspect the file:
+
+```bash
+ffprobe -i "yourfile.wav" 2>&1 | grep "Audio:"
+```
+
+If the codec field is anything other than `pcm_s16le` and the sample rate is anything other than `44100 Hz`, the file is outside the compatibility window. See [WAV files](#wav-files) for the conversion command.
+
+The most common case is `pcm_s24le` or `pcm_s32le` at 48 kHz, which is what DAWs export by default. Even if you ignore the bit depth, the `EXTENSIBLE` format-code wrapper alone is enough to fail the check.
+
+### Symptom: MP3 tap shows an error in the serial log and the track refuses to start
+
+Past the obvious "the file is corrupt" check, the most common cause is a non-44.1-kHz sample rate. Inspect with `ffprobe` and convert if needed — see [Sample rate](#sample-rate).
 
 ### Symptom: contacts save fails with `errno=17` after enabling audio
 
