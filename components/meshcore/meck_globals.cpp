@@ -84,8 +84,16 @@ SimpleMeshTables   tables;
 // names (it includes meck.h, not meck_globals.h).
 // ============================================================================
 
+// Forward decl of the meck_app.cpp helper that writes to the P4RTCClock
+// instance (g_rtc) the Meck object was constructed with. Without this
+// second push, the soft RTC below got updated but mesh->getRTCClock()
+// — which the UI's top-bar clock reads and which MeshCore uses for every
+// internal timestamp — stayed at compileTimeEpoch().
+extern "C" void meck_app_rtc_set(uint32_t epoch);
+
 extern "C" void meck_clock_set_utc(uint32_t epoch) {
     meck::rtc.setCurrentTime(epoch);
+    meck_app_rtc_set(epoch);
 }
 
 extern "C" uint32_t meck_clock_get_utc(void) {

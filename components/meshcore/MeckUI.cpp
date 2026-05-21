@@ -38,6 +38,7 @@
 #include "MeckMesh.h"
 #include "MeckDataStore.h"
 #include "MeckAudioUI.h"
+#include "MeckAudio.h"
 #include "MeckMapScreen.h"
 
 #include <sys/lock.h>
@@ -337,15 +338,18 @@ static lv_obj_t *lbl_home_title    = NULL;
 #define MECK_HOME_PAGE_COUNT 7
 static lv_obj_t *lbl_home_clock[MECK_HOME_PAGE_COUNT]   = {};
 static lv_obj_t *lbl_home_battery[MECK_HOME_PAGE_COUNT] = {};
+static lv_obj_t *lbl_home_audio[MECK_HOME_PAGE_COUNT]   = {};
 
 // Clock + battery labels for every non-home screen and modal. Slot 0..7
 // reserved for full screens (Settings, Settings/Contacts, Radio Picker,
 // Channel Picker, Messages, Contacts, Contact Detail, Discover); slot
 // 8..9 for the two semi-transparent overlay modals (name-edit, channel-add).
+// Slot 10 = Trace Path screen, slot 11 = Path Editor screen.
 // Updated by the same timer block that drives the home page arrays.
-#define MECK_SCREEN_HOST_COUNT 10
+#define MECK_SCREEN_HOST_COUNT 12
 static lv_obj_t *lbl_screen_clock[MECK_SCREEN_HOST_COUNT]   = {};
 static lv_obj_t *lbl_screen_battery[MECK_SCREEN_HOST_COUNT] = {};
+static lv_obj_t *lbl_screen_audio[MECK_SCREEN_HOST_COUNT]   = {};
 
 static lv_obj_t *lbl_home_unread   = NULL;
 
@@ -554,6 +558,32 @@ static lv_obj_t *obj_contacts_filter_bar = NULL;  // chip row above the list
 static lv_obj_t *scr_contact_detail      = NULL;
 static lv_obj_t *lbl_contact_detail_body = NULL;
 static int g_selected_contact_idx        = -1;
+
+// Trace Path screen (manual hex hop entry, runs PAYLOAD_TYPE_TRACE,
+// shows per-hop SNR results). Screen-host slot 10.
+static lv_obj_t *scr_trace              = NULL;
+static lv_obj_t *dd_trace_path_size     = NULL;  // dropdown: 1-byte / 2-byte
+static lv_obj_t *ta_trace_path          = NULL;  // textarea: hex hops, comma-sep
+static lv_obj_t *btn_trace_run          = NULL;
+static lv_obj_t *cont_trace_results     = NULL;  // scrollable result list
+static lv_obj_t *lbl_trace_status       = NULL;  // "Running…" / error text
+static lv_obj_t *kb_trace               = NULL;  // keyboard for ta_trace_path
+static unsigned long g_trace_sent_ms    = 0;     // millis() when run pressed
+static bool          g_trace_in_flight  = false; // waiting on response
+
+// Path Editor screen (manual hex hop entry for a contact's out_path).
+// Screen-host slot 11. Operates on g_selected_contact_idx, set by the
+// Edit Path button on scr_contact_detail.
+static lv_obj_t *scr_path_editor              = NULL;
+static lv_obj_t *lbl_path_editor_contact      = NULL;
+static lv_obj_t *dd_path_editor_size          = NULL;  // 1-byte / 2-byte / 3-byte
+static lv_obj_t *ta_path_editor_path          = NULL;
+static lv_obj_t *lbl_path_editor_status       = NULL;
+static lv_obj_t *kb_path_editor               = NULL;  // keyboard for ta_path_editor_path
+
+// Contact custom path editor — fwd decl so the contact detail screen
+// builder can wire its Edit Path button to the screen-load callback.
+static void goto_path_editor(lv_event_t *e);
 
 // Contact list filter. Persists across navigations to the contacts screen
 // so the user lands back where they were. Mirrors upstream Meck's enum.
@@ -871,6 +901,9 @@ static void refresh_contacts_list();
 static void goto_discover(lv_event_t *e);
 static void refresh_discover_list();
 static void create_discover_screen();
+static void goto_trace(lv_event_t *e);
+static void create_trace_screen();
+static void create_path_editor_screen();
 
 static void on_settings_name_tap(lv_event_t *e);
 static void on_settings_name_save(lv_event_t *e);
@@ -1041,7 +1074,7 @@ static void cb_todo_discover(lv_event_t* e) {
     // nodes can pick us up.
     goto_discover(e);
 }
-static void cb_todo_trace(lv_event_t* e)    { printf("MeckUI: Trace tile clicked (TODO)\n"); }
+static void cb_todo_trace(lv_event_t* e)    { goto_trace(e); }
 static void cb_todo_maps(lv_event_t* e)     { meck_map_ui_show(); }
 static void goto_audio_browser(lv_event_t* e) {
     (void)e;
@@ -1281,45 +1314,42 @@ static lv_obj_t* create_settings_row(lv_obj_t *parent, const char *label,
 
 // Width-factor layout — each entry is a LVGL button-matrix ctrl flag OR'd
 // with the cell's width factor (relative to other cells in the same row).
-// Lower-case map. Layout differs from LVGL's default:
-//   row 1: letters + backspace          (1# moved down)
-//   row 2: 1# + letters + enter         (ABC moved down)
-//   row 3: '-' + letters + '.' + ','    ('_' and ':' live on the special
-//                                         map; '-', '.' and ',' widened from
-//                                         factor 3 to 5 — about 67% wider)
-//   row 4: [kbd] [<] ABC [space] [>] [✓]   (ABC inserted, space shrunk)
+// Lower-case map. Layout:
+//   row 1: 10 letters                                    (backspace moved down)
+//   row 2: 9 letters + big backspace                     (delete enlarged to 2x letter)
+//   row 3: ',' + 7 letters + '.' + enter                 (',' took 1#'s slot)
+//   row 4: [<] + '-' + ABC + space + 1# + [>]            (1# now flanks space;
+//                                                         arrows pushed to the ends)
 // Mode-switch behaviour for "1#" and "ABC"/"abc" keys is by label match
 // in LVGL's default event handler, so position doesn't break anything.
 static const char *meck_kb_map_lc[] = {
-    "q","w","e","r","t","y","u","i","o","p",        LV_SYMBOL_BACKSPACE,  "\n",
-    "1#", "a","s","d","f","g","h","j","k","l",      LV_SYMBOL_NEW_LINE,   "\n",
-    "-","z","x","c","v","b","n","m",".",",",                              "\n",
-    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "ABC", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    "q","w","e","r","t","y","u","i","o","p",                                "\n",
+    "a","s","d","f","g","h","j","k","l",            LV_SYMBOL_BACKSPACE,    "\n",
+    ",","z","x","c","v","b","n","m",".",            LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "ABC", " ", "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
-// Width factors. Letters at 7 in rows 1-2; 1# and backspace at 8 (~15%
-// wider than letters per request). Row 3: punctuation '-', '.', ',' at
-// factor 5 (~67% wider than the old factor 3) so they're easier to hit;
-// totals to 64 units across 10 cells, same as the old 12-cell row, so
-// letters in row 3 keep the same 10.9% width fraction. Row 4: ABC at 5
-// sits between letters-equivalent and a phone-style mode-switch key;
-// space dropped from factor 12 to 8 so it's ~38% of the row instead of
-// ~60%.
+// Width factors. Row 1 letters at 7 (10 letters, total 70). Row 2 letters
+// at 7 + delete at 14 (~double a letter so it's easy to hit, total 77).
+// Row 3: ',' at 8 (took 1#'s slot, same width), letters at 7, '.' at 5,
+// enter at 7 (total 69). Row 4: arrows at 2 on the ends, '-' at 3, ABC at
+// 4, space at 10, 1# at 3 (took the old ',' slot — mode-switch so MKB_NR
+// like ABC). Total still 24.
 static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_lc[] = {
-    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(8),
-    MKB_NR(8), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(7),
-    MKB_NR(5), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB(5),
-    MKB_NR(2), MKB(2), MKB_NR(5), MKB(8), MKB(2), MKB_NR(2)
+    MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
+    MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(14),
+    MKB(8),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB_NR(7),
+    MKB(2),     MKB_NR(3), MKB_NR(4), MKB(10), MKB_NR(3), MKB(2)
 };
 
 // Upper-case map: same structure as lowercase with capital letters and
 // "abc" instead of "ABC" as the case-toggle button.
 static const char *meck_kb_map_uc[] = {
-    "Q","W","E","R","T","Y","U","I","O","P",        LV_SYMBOL_BACKSPACE,  "\n",
-    "1#", "A","S","D","F","G","H","J","K","L",      LV_SYMBOL_NEW_LINE,   "\n",
-    "-","Z","X","C","V","B","N","M",".",",",                              "\n",
-    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    "Q","W","E","R","T","Y","U","I","O","P",                                "\n",
+    "A","S","D","F","G","H","J","K","L",            LV_SYMBOL_BACKSPACE,    "\n",
+    ",","Z","X","C","V","B","N","M",".",            LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "abc", " ", "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
@@ -1372,50 +1402,51 @@ static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_special[] = {
 // ----------------------------------------------------------------------------
 
 static const char *meck_kb_map_lc_azerty[] = {
-    "a","z","e","r","t","y","u","i","o","p",        LV_SYMBOL_BACKSPACE,  "\n",
-    "1#", "q","s","d","f","g","h","j","k","l","m",  LV_SYMBOL_NEW_LINE,   "\n",
-    "-","w","x","c","v","b","n",".",",",                                  "\n",
-    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "ABC", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    "a","z","e","r","t","y","u","i","o","p",                                "\n",
+    "q","s","d","f","g","h","j","k","l","m",        LV_SYMBOL_BACKSPACE,    "\n",
+    ",","w","x","c","v","b","n",".",                LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "ABC", " ", "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
 static const char *meck_kb_map_uc_azerty[] = {
-    "A","Z","E","R","T","Y","U","I","O","P",        LV_SYMBOL_BACKSPACE,  "\n",
-    "1#", "Q","S","D","F","G","H","J","K","L","M",  LV_SYMBOL_NEW_LINE,   "\n",
-    "-","W","X","C","V","B","N",".",",",                                  "\n",
-    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    "A","Z","E","R","T","Y","U","I","O","P",                                "\n",
+    "Q","S","D","F","G","H","J","K","L","M",        LV_SYMBOL_BACKSPACE,    "\n",
+    ",","W","X","C","V","B","N",".",                LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "abc", " ", "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
-// AZERTY width factors:
-//   row 1: same as QWERTY (10 letters at 7 + backspace at 8 = 78)
-//   row 2: 12 cells. 1#(8) + 10 letters at 7 + ENT(7) = 85.
-//   row 3: 9 cells. -(5) + 6 letters at 7 + .(5) + ,(5) = 57. Letters in
-//          row 3 end up wider than rows 1-2 since there are fewer of them;
-//          fine for AZERTY since row 3 letters (W X C V B N) get less use.
-//   row 4: same as QWERTY.
+// AZERTY width factors (matching the QWERTY layout):
+//   row 1: 10 letters at 7 (total 70)
+//   row 2: 10 letters at 7 + big backspace at 14 (total 84). AZERTY's 'm'
+//          stays on row 2 (one more letter than QWERTY/QWERTZ row 2).
+//   row 3: ',' at 8 (took 1#'s slot) + 6 letters at 7 + '.' at 5 + enter
+//          at 7 (total 62). One less letter than QWERTY/QWERTZ row 3
+//          since 'm' is on row 2.
+//   row 4: same as QWERTY — arrows on the ends, 1# next to space.
 static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_azerty[] = {
-    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(8),
-    MKB_NR(8), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(7),
-    MKB_NR(5), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB(5),
-    MKB_NR(2), MKB(2), MKB_NR(5), MKB(8), MKB(2), MKB_NR(2)
+    MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
+    MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(14),
+    MKB(8),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB_NR(7),
+    MKB(2),     MKB_NR(3), MKB_NR(4), MKB(10), MKB_NR(3), MKB(2)
 };
 
 // QWERTZ: identical shape to QWERTY, only Y↔Z positions swap. Reuses
 // meck_kb_ctrl_lc as the ctrl_map.
 static const char *meck_kb_map_lc_qwertz[] = {
-    "q","w","e","r","t","z","u","i","o","p",        LV_SYMBOL_BACKSPACE,  "\n",
-    "1#", "a","s","d","f","g","h","j","k","l",      LV_SYMBOL_NEW_LINE,   "\n",
-    "-","y","x","c","v","b","n","m",".",",",                              "\n",
-    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "ABC", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    "q","w","e","r","t","z","u","i","o","p",                                "\n",
+    "a","s","d","f","g","h","j","k","l",            LV_SYMBOL_BACKSPACE,    "\n",
+    ",","y","x","c","v","b","n","m",".",            LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "ABC", " ", "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
 static const char *meck_kb_map_uc_qwertz[] = {
-    "Q","W","E","R","T","Z","U","I","O","P",        LV_SYMBOL_BACKSPACE,  "\n",
-    "1#", "A","S","D","F","G","H","J","K","L",      LV_SYMBOL_NEW_LINE,   "\n",
-    "-","Y","X","C","V","B","N","M",".",",",                              "\n",
-    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    "Q","W","E","R","T","Z","U","I","O","P",                                "\n",
+    "A","S","D","F","G","H","J","K","L",            LV_SYMBOL_BACKSPACE,    "\n",
+    ",","Y","X","C","V","B","N","M",".",            LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "abc", " ", "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
@@ -3541,6 +3572,14 @@ static void home_attach_clock_battery(lv_obj_t *page, int tile_idx) {
     lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(clk, LV_ALIGN_TOP_RIGHT, -165, NOTCH_SAFE_Y);
     lbl_home_clock[tile_idx] = clk;
+
+    lv_obj_t *aud = lv_label_create(page);
+    lv_label_set_text(aud, "");
+    lv_obj_set_style_text_color(aud, lv_palette_main(LV_PALETTE_BLUE), 0);
+    meck_set_font(aud, &meck_montserrat_24, 0);
+    lv_obj_set_style_text_align(aud, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(aud, LV_ALIGN_TOP_RIGHT, -85, NOTCH_SAFE_Y);
+    lbl_home_audio[tile_idx] = aud;
 }
 
 // Attach a clock + battery pair to any non-home screen or modal panel.
@@ -3568,6 +3607,14 @@ static void screen_attach_clock_battery(lv_obj_t *parent, int slot,
     lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(clk, LV_ALIGN_TOP_RIGHT, -165, y_offset);
     lbl_screen_clock[slot] = clk;
+
+    lv_obj_t *aud = lv_label_create(parent);
+    lv_label_set_text(aud, "");
+    lv_obj_set_style_text_color(aud, lv_palette_main(LV_PALETTE_BLUE), 0);
+    meck_set_font(aud, font, 0);
+    lv_obj_set_style_text_align(aud, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(aud, LV_ALIGN_TOP_RIGHT, -85, y_offset);
+    lbl_screen_audio[slot] = aud;
 }
 // ============================================================================
 
@@ -6426,6 +6473,23 @@ static void create_contact_detail_screen() {
     lv_obj_add_event_cb(btn_contact_admin, on_contact_admin_tap, LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(btn_contact_admin, LV_OBJ_FLAG_HIDDEN);
 
+    // Edit Path — opens scr_path_editor for the currently-selected contact.
+    // Sits left of the DM/Admin slot so it doesn't overlap either. Useful
+    // for repeaters and room servers 3+ hops away where flood discovery
+    // is unreliable; user can pin a known-good route manually.
+    lv_obj_t *btn_edit_path = lv_button_create(scr_contact_detail);
+    lv_obj_set_size(btn_edit_path, 100, 70);
+    lv_obj_align(btn_edit_path, LV_ALIGN_TOP_RIGHT, -120, 90);
+    lv_obj_set_style_bg_color(btn_edit_path,
+        lv_palette_darken(LV_PALETTE_TEAL, 1), 0);
+    lv_obj_set_style_radius(btn_edit_path, 8, 0);
+    lv_obj_t *ep_lbl = lv_label_create(btn_edit_path);
+    lv_label_set_text(ep_lbl, LV_SYMBOL_SHUFFLE " Path");
+    lv_obj_set_style_text_color(ep_lbl, lv_color_white(), 0);
+    meck_set_font(ep_lbl, &meck_montserrat_16, 0);
+    lv_obj_center(ep_lbl);
+    lv_obj_add_event_cb(btn_edit_path, goto_path_editor, LV_EVENT_CLICKED, NULL);
+
     lv_obj_t *scroll = lv_obj_create(scr_contact_detail);
     lv_obj_set_size(scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 180);
     lv_obj_set_pos(scroll, 10, 170);
@@ -6440,6 +6504,822 @@ static void create_contact_detail_screen() {
     meck_set_font(lbl_contact_detail_body, &meck_montserrat_16, 0);
     lv_label_set_long_mode(lbl_contact_detail_body, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_contact_detail_body, SCREEN_WIDTH - 50);
+}
+
+// ============================================================================
+// Trace Path screen + Path Editor screen
+// ----------------------------------------------------------------------------
+// Both screens share a manual hex hop entry pattern: dropdown for hash
+// size (1 or 2 bytes per hop), textarea for comma-separated hex hops, and
+// an action button. Differences:
+//
+//   Trace Path:    Run Trace → createTrace + sendDirect(TRACE flavoured),
+//                  result list rendered from Meck::consumeTraceResult()
+//                  on each ui_update_timer_cb tick.
+//   Path Editor:   Save → Meck::setContactCustomPath(idx, bytes, encoded)
+//                  Reset to Auto → Meck::clearContactCustomPath(idx)
+//
+// Manual entry only — no repeater picker. Per user spec: with 600+
+// repeaters in a regional mesh, scrolling a picker is more friction
+// than typing four hex digits per hop.
+// ============================================================================
+
+// Parse comma-separated hex hops into out_buf. Returns hops on success,
+// -1 on parse error. For 2-byte mode, big-endian byte order so the on-
+// screen "3601" maps to bytes 0x36, 0x01 (same convention as upstream
+// Tracescreen.h::parseTypedPath). Skips whitespace and stray spaces.
+static int parse_hex_hop_path(const char *src, int bytes_per_hop,
+                              uint8_t *out_buf, int max_hops) {
+    if (!src || !out_buf || bytes_per_hop < 1 || bytes_per_hop > 2) return -1;
+    int hops = 0;
+    const char *p = src;
+    while (*p && hops < max_hops) {
+        while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n') p++;
+        if (*p == '\0') break;
+
+        char *end;
+        long val = strtol(p, &end, 16);
+        if (end == p) return -1;
+        p = end;
+
+        if (bytes_per_hop == 1) {
+            if (val < 0 || val > 0xFF) return -1;
+            out_buf[hops] = (uint8_t)val;
+        } else {
+            if (val < 0 || val > 0xFFFF) return -1;
+            out_buf[hops * 2]     = (uint8_t)((val >> 8) & 0xFF);
+            out_buf[hops * 2 + 1] = (uint8_t)(val & 0xFF);
+        }
+        hops++;
+    }
+    while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n') p++;
+    if (*p != '\0') return -1;  // trailing junk after last token
+    return hops;
+}
+
+// Look up a contact name by hash prefix. bytes_per_hop is 1 or 2 (matches
+// the trace's encoded path_sz). Returns true if a contact matched, false
+// otherwise. Repeaters preferred (ADV_TYPE_REPEATER == 2); falls back to
+// any contact.
+static bool trace_find_name_for_hash(const uint8_t *hash, int bytes_per_hop,
+                                     char *out_name, size_t out_name_len) {
+    Meck *mesh = meck_get_instance();
+    if (!mesh) return false;
+    uint32_t n = (uint32_t)mesh->getNumContacts();
+    ContactInfo c;
+    // Pass 1: repeaters only
+    for (uint32_t i = 0; i < n; i++) {
+        if (!mesh->getContactByIdx(i, c)) continue;
+        if (c.type != 2 /* ADV_TYPE_REPEATER */) continue;
+        if (memcmp(c.id.pub_key, hash, bytes_per_hop) == 0) {
+            strncpy(out_name, c.name, out_name_len);
+            out_name[out_name_len - 1] = '\0';
+            return true;
+        }
+    }
+    // Pass 2: any contact
+    for (uint32_t i = 0; i < n; i++) {
+        if (!mesh->getContactByIdx(i, c)) continue;
+        if (memcmp(c.id.pub_key, hash, bytes_per_hop) == 0) {
+            strncpy(out_name, c.name, out_name_len);
+            out_name[out_name_len - 1] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
+// ----- Trace screen ---------------------------------------------------------
+
+// Re-show the keyboard when the user taps the textarea after a previous
+// Run Trace has hidden it. Pure show-only — defocus handler is intentionally
+// not wired (keyboard stays put until the next Run Trace), which matches
+// the user's "Option B" spec.
+static void on_trace_textarea_focused(lv_event_t *e) {
+    (void)e;
+    if (kb_trace) lv_obj_remove_flag(kb_trace, LV_OBJ_FLAG_HIDDEN);
+    // Shrink the results container back to its keyboard-visible height so
+    // its bottom edge sits above the keyboard, not behind it.
+    if (cont_trace_results) {
+        lv_obj_set_height(cont_trace_results,
+            SCREEN_HEIGHT - (NOTCH_SAFE_Y + 540) - MECK_KB_HEIGHT - 10);
+    }
+}
+
+static void on_trace_back_clicked(lv_event_t *e) {
+    (void)e;
+    Meck *mesh = meck_get_instance();
+    if (mesh) mesh->traceClearPending();
+    g_trace_in_flight = false;
+    if (scr_home) lv_screen_load(scr_home);
+}
+
+// Wipe any previously-rendered result rows.
+static void trace_clear_results() {
+    if (!cont_trace_results) return;
+    lv_obj_clean(cont_trace_results);
+}
+
+// Build one result row (avatar circle + name + subtitle + SNR). Matches
+// the screenshot style: greyish badge with the hop's hash hex on the left,
+// repeater name in bold above a smaller subtitle line, SNR text + a 3-bar
+// signal icon on the right. Used for the originator row, each hop, and
+// the final "Received trace response" row.
+static void trace_add_result_row(const char *badge_text,
+                                 const char *name,
+                                 const char *subtitle,
+                                 const char *snr_text,   // NULL to hide
+                                 int snr_x4,             // for bar colouring
+                                 bool snr_known) {
+    if (!cont_trace_results) return;
+
+    lv_obj_t *row = lv_obj_create(cont_trace_results);
+    lv_obj_set_width(row, SCREEN_WIDTH - 60);
+    lv_obj_set_height(row, 90);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Badge — 50 px circle on the left
+    lv_obj_t *badge = lv_obj_create(row);
+    lv_obj_set_size(badge, 50, 50);
+    lv_obj_align(badge, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_radius(badge, 25, 0);
+    lv_obj_set_style_bg_color(badge, lv_color_make(80, 90, 100), 0);
+    lv_obj_set_style_border_width(badge, 0, 0);
+    lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *blbl = lv_label_create(badge);
+    lv_label_set_text(blbl, badge_text);
+    lv_obj_set_style_text_color(blbl, lv_color_white(), 0);
+    meck_set_font(blbl, &meck_montserrat_16, 0);
+    lv_obj_center(blbl);
+
+    // Name (top line)
+    lv_obj_t *nl = lv_label_create(row);
+    lv_label_set_text(nl, name);
+    lv_obj_set_style_text_color(nl, lv_color_white(), 0);
+    meck_set_font(nl, &meck_montserrat_18, 0);
+    lv_obj_align(nl, LV_ALIGN_TOP_LEFT, 65, 0);
+    lv_obj_set_width(nl, SCREEN_WIDTH - 60 - 65 - 80);
+    lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
+
+    // Subtitle (e.g. "Hop 2 · Repeated the packet")
+    lv_obj_t *sl = lv_label_create(row);
+    lv_label_set_text(sl, subtitle);
+    lv_obj_set_style_text_color(sl, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(sl, &meck_montserrat_14, 0);
+    lv_obj_align(sl, LV_ALIGN_TOP_LEFT, 65, 30);
+    lv_obj_set_width(sl, SCREEN_WIDTH - 60 - 65 - 80);
+    lv_label_set_long_mode(sl, LV_LABEL_LONG_DOT);
+
+    // SNR text on the bottom-left of the body area
+    if (snr_text) {
+        lv_obj_t *snl = lv_label_create(row);
+        lv_label_set_text(snl, snr_text);
+        lv_obj_set_style_text_color(snl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(snl, &meck_montserrat_14, 0);
+        lv_obj_align(snl, LV_ALIGN_TOP_LEFT, 65, 55);
+    }
+
+    // Signal bars on the far right. Three short rects, coloured by SNR
+    // bands (matches upstream drawSignalBars in Tracescreen.h: high ≥8 dB,
+    // mid ≥3 dB, low ≥-5 dB). Unknown SNR shows all bars grey.
+    if (snr_known) {
+        float snr = snr_x4 / 4.0f;
+        int bars = 0;
+        if (snr >= -5.0f) bars = 1;
+        if (snr >= 3.0f)  bars = 2;
+        if (snr >= 8.0f)  bars = 3;
+        lv_color_t col_on  = (bars >= 2) ? lv_palette_main(LV_PALETTE_GREEN)
+                                          : lv_palette_main(LV_PALETTE_RED);
+        lv_color_t col_off = lv_color_make(60, 60, 60);
+        for (int i = 0; i < 3; i++) {
+            lv_obj_t *bar = lv_obj_create(row);
+            int h = 10 + i * 8;
+            lv_obj_set_size(bar, 8, h);
+            lv_obj_align(bar, LV_ALIGN_RIGHT_MID, -((2 - i) * 12) - 4,
+                         (30 - h) / 2);
+            lv_obj_set_style_radius(bar, 2, 0);
+            lv_obj_set_style_border_width(bar, 0, 0);
+            lv_obj_set_style_bg_color(bar, (i < bars) ? col_on : col_off, 0);
+            lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+        }
+    }
+}
+
+// Render a result snapshot into the scroll container. Called from the
+// ui_update_timer_cb hook the moment Meck::consumeTraceResult returns true.
+static void trace_render_result(const Meck::MeckTraceResult &r) {
+    trace_clear_results();
+
+    Meck *mesh = meck_get_instance();
+    P4NodePrefs *prefs = mesh ? mesh->getNodePrefs() : NULL;
+    const char *self_name = (prefs && prefs->node_name[0])
+                             ? prefs->node_name : "me";
+
+    // First row: this device (originator). Subtitle = "Started the trace".
+    // SNR shown here is the final_snr — the SNR we heard the response at,
+    // i.e. the inbound leg of the last hop.
+    char snr_buf[32];
+    float final_snr_db = r.final_snr / 4.0f;
+    snprintf(snr_buf, sizeof(snr_buf), LV_SYMBOL_DOWN " SNR: %.2fdB",
+             final_snr_db);
+    trace_add_result_row("•", self_name, "Started the trace",
+                          snr_buf, r.final_snr, true);
+
+    // Per-hop rows
+    for (int h = 0; h < r.hop_count; h++) {
+        const uint8_t *hash = &r.path_hashes[h * r.bytes_per_hop];
+        char badge[8];
+        if (r.bytes_per_hop == 1) {
+            snprintf(badge, sizeof(badge), "%02X", hash[0]);
+        } else {
+            snprintf(badge, sizeof(badge), "%02X", hash[0]);  // 1st byte
+        }
+        char name_buf[40];
+        if (!trace_find_name_for_hash(hash, r.bytes_per_hop,
+                                       name_buf, sizeof(name_buf))) {
+            if (r.bytes_per_hop == 1) {
+                snprintf(name_buf, sizeof(name_buf), "0x%02X", hash[0]);
+            } else {
+                snprintf(name_buf, sizeof(name_buf), "0x%02X%02X",
+                         hash[0], hash[1]);
+            }
+        }
+        char subtitle[40];
+        snprintf(subtitle, sizeof(subtitle),
+                 "Hop %d " LV_SYMBOL_BULLET " Repeated the packet", h + 1);
+        char snrl[32];
+        float hop_snr = r.path_snrs[h] / 4.0f;
+        snprintf(snrl, sizeof(snrl), LV_SYMBOL_DOWN " SNR: %.2fdB", hop_snr);
+        trace_add_result_row(badge, name_buf, subtitle, snrl,
+                              r.path_snrs[h], true);
+    }
+
+    // Final row: response received locally
+    char durs[40];
+    snprintf(durs, sizeof(durs), "Duration: %ums",
+             (unsigned)r.duration_ms);
+    trace_add_result_row(LV_SYMBOL_OK, self_name, "Received trace response",
+                          durs, r.final_snr, false);
+
+    if (lbl_trace_status) {
+        char st[64];
+        snprintf(st, sizeof(st), "Result: %u hops, %ums",
+                 (unsigned)r.hop_count, (unsigned)r.duration_ms);
+        lv_label_set_text(lbl_trace_status, st);
+    }
+    g_trace_in_flight = false;
+}
+
+static void on_trace_path_clear_clicked(lv_event_t *e) {
+    (void)e;
+    if (ta_trace_path) lv_textarea_set_text(ta_trace_path, "");
+}
+
+static void on_trace_run_clicked(lv_event_t *e) {
+    (void)e;
+    Meck *mesh = meck_get_instance();
+    if (!mesh) return;
+    if (!ta_trace_path || !dd_trace_path_size) return;
+
+    int sel = lv_dropdown_get_selected(dd_trace_path_size);
+    int bytes_per_hop = (sel == 1) ? 2 : 1;
+
+    const char *txt = lv_textarea_get_text(ta_trace_path);
+    uint8_t path_buf[Meck::MECK_TRACE_MAX_HOPS * 2];
+    int hops = parse_hex_hop_path(txt, bytes_per_hop, path_buf,
+                                   Meck::MECK_TRACE_MAX_HOPS);
+    if (hops < 0) {
+        if (lbl_trace_status) {
+            lv_label_set_text(lbl_trace_status,
+                "Parse error: enter comma-separated hex hops");
+        }
+        return;
+    }
+    if (hops == 0) {
+        if (lbl_trace_status) {
+            lv_label_set_text(lbl_trace_status, "Enter at least one hop");
+        }
+        return;
+    }
+
+    // Generate tag + auth from the RNG, then build and send.
+    uint32_t tag = 0, auth = 0;
+    mesh::RNG *rng = mesh->getRNG();
+    if (rng) {
+        rng->random((uint8_t*)&tag,  4);
+        rng->random((uint8_t*)&auth, 4);
+    }
+    uint8_t flags = (bytes_per_hop == 2) ? 1 : 0;   // path_sz in low 2 bits
+
+    mesh::Packet *pkt = mesh->createTrace(tag, auth, flags);
+    if (!pkt) {
+        if (lbl_trace_status) {
+            lv_label_set_text(lbl_trace_status,
+                "Send failed: packet pool empty");
+        }
+        return;
+    }
+
+    uint8_t path_byte_len = (uint8_t)(hops * bytes_per_hop);
+    g_trace_sent_ms = (unsigned long)millis();
+    mesh->traceMarkSent(tag, auth, g_trace_sent_ms);
+    mesh->sendDirect(pkt, path_buf, path_byte_len);
+
+    g_trace_in_flight = true;
+    trace_clear_results();
+    if (lbl_trace_status) {
+        char st[80];
+        snprintf(st, sizeof(st),
+            "Running trace: %d hop%s, %d-byte mode (tag 0x%08X)…",
+            hops, hops == 1 ? "" : "s", bytes_per_hop, (unsigned)tag);
+        lv_label_set_text(lbl_trace_status, st);
+    }
+    // Hide the keyboard so the result list / status are visible. The
+    // FOCUSED handler on ta_trace_path brings it back if the user taps
+    // into the textarea again.
+    if (kb_trace) lv_obj_add_flag(kb_trace, LV_OBJ_FLAG_HIDDEN);
+    // Grow the results container to occupy the space the keyboard just
+    // freed, otherwise rows render into a tiny scrollable window with
+    // most of the screen below sitting empty.
+    if (cont_trace_results) {
+        lv_obj_set_height(cont_trace_results,
+            SCREEN_HEIGHT - (NOTCH_SAFE_Y + 540) - 10);
+    }
+    printf("MeckUI: Trace sent tag=0x%08X hops=%d bpp=%d byte_len=%u\n",
+           (unsigned)tag, hops, bytes_per_hop, (unsigned)path_byte_len);
+}
+
+static void create_trace_screen() {
+    scr_trace = lv_obj_create(NULL);
+    lock_screen_scroll(scr_trace);
+    lv_obj_set_style_bg_color(scr_trace, lv_color_black(), 0);
+
+    // Back button — top-left
+    lv_obj_t *btn_back = lv_button_create(scr_trace);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, NOTCH_SAFE_Y);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_trace_back_clicked, LV_EVENT_CLICKED, NULL);
+
+    // Title
+    lv_obj_t *title = lv_label_create(scr_trace);
+    lv_label_set_text(title, "Trace Path");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, NOTCH_SAFE_Y + 20);
+
+    // Header clock/battery/audio indicator (slot 10)
+    screen_attach_clock_battery(scr_trace, 10, &meck_montserrat_24,
+                                 NOTCH_SAFE_Y + 20);
+
+    // Info banner — wording per spec (no picker, hex entry only)
+    lv_obj_t *banner = lv_obj_create(scr_trace);
+    lv_obj_set_size(banner, SCREEN_WIDTH - 20, 80);
+    lv_obj_align(banner, LV_ALIGN_TOP_MID, 0, NOTCH_SAFE_Y + 100);
+    lv_obj_set_style_bg_color(banner, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_style_radius(banner, 8, 0);
+    lv_obj_set_style_border_width(banner, 0, 0);
+    lv_obj_clear_flag(banner, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *bantxt = lv_label_create(banner);
+    lv_label_set_text(bantxt,
+        "Enter repeater hash prefixes separated by commas, then tap "
+        "Run Trace. You must be able to hear the last repeater directly.");
+    lv_obj_set_style_text_color(bantxt, lv_color_white(), 0);
+    meck_set_font(bantxt, &meck_montserrat_14, 0);
+    lv_label_set_long_mode(bantxt, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(bantxt, SCREEN_WIDTH - 60);
+    lv_obj_center(bantxt);
+
+    // Path Size dropdown
+    lv_obj_t *psl = lv_label_create(scr_trace);
+    lv_label_set_text(psl, "Path Size");
+    lv_obj_set_style_text_color(psl,
+        lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(psl, &meck_montserrat_14, 0);
+    lv_obj_align(psl, LV_ALIGN_TOP_LEFT, 20, NOTCH_SAFE_Y + 200);
+
+    dd_trace_path_size = lv_dropdown_create(scr_trace);
+    lv_dropdown_set_options(dd_trace_path_size,
+        "1-byte (max 63 hops)\n2-byte (max 32 hops)");
+    lv_dropdown_set_selected(dd_trace_path_size, 1);  // default 2-byte
+    // The default LVGL dropdown indicator is LV_SYMBOL_DOWN (FontAwesome
+    // chevron-down), which the meck_montserrat_* fonts don't include, so it
+    // renders as a tofu box. Override with a plain ASCII "v".
+    lv_dropdown_set_symbol(dd_trace_path_size, "v");
+    lv_obj_set_size(dd_trace_path_size, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(dd_trace_path_size, LV_ALIGN_TOP_LEFT, 20,
+                 NOTCH_SAFE_Y + 225);
+    lv_obj_set_style_bg_color(dd_trace_path_size,
+        lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(dd_trace_path_size, lv_color_white(), 0);
+    meck_set_font(dd_trace_path_size, &meck_montserrat_18, 0);
+
+    // Path textarea
+    lv_obj_t *ptl = lv_label_create(scr_trace);
+    lv_label_set_text(ptl, "Path (hex hops, comma-separated)");
+    lv_obj_set_style_text_color(ptl,
+        lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(ptl, &meck_montserrat_14, 0);
+    lv_obj_align(ptl, LV_ALIGN_TOP_LEFT, 20, NOTCH_SAFE_Y + 290);
+
+    ta_trace_path = lv_textarea_create(scr_trace);
+    lv_obj_set_size(ta_trace_path, SCREEN_WIDTH - 110, 50);
+    lv_obj_align(ta_trace_path, LV_ALIGN_TOP_LEFT, 20, NOTCH_SAFE_Y + 315);
+    lv_textarea_set_one_line(ta_trace_path, true);
+    lv_textarea_set_max_length(ta_trace_path, 200);
+    lv_textarea_set_placeholder_text(ta_trace_path, "e.g. 3601,2198,3601");
+    lv_obj_set_style_bg_color(ta_trace_path,
+        lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_trace_path, lv_color_white(), 0);
+    meck_set_font(ta_trace_path, &meck_montserrat_18, 0);
+    // Cursor styling — same as ta_compose: white 2px left border, full
+    // opacity. Without this the cursor inherits the textarea text colour
+    // and is effectively invisible against the dark background.
+    lv_obj_set_style_border_color(ta_trace_path, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_trace_path, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_trace_path,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_trace_path,   LV_OPA_COVER,          LV_PART_CURSOR);
+    // Bring the keyboard back when the textarea is tapped — paired with
+    // the hide call in on_trace_run_clicked. Without this the keyboard
+    // stays gone after a Run Trace and the user can't edit the path
+    // without leaving and re-entering the screen.
+    lv_obj_add_event_cb(ta_trace_path, on_trace_textarea_focused,
+                        LV_EVENT_FOCUSED, NULL);
+
+    // X button to clear the path field
+    lv_obj_t *btn_clear = lv_button_create(scr_trace);
+    lv_obj_set_size(btn_clear, 70, 50);
+    lv_obj_align(btn_clear, LV_ALIGN_TOP_RIGHT, -20, NOTCH_SAFE_Y + 315);
+    lv_obj_set_style_bg_color(btn_clear,
+        lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_clear, 8, 0);
+    lv_obj_t *cl = lv_label_create(btn_clear);
+    lv_label_set_text(cl, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_color(cl, lv_color_white(), 0);
+    meck_set_font(cl, &meck_montserrat_18, 0);
+    lv_obj_center(cl);
+    lv_obj_add_event_cb(btn_clear, on_trace_path_clear_clicked,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Run Trace button
+    btn_trace_run = lv_button_create(scr_trace);
+    lv_obj_set_size(btn_trace_run, SCREEN_WIDTH - 40, 70);
+    lv_obj_align(btn_trace_run, LV_ALIGN_TOP_MID, 0, NOTCH_SAFE_Y + 415);
+    lv_obj_set_style_bg_color(btn_trace_run,
+        lv_palette_darken(LV_PALETTE_INDIGO, 2), 0);
+    lv_obj_set_style_radius(btn_trace_run, 35, 0);
+    lv_obj_t *rl = lv_label_create(btn_trace_run);
+    lv_label_set_text(rl, "Run Trace");
+    lv_obj_set_style_text_color(rl, lv_color_white(), 0);
+    meck_set_font(rl, &meck_montserrat_22, 0);
+    lv_obj_center(rl);
+    lv_obj_add_event_cb(btn_trace_run, on_trace_run_clicked,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Status label
+    lbl_trace_status = lv_label_create(scr_trace);
+    lv_label_set_text(lbl_trace_status, "");
+    lv_obj_set_style_text_color(lbl_trace_status,
+        lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(lbl_trace_status, &meck_montserrat_14, 0);
+    lv_obj_align(lbl_trace_status, LV_ALIGN_TOP_MID, 0, NOTCH_SAFE_Y + 500);
+
+    // Results scroll container — fills the remainder of the screen above
+    // the keyboard area. The keyboard is created hidden and slides up on
+    // textarea focus per the standard meck_style_keyboard pattern; when
+    // visible it covers the bottom MECK_KB_HEIGHT pixels.
+    cont_trace_results = lv_obj_create(scr_trace);
+    lv_obj_set_size(cont_trace_results, SCREEN_WIDTH - 40,
+                    SCREEN_HEIGHT - (NOTCH_SAFE_Y + 540) - MECK_KB_HEIGHT - 10);
+    lv_obj_align(cont_trace_results, LV_ALIGN_TOP_MID, 0,
+                 NOTCH_SAFE_Y + 530);
+    lv_obj_set_style_bg_opa(cont_trace_results, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont_trace_results, 0, 0);
+    lv_obj_set_flex_flow(cont_trace_results, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(cont_trace_results, 8, 0);
+
+    // Keyboard — attached to the path textarea. Stored in kb_trace so
+    // the FOCUSED handler (on_trace_textarea_focused) can re-show it
+    // after on_trace_run_clicked hides it on send.
+    lv_obj_t *kb = lv_keyboard_create(scr_trace);
+    meck_style_keyboard(kb);
+    lv_keyboard_set_textarea(kb, ta_trace_path);
+    lv_obj_add_event_cb(kb, on_kb_long_press, LV_EVENT_LONG_PRESSED, NULL);
+    kb_trace = kb;
+}
+
+static void goto_trace(lv_event_t *e) {
+    (void)e;
+    if (!scr_trace) return;
+    // Fresh entry — clear any leftover state.
+    if (ta_trace_path) lv_textarea_set_text(ta_trace_path, "");
+    if (lbl_trace_status) lv_label_set_text(lbl_trace_status, "");
+    trace_clear_results();
+    g_trace_in_flight = false;
+    Meck *mesh = meck_get_instance();
+    if (mesh) mesh->traceClearPending();
+    lv_screen_load(scr_trace);
+}
+
+// ----- Path editor screen ---------------------------------------------------
+
+// Mirror of on_trace_textarea_focused — brings the keyboard back when
+// the user taps the textarea after Save / Reset hid it.
+static void on_path_editor_textarea_focused(lv_event_t *e) {
+    (void)e;
+    if (kb_path_editor) lv_obj_remove_flag(kb_path_editor, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_path_editor_back_clicked(lv_event_t *e) {
+    (void)e;
+    if (scr_contact_detail) lv_screen_load(scr_contact_detail);
+}
+
+static void on_path_editor_save_clicked(lv_event_t *e) {
+    (void)e;
+    if (g_selected_contact_idx < 0) return;
+    Meck *mesh = meck_get_instance();
+    if (!mesh || !ta_path_editor_path || !dd_path_editor_size) return;
+
+    int sel = lv_dropdown_get_selected(dd_path_editor_size);
+    int bytes_per_hop = (sel == 1) ? 2 : 1;
+
+    const char *txt = lv_textarea_get_text(ta_path_editor_path);
+    uint8_t path_buf[MAX_PATH_SIZE];
+    int hops = parse_hex_hop_path(txt, bytes_per_hop, path_buf,
+                                   MAX_PATH_SIZE / bytes_per_hop);
+    if (hops < 0) {
+        if (lbl_path_editor_status) {
+            lv_label_set_text(lbl_path_editor_status,
+                "Parse error: enter comma-separated hex hops");
+        }
+        return;
+    }
+    if (hops == 0) {
+        // Empty textarea + Save -> save as a 0-hop direct path (encoded
+        // out_path_len = mode<<6 | 0). The MeshCore base layer sees a
+        // non-UNKNOWN out_path_len and routes via sendDirect with a
+        // 0-byte path, which is the same wire format as sendZeroHop.
+        // To revert to flood routing, the user taps "Reset to Flood".
+        uint8_t mode = (uint8_t)(bytes_per_hop - 1);
+        uint8_t encoded = (uint8_t)(mode << 6);  // hops = 0 in low 6 bits
+        if (!mesh->setContactCustomPath(g_selected_contact_idx,
+                                         path_buf, encoded)) {
+            if (lbl_path_editor_status) {
+                lv_label_set_text(lbl_path_editor_status,
+                    "Save failed: contact not found");
+            }
+            return;
+        }
+        if (lbl_path_editor_status) {
+            char st[80];
+            snprintf(st, sizeof(st),
+                "Saved: 0-hop direct (%d-byte mode)", bytes_per_hop);
+            lv_label_set_text(lbl_path_editor_status, st);
+        }
+        if (kb_path_editor) lv_obj_add_flag(kb_path_editor, LV_OBJ_FLAG_HIDDEN);
+        printf("MeckUI: PathEditor saved contact=%d 0-hop direct bpp=%d encoded=0x%02X\n",
+               g_selected_contact_idx, bytes_per_hop, (unsigned)encoded);
+        return;
+    }
+    // Encode: bits[7:6]=mode (bytes_per_hop-1), bits[5:0]=hops
+    uint8_t mode = (uint8_t)(bytes_per_hop - 1);
+    uint8_t encoded = (uint8_t)((mode << 6) | (hops & 0x3F));
+    if (!mesh->setContactCustomPath(g_selected_contact_idx,
+                                     path_buf, encoded)) {
+        if (lbl_path_editor_status) {
+            lv_label_set_text(lbl_path_editor_status,
+                "Save failed: contact not found");
+        }
+        return;
+    }
+    if (lbl_path_editor_status) {
+        char st[80];
+        snprintf(st, sizeof(st),
+            "Saved: %d-hop %d-byte path", hops, bytes_per_hop);
+        lv_label_set_text(lbl_path_editor_status, st);
+    }
+    if (kb_path_editor) lv_obj_add_flag(kb_path_editor, LV_OBJ_FLAG_HIDDEN);
+    printf("MeckUI: PathEditor saved contact=%d hops=%d bpp=%d encoded=0x%02X\n",
+           g_selected_contact_idx, hops, bytes_per_hop, (unsigned)encoded);
+}
+
+static void on_path_editor_reset_clicked(lv_event_t *e) {
+    (void)e;
+    if (g_selected_contact_idx < 0) return;
+    Meck *mesh = meck_get_instance();
+    if (!mesh) return;
+    if (ta_path_editor_path) lv_textarea_set_text(ta_path_editor_path, "");
+    if (mesh->clearContactCustomPath(g_selected_contact_idx)) {
+        if (lbl_path_editor_status) {
+            lv_label_set_text(lbl_path_editor_status,
+                "Cleared — path will be auto-discovered");
+        }
+        if (kb_path_editor) lv_obj_add_flag(kb_path_editor, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Fill the editor's UI from the current contact's stored path. Called by
+// goto_path_editor each time the screen is opened so a re-entry reflects
+// the latest persisted state (including any path changes from incoming
+// advertisements while we were away).
+static void path_editor_load_for_contact(int idx) {
+    Meck *mesh = meck_get_instance();
+    if (!mesh || idx < 0) return;
+    ContactInfo c;
+    if (!mesh->getContactByIdx((uint32_t)idx, c)) return;
+
+    if (lbl_path_editor_contact) {
+        lv_label_set_text_fmt(lbl_path_editor_contact, "%s", c.name);
+    }
+    if (lbl_path_editor_status) lv_label_set_text(lbl_path_editor_status, "");
+
+    if (c.out_path_len == OUT_PATH_UNKNOWN) {
+        if (dd_path_editor_size) lv_dropdown_set_selected(dd_path_editor_size, 0);
+        if (ta_path_editor_path) lv_textarea_set_text(ta_path_editor_path, "");
+        return;
+    }
+    uint8_t hops      = c.out_path_len & 0x3F;
+    uint8_t hash_size = (c.out_path_len >> 6) + 1;
+    if (hash_size > 2) hash_size = 2;  // Editor caps at 2-byte (no 3-byte UI yet)
+
+    if (dd_path_editor_size) {
+        lv_dropdown_set_selected(dd_path_editor_size,
+                                  (hash_size == 2) ? 1 : 0);
+    }
+    // Build comma-separated hex text from the stored path
+    char buf[200] = {0};
+    int pos = 0;
+    for (int h = 0; h < hops; h++) {
+        if (h > 0 && pos < (int)sizeof(buf) - 1) buf[pos++] = ',';
+        if (hash_size == 1) {
+            int n = snprintf(&buf[pos], sizeof(buf) - pos, "%02X",
+                             c.out_path[h]);
+            if (n > 0) pos += n;
+        } else {
+            int n = snprintf(&buf[pos], sizeof(buf) - pos, "%02X%02X",
+                             c.out_path[h * 2], c.out_path[h * 2 + 1]);
+            if (n > 0) pos += n;
+        }
+    }
+    if (ta_path_editor_path) lv_textarea_set_text(ta_path_editor_path, buf);
+}
+
+static void create_path_editor_screen() {
+    scr_path_editor = lv_obj_create(NULL);
+    lock_screen_scroll(scr_path_editor);
+    lv_obj_set_style_bg_color(scr_path_editor, lv_color_black(), 0);
+
+    // Back button -> contact detail
+    lv_obj_t *btn_back = lv_button_create(scr_path_editor);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, NOTCH_SAFE_Y);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_path_editor_back_clicked,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Title
+    lv_obj_t *title = lv_label_create(scr_path_editor);
+    lv_label_set_text(title, "Edit Path");
+    lv_obj_set_style_text_color(title,
+        lv_palette_main(LV_PALETTE_TEAL), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, NOTCH_SAFE_Y + 20);
+
+    // Contact name (set by path_editor_load_for_contact)
+    lbl_path_editor_contact = lv_label_create(scr_path_editor);
+    lv_label_set_text(lbl_path_editor_contact, "");
+    lv_obj_set_style_text_color(lbl_path_editor_contact, lv_color_white(), 0);
+    meck_set_font(lbl_path_editor_contact, &meck_montserrat_18, 0);
+    lv_obj_align(lbl_path_editor_contact, LV_ALIGN_TOP_LEFT, 120,
+                 NOTCH_SAFE_Y + 55);
+
+    // Header clock/battery/audio indicator (slot 11)
+    screen_attach_clock_battery(scr_path_editor, 11, &meck_montserrat_24,
+                                 NOTCH_SAFE_Y + 20);
+
+    // Path Size dropdown
+    lv_obj_t *psl = lv_label_create(scr_path_editor);
+    lv_label_set_text(psl, "Path Size");
+    lv_obj_set_style_text_color(psl,
+        lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(psl, &meck_montserrat_14, 0);
+    lv_obj_align(psl, LV_ALIGN_TOP_LEFT, 20, NOTCH_SAFE_Y + 130);
+
+    dd_path_editor_size = lv_dropdown_create(scr_path_editor);
+    lv_dropdown_set_options(dd_path_editor_size,
+        "1-byte (max 63 hops)\n2-byte (max 32 hops)");
+    lv_dropdown_set_selected(dd_path_editor_size, 0);
+    // Same tofu fix as the trace screen dropdown.
+    lv_dropdown_set_symbol(dd_path_editor_size, "v");
+    lv_obj_set_size(dd_path_editor_size, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(dd_path_editor_size, LV_ALIGN_TOP_LEFT, 20,
+                 NOTCH_SAFE_Y + 155);
+    lv_obj_set_style_bg_color(dd_path_editor_size,
+        lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(dd_path_editor_size, lv_color_white(), 0);
+    meck_set_font(dd_path_editor_size, &meck_montserrat_18, 0);
+
+    // Path textarea
+    lv_obj_t *ptl = lv_label_create(scr_path_editor);
+    lv_label_set_text(ptl, "Path (hex hops, comma-separated). Empty Save = direct.");
+    lv_obj_set_style_text_color(ptl,
+        lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(ptl, &meck_montserrat_14, 0);
+    lv_obj_align(ptl, LV_ALIGN_TOP_LEFT, 20, NOTCH_SAFE_Y + 220);
+
+    ta_path_editor_path = lv_textarea_create(scr_path_editor);
+    lv_obj_set_size(ta_path_editor_path, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(ta_path_editor_path, LV_ALIGN_TOP_LEFT, 20,
+                 NOTCH_SAFE_Y + 245);
+    lv_textarea_set_one_line(ta_path_editor_path, true);
+    lv_textarea_set_max_length(ta_path_editor_path, 200);
+    lv_textarea_set_placeholder_text(ta_path_editor_path,
+        "e.g. 3601,2198 (2-byte) or 36,21 (1-byte)");
+    lv_obj_set_style_bg_color(ta_path_editor_path,
+        lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_path_editor_path, lv_color_white(), 0);
+    meck_set_font(ta_path_editor_path, &meck_montserrat_18, 0);
+    // Cursor styling — same as ta_compose: white 2px left border, full opacity.
+    lv_obj_set_style_border_color(ta_path_editor_path, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_path_editor_path, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_path_editor_path,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_path_editor_path,   LV_OPA_COVER,          LV_PART_CURSOR);
+    // Bring the keyboard back when the textarea is tapped — paired with
+    // the hide calls in on_path_editor_save_clicked /
+    // on_path_editor_reset_clicked.
+    lv_obj_add_event_cb(ta_path_editor_path, on_path_editor_textarea_focused,
+                        LV_EVENT_FOCUSED, NULL);
+
+    // Save button
+    lv_obj_t *btn_save = lv_button_create(scr_path_editor);
+    lv_obj_set_size(btn_save, (SCREEN_WIDTH - 60) / 2, 70);
+    lv_obj_align(btn_save, LV_ALIGN_TOP_LEFT, 20, NOTCH_SAFE_Y + 345);
+    lv_obj_set_style_bg_color(btn_save,
+        lv_palette_darken(LV_PALETTE_TEAL, 2), 0);
+    lv_obj_set_style_radius(btn_save, 8, 0);
+    lv_obj_t *sl = lv_label_create(btn_save);
+    lv_label_set_text(sl, "Save");
+    lv_obj_set_style_text_color(sl, lv_color_white(), 0);
+    meck_set_font(sl, &meck_montserrat_18, 0);
+    lv_obj_center(sl);
+    lv_obj_add_event_cb(btn_save, on_path_editor_save_clicked,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Reset to auto button
+    lv_obj_t *btn_reset = lv_button_create(scr_path_editor);
+    lv_obj_set_size(btn_reset, (SCREEN_WIDTH - 60) / 2, 70);
+    lv_obj_align(btn_reset, LV_ALIGN_TOP_RIGHT, -20, NOTCH_SAFE_Y + 345);
+    lv_obj_set_style_bg_color(btn_reset,
+        lv_color_make(60, 60, 60), 0);
+    lv_obj_set_style_radius(btn_reset, 8, 0);
+    lv_obj_t *rl = lv_label_create(btn_reset);
+    lv_label_set_text(rl, "Reset to Flood");
+    lv_obj_set_style_text_color(rl, lv_color_white(), 0);
+    meck_set_font(rl, &meck_montserrat_16, 0);
+    lv_obj_center(rl);
+    lv_obj_add_event_cb(btn_reset, on_path_editor_reset_clicked,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Status label
+    lbl_path_editor_status = lv_label_create(scr_path_editor);
+    lv_label_set_text(lbl_path_editor_status, "");
+    lv_obj_set_style_text_color(lbl_path_editor_status,
+        lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(lbl_path_editor_status, &meck_montserrat_14, 0);
+    lv_obj_align(lbl_path_editor_status, LV_ALIGN_TOP_MID, 0,
+                 NOTCH_SAFE_Y + 430);
+
+    // Keyboard — stored in kb_path_editor so the FOCUSED handler can
+    // re-show it after Save / Reset hide it.
+    lv_obj_t *kb = lv_keyboard_create(scr_path_editor);
+    meck_style_keyboard(kb);
+    lv_keyboard_set_textarea(kb, ta_path_editor_path);
+    lv_obj_add_event_cb(kb, on_kb_long_press, LV_EVENT_LONG_PRESSED, NULL);
+    kb_path_editor = kb;
+}
+
+static void goto_path_editor(lv_event_t *e) {
+    (void)e;
+    if (!scr_path_editor) return;
+    path_editor_load_for_contact(g_selected_contact_idx);
+    lv_screen_load(scr_path_editor);
 }
 
 // ============================================================================
@@ -6752,6 +7632,51 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                 lv_obj_set_style_text_color(lbl_screen_battery[i], col, 0);
             } else {
                 lv_label_set_text(lbl_screen_battery[i], "");
+            }
+        }
+    }
+
+    // Audio indicator: ">>" shown next to the battery while the audio
+    // backend is in PLAYING state. Updated every tick so the indicator
+    // appears/disappears within 500ms of the user starting or pausing
+    // playback. Mirrored to every home tile and every non-home screen.
+    {
+        const char *txt = (meck_audio_get_state() == MECK_AUDIO_STATE_PLAYING)
+                          ? ">>" : "";
+        for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
+            if (!lbl_home_audio[i]) continue;
+            lv_label_set_text(lbl_home_audio[i], txt);
+        }
+        for (int i = 0; i < MECK_SCREEN_HOST_COUNT; i++) {
+            if (!lbl_screen_audio[i]) continue;
+            lv_label_set_text(lbl_screen_audio[i], txt);
+        }
+    }
+
+    // Trace path: poll the Meck instance for a result while the trace
+    // screen is active. consumeTraceResult clears the dirty flag and
+    // returns true once per match, so this is cheap when idle.
+    {
+        Meck *mesh_t = meck_get_instance();
+        if (mesh_t) {
+            if (g_trace_in_flight && scr_trace) {
+                Meck::MeckTraceResult tr;
+                if (mesh_t->consumeTraceResult(tr)) {
+                    trace_render_result(tr);
+                } else if (g_trace_sent_ms != 0) {
+                    // 30 s timeout — matches the upstream TRACE_TIMEOUT_MS
+                    unsigned long elapsed =
+                        (unsigned long)millis() - g_trace_sent_ms;
+                    if (elapsed >= 30000UL) {
+                        if (lbl_trace_status) {
+                            lv_label_set_text(lbl_trace_status,
+                                "Timed out (no response in 30s)");
+                        }
+                        g_trace_in_flight = false;
+                        g_trace_sent_ms = 0;
+                        mesh_t->traceClearPending();
+                    }
+                }
             }
         }
     }
@@ -10111,6 +11036,8 @@ extern "C" void meck_ui_init() {
     create_dm_inbox_screen();
     create_contacts_screen();
     create_contact_detail_screen();
+    create_trace_screen();
+    create_path_editor_screen();
     create_discover_screen();
     create_admin_login_screen();
     create_admin_home_screen();

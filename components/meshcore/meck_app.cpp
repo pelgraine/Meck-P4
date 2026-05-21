@@ -58,6 +58,17 @@ Meck* meck_get_instance() { return g_the_mesh; }
 extern "C" void meck_tables_begin_outgoing() { g_mesh_tables.beginMarkingOurOutgoing(); }
 extern "C" void meck_tables_end_outgoing()   { g_mesh_tables.endMarkingOurOutgoing(); }
 
+// Push a UTC epoch into the MeshCore P4RTCClock. Called from
+// meck_globals.cpp's meck_clock_set_utc bridge so that GPS-sourced time
+// reaches the RTC the Meck class was constructed with (and therefore
+// every MeshCore-internal timestamp call plus the UI's top-bar clock,
+// which read via mesh->getRTCClock()). Without this, only the
+// SoftRtcClock in meck_globals.cpp was updated and g_rtc stayed at its
+// boot-time compileTimeEpoch() value.
+extern "C" void meck_app_rtc_set(uint32_t epoch) {
+    g_rtc.setCurrentTime(epoch);
+}
+
 // ---- App init ----
 extern "C" bool meck_app_init() {
     printf("meck_app_init: starting\n");

@@ -3162,6 +3162,128 @@ public:
                                        max_records);
     }
 
+    // ---- Trace path API ----
+    //
+    // The Trace Path screen calls traceMarkSent() right after it queues
+    // a trace via createTrace() + sendDirect(), passing the tag returned
+    // by createTrace and the millis() at send time. onTraceRecv (override
+    // in protected: section) captures the matching response, fills
+    // _trace_result under the mutex, and sets _trace_dirty. The UI
+    // polls consumeTraceResult() each refresh tick; on a true return,
+    // out is filled with the snapshot and the dirty flag clears.
+    //
+    // path_byte_len in the snapshot is the raw byte length of path_hashes
+    // (hop_count * bytes_per_hop). bytes_per_hop comes from the trace
+    // flags byte (flags & 0x03) + 1 — same convention as the trace
+    // packet path_sz field per Packet.h. snr_count equals hop_count.
+    //
+    // Max hops covered: 32 (covers 2-byte mode's max). UI displays up
+    // to this and truncates if a (very unlikely) larger trace comes in.
+
+    static constexpr int MECK_TRACE_MAX_HOPS = 32;
+
+    struct MeckTraceResult {
+        uint32_t tag;
+        uint32_t auth_code;
+        uint8_t  flags;
+        uint8_t  hop_count;
+        uint8_t  bytes_per_hop;
+        uint8_t  path_hashes[MECK_TRACE_MAX_HOPS * 2]; // max 32 hops × 2 bytes
+        int8_t   path_snrs[MECK_TRACE_MAX_HOPS];        // SNR*4 per hop
+        int8_t   final_snr;                             // SNR*4 of response heard locally
+        uint32_t duration_ms;
+    };
+
+    // Called by the Trace Path screen immediately after queueing the
+    // trace via sendDirect(). sent_at_ms should be the millis() value
+    // captured at the same moment. Stored under the mutex so the
+    // onTraceRecv handler can match by tag without races.
+    void traceMarkSent(uint32_t tag, uint32_t auth_code, unsigned long sent_at_ms) {
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+        _trace_pending_tag  = tag;
+        _trace_pending_auth = auth_code;
+        _trace_sent_at_ms   = sent_at_ms;
+        _trace_dirty        = false;
+        if (_mutex) xSemaphoreGive(_mutex);
+    }
+
+    // UI polls this every refresh tick. Returns true ONCE per result —
+    // atomically reads the snapshot and clears the dirty flag.
+    bool consumeTraceResult(MeckTraceResult& out) {
+        bool got = false;
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+        if (_trace_dirty) {
+            out = _trace_result;
+            _trace_dirty = false;
+            got = true;
+        }
+        if (_mutex) xSemaphoreGive(_mutex);
+        return got;
+    }
+
+    // Cancel any pending trace match. Called by the UI when the user
+    // backs out of the trace screen or starts a new trace.
+    void traceClearPending() {
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+        _trace_pending_tag  = 0;
+        _trace_pending_auth = 0;
+        _trace_sent_at_ms   = 0;
+        _trace_dirty        = false;
+        if (_mutex) xSemaphoreGive(_mutex);
+    }
+
+    // ---- Contact custom path setters ----
+    //
+    // Used by the Path Editor screen. encoded_path_len is the standard
+    // ContactInfo.out_path_len byte: bits[7:6]=hash size mode (0=1-byte,
+    // 1=2-byte, 2=3-byte per hop), bits[5:0]=hop count. path_bytes is
+    // hop_count × bytes_per_hop raw bytes (matches the path field of
+    // a Packet's path[] array). Returns true on success, false if idx
+    // is out of range.
+    //
+    // KNOWN LIMITATION: the base class onContactPathRecv unconditionally
+    // replaces out_path whenever a new path is heard for the contact,
+    // so a manually-set path can be overwritten by future advertisements.
+    // Path lock support is not currently implemented.
+    bool setContactCustomPath(int contact_idx, const uint8_t* path_bytes,
+                              uint8_t encoded_path_len) {
+        ContactInfo c;
+        if (!getContactByIdx((uint32_t)contact_idx, c)) return false;
+        ContactInfo* live = lookupContactByPubKey(c.id.pub_key, PUB_KEY_SIZE);
+        if (!live) return false;
+
+        uint8_t hops      = encoded_path_len & 63;
+        uint8_t hash_size = (encoded_path_len >> 6) + 1;
+        uint8_t byte_len  = hops * hash_size;
+        if (byte_len > MAX_PATH_SIZE) return false;
+
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+        live->out_path_len = encoded_path_len;
+        if (byte_len > 0 && path_bytes) {
+            memcpy(live->out_path, path_bytes, byte_len);
+        }
+        _contacts_save_pending = true;
+        _contacts_save_at = millis();
+        if (_mutex) xSemaphoreGive(_mutex);
+        return true;
+    }
+
+    // Reset a contact's path to OUT_PATH_UNKNOWN so auto-discovery
+    // (flood) takes over again.
+    bool clearContactCustomPath(int contact_idx) {
+        ContactInfo c;
+        if (!getContactByIdx((uint32_t)contact_idx, c)) return false;
+        ContactInfo* live = lookupContactByPubKey(c.id.pub_key, PUB_KEY_SIZE);
+        if (!live) return false;
+
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+        live->out_path_len = OUT_PATH_UNKNOWN;
+        _contacts_save_pending = true;
+        _contacts_save_at = millis();
+        if (_mutex) xSemaphoreGive(_mutex);
+        return true;
+    }
+
 protected:
     uint8_t getPathHashSize() const override {
         // path_hash_mode is a 0-indexed mode per the MeshCore companion
@@ -3169,6 +3291,58 @@ protected:
         // Default is mode 0 (= 1 byte), which is the safe interop choice
         // until firmware >= 1.14 reaches critical mass on the network.
         return (_prefs ? _prefs->path_hash_mode : 0) + 1;
+    }
+
+    // Capture trace responses. Matched against the tag stored by
+    // traceMarkSent(); non-matching traces (e.g. someone else's that
+    // we happened to be on the path of) are ignored. The result is
+    // stashed in _trace_result + dirty flag for the UI to poll.
+    //
+    // path_len from the base layer is encoded: bits[7:6]=hash size mode,
+    // bits[5:0]=hop count. final_snr is read off the packet (its _snr
+    // field is SNR×4 as set by the dispatcher during RX).
+    void onTraceRecv(mesh::Packet* packet, uint32_t tag, uint32_t auth_code,
+                     uint8_t flags, const uint8_t* path_snrs,
+                     const uint8_t* path_hashes, uint8_t path_len) override {
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+
+        if (_trace_pending_tag != 0 && tag == _trace_pending_tag) {
+            uint8_t hops      = path_len & 63;
+            uint8_t hash_size = (path_len >> 6) + 1;
+            if (hash_size > 2) hash_size = 2;  // Result struct holds up to 2 bytes/hop
+            if (hops > MECK_TRACE_MAX_HOPS) hops = MECK_TRACE_MAX_HOPS;
+
+            _trace_result.tag           = tag;
+            _trace_result.auth_code     = auth_code;
+            _trace_result.flags         = flags;
+            _trace_result.hop_count     = hops;
+            _trace_result.bytes_per_hop = hash_size;
+            _trace_result.final_snr     = packet ? packet->_snr : 0;
+            _trace_result.duration_ms   = (uint32_t)(millis() - _trace_sent_at_ms);
+
+            if (path_hashes && hops > 0) {
+                memcpy(_trace_result.path_hashes, path_hashes,
+                       (size_t)hops * hash_size);
+            }
+            if (path_snrs && hops > 0) {
+                memcpy(_trace_result.path_snrs, path_snrs, hops);
+            }
+
+            _trace_dirty = true;
+            _trace_pending_tag  = 0;  // consume — won't re-match
+            _trace_pending_auth = 0;
+
+            printf("Meck: onTraceRecv MATCH tag=0x%08X hops=%u hash_sz=%u "
+                   "final_snr=%d dur=%ums\n",
+                   (unsigned)tag, (unsigned)hops, (unsigned)hash_size,
+                   (int)_trace_result.final_snr,
+                   (unsigned)_trace_result.duration_ms);
+        } else {
+            printf("Meck: onTraceRecv ignored tag=0x%08X (pending=0x%08X)\n",
+                   (unsigned)tag, (unsigned)_trace_pending_tag);
+        }
+
+        if (_mutex) xSemaphoreGive(_mutex);
     }
 
 private:
@@ -3208,6 +3382,18 @@ private:
 
     bool _contacts_save_pending;
     unsigned long _contacts_save_at;
+
+    // ---- Trace path state ----
+    // Set by traceMarkSent() before the UI calls sendDirect(); cleared
+    // when onTraceRecv() matches the tag (or when the UI calls
+    // traceClearPending() on screen exit). _trace_dirty flips true the
+    // moment a matching response is captured; the UI's poll
+    // (consumeTraceResult) consumes it. All accesses under _mutex.
+    uint32_t      _trace_pending_tag  = 0;
+    uint32_t      _trace_pending_auth = 0;
+    unsigned long _trace_sent_at_ms   = 0;
+    volatile bool _trace_dirty        = false;
+    MeckTraceResult _trace_result{};
 
     // Last millis() at which Meck::loop() called ensureIdentityOnSD().
     // Spaced 5 seconds apart so the periodic SD-mount probe doesn't run
