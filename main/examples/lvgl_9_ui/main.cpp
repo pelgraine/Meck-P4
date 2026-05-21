@@ -14,6 +14,7 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_pm.h"
+#include "esp_sleep.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_ldo_regulator.h"
@@ -3222,6 +3223,223 @@ extern "C" void meck_screen_set_brightness(uint8_t value)
 #endif
 }
 
+// ============================================================================
+// Screen off / on for light-sleep power saving (Meck v0.3.5, Stage 1)
+// ----------------------------------------------------------------------------
+// Tears down the MIPI-DSI bus when the user's screen-off threshold is hit
+// so the dsi_phy NO_LIGHT_SLEEP and dsi_dpi CPU_FREQ_MAX PM locks are
+// released. With those released and esp_pm_configure(light_sleep_enable=
+// true) already on at boot, the FreeRTOS idle hook enters light sleep
+// automatically. Wake source in Stage 1 is the BOOT button on GPIO 35
+// (configured by meck_boot_button_init). Touch wake via XL9535 INT line
+// (GPIO 5) is deferred to a later stage.
+//
+// State lives here (next to the panel handle it owns). MeckUI's idle
+// timer calls meck_screen_off() / meck_screen_on() based on inactivity
+// and the boot button; meck_screen_is_off() is the state query.
+//
+// Sequencing follows LilyGo's deep_sleep example for the teardown side
+// (disp_off -> disp_sleep -> panel_del). The rebuild side replays
+// Screen_Init + esp_lcd_panel_init which sends the full HI8561 vendor
+// init sequence (~200 ms incl. SLPOUT/DISPON delays).
+//
+// Both functions must be called from the LVGL task; they touch LVGL APIs
+// (refresh timer, indev read timer, display user_data, invalidate).
+// ============================================================================
+static volatile bool meck_screen_state_off = false;
+
+extern "C" bool meck_screen_is_off()
+{
+    return meck_screen_state_off;
+}
+
+extern "C" void meck_screen_off()
+{
+    if (meck_screen_state_off) return;  // already off, idempotent
+
+    // Lazy wake-source registration. gpio_wakeup_enable requires the pin
+    // already configured as input, which meck_boot_button_init does at
+    // boot. By the time this function is first called (after the screen-
+    // off threshold elapses), that init has long since run. We register
+    // here rather than at boot to keep the change surface area small.
+    //
+    // GPIO 35 is the BOOT-0 strapping pin = boot button (see target.h's
+    // meck_boot_button_init for full context). Using the literal here
+    // because main.cpp deliberately doesn't #include target.h — pulling
+    // MeshCore + P4SX1262Radio in triggers -Wreorder against LilyGo's
+    // strict flags. See similar pattern at the MeckGpsSnapshot block
+    // later in this file.
+    static const int kBootButtonGpio = 35;
+    static bool wake_source_registered = false;
+    if (!wake_source_registered) {
+        esp_err_t e1 = gpio_wakeup_enable((gpio_num_t)kBootButtonGpio, GPIO_INTR_LOW_LEVEL);
+        esp_err_t e2 = esp_sleep_enable_gpio_wakeup();
+        if (e1 == ESP_OK && e2 == ESP_OK) {
+            printf("meck_screen_off: BOOT button (GPIO %d) registered as light-sleep wake source\n",
+                   kBootButtonGpio);
+            wake_source_registered = true;
+        } else {
+            printf("meck_screen_off: wake-source registration failed (gpio_wakeup_enable=%s, esp_sleep_enable_gpio_wakeup=%s)\n",
+                   esp_err_to_name(e1), esp_err_to_name(e2));
+        }
+    }
+
+    lv_display_t *display = lv_display_get_default();
+    if (!display) {
+        printf("meck_screen_off: no default display, aborting\n");
+        return;
+    }
+
+    // 1. Pause LVGL display refresh timer first so no new flushes start.
+    lv_timer_t *refr_timer = lv_display_get_refr_timer(display);
+    if (refr_timer) lv_timer_pause(refr_timer);
+
+    // 2. Pause touch indev read timer (no point polling I2C while off, and
+    //    keeping it would keep waking the CPU every 50 ms for nothing).
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+    while (indev) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            lv_timer_t *touch_timer = lv_indev_get_read_timer(indev);
+            if (touch_timer) lv_timer_pause(touch_timer);
+            break;
+        }
+        indev = lv_indev_get_next(indev);
+    }
+
+    // 3. Give any in-flight DMA flush a moment to complete before we tear
+    //    the panel down. 50 ms is well over a single frame at this DPI.
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // 4. Null the display's panel handle so any stray flush from a delayed
+    //    timer would bail at esp_lcd_panel_draw_bitmap (which checks args)
+    //    rather than dereference freed memory.
+    lv_display_set_user_data(display, NULL);
+
+    // 5. Tell the panel chip to power down: DISPOFF then SLPIN.
+    if (Screen_Mipi_Dpi_Panel) {
+        esp_lcd_panel_disp_on_off(Screen_Mipi_Dpi_Panel, false);  // 0x28 DISPOFF
+        esp_lcd_panel_disp_sleep(Screen_Mipi_Dpi_Panel, true);    // 0x10 SLPIN
+
+        // 6. Destroy the panel. This releases the dsi_dpi CPU_FREQ_MAX
+        //    PM lock (confirmed by v0.3.5 testing — the lock dump showed
+        //    dsi_dpi disappeared after del). It does NOT release
+        //    dsi_phy NO_LIGHT_SLEEP, which is held by the underlying
+        //    DSI bus (a separate handle owned by Mipi_Dsi_Init).
+        esp_lcd_panel_del(Screen_Mipi_Dpi_Panel);
+        Screen_Mipi_Dpi_Panel = NULL;
+
+        // 7. Destroy the DSI bus. This releases dsi_phy and is the step
+        //    that actually enables light sleep to engage on this hardware.
+        //    The bus handle was captured by Screen_Init into a file-scope
+        //    static inside t_display_p4_driver.cpp (see v0.3.6 changes
+        //    in that file). Symbol-table evidence from LilyGo's deep_sleep
+        //    binary (esp_lcd_del_dsi_bus is present) suggests this is the
+        //    sanctioned cleanup path; the public ESP-IDF API mirrors the
+        //    esp_lcd_new_dsi_bus creator. If it fails for any reason we
+        //    log and continue — worst case is dsi_phy stays held and we
+        //    get the same outcome as v0.3.5 (no power gain), not a crash.
+        esp_lcd_dsi_bus_handle_t bus = Screen_Get_Mipi_Dsi_Bus_Handle();
+        if (bus) {
+            esp_err_t err = esp_lcd_del_dsi_bus(bus);
+            if (err != ESP_OK) {
+                printf("meck_screen_off: esp_lcd_del_dsi_bus failed (%s) — dsi_phy may remain held\n",
+                       esp_err_to_name(err));
+            }
+        } else {
+            printf("meck_screen_off: no captured DSI bus handle — was Screen_Init called?\n");
+        }
+    }
+
+    meck_screen_state_off = true;
+    printf("meck_screen_off: panel down, DSI bus torn down, light sleep should now engage\n");
+}
+
+extern "C" void meck_screen_on()
+{
+    if (!meck_screen_state_off) return;  // already on, idempotent
+
+    lv_display_t *display = lv_display_get_default();
+    if (!display) {
+        printf("meck_screen_on: no default display, aborting\n");
+        return;
+    }
+
+    // 1. Rebuild the DSI bus + panel from scratch. Screen_Init creates a
+    //    new MIPI-DSI bus (which re-acquires dsi_phy/dsi_dpi locks) and a
+    //    fresh panel handle. esp_lcd_panel_init replays the HI8561 vendor
+    //    init sequence including SLPOUT and DISPON internally — total
+    //    around 200 ms of vendor commands + their inter-command delays.
+    if (Screen_Init(&Screen_Mipi_Dpi_Panel) == false) {
+        printf("meck_screen_on: Screen_Init failed\n");
+        return;
+    }
+    esp_err_t err = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
+    if (err != ESP_OK) {
+        printf("meck_screen_on: esp_lcd_panel_init failed (%s)\n", esp_err_to_name(err));
+        return;
+    }
+
+    // 2. Re-register the DPI event callback. The original registration in
+    //    Lvgl_Init referenced the previous panel handle which we destroyed.
+    //    The callback bodies are identical to the originals — duplication
+    //    is deliberate to avoid promoting them to file scope just for this.
+#if CONFIG_ENABLE_USB_DISPLAY != true
+    esp_lcd_dpi_panel_event_callbacks_t cbs = {
+        .on_color_trans_done = [](esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) -> bool
+        {
+            lv_display_t *disp = (lv_display_t *)user_ctx;
+            lv_display_flush_ready(disp);
+            return false;
+        },
+        .on_refresh_done = [](esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) -> bool
+        {
+            return false;
+        },
+    };
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(Screen_Mipi_Dpi_Panel, &cbs, display));
+#endif
+
+    // 3. Restore the LVGL display's panel handle so the flush callback at
+    //    line 3893 (set in Lvgl_Init via lv_display_set_flush_cb) can find
+    //    the new panel via lv_display_get_user_data.
+    lv_display_set_user_data(display, Screen_Mipi_Dpi_Panel);
+
+    // 4. Resume timers — display refresh first, then touch indev. From this
+    //    point LVGL is ticking again and flush callbacks will be invoked.
+    lv_timer_t *refr_timer = lv_display_get_refr_timer(display);
+    if (refr_timer) lv_timer_resume(refr_timer);
+
+    lv_indev_t *indev = lv_indev_get_next(NULL);
+    while (indev) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            lv_timer_t *touch_timer = lv_indev_get_read_timer(indev);
+            if (touch_timer) lv_timer_resume(touch_timer);
+            break;
+        }
+        indev = lv_indev_get_next(indev);
+    }
+
+    // 5. Force a full redraw — the new panel's framebuffer / pipeline is
+    //    empty, so invalidate everything so LVGL repaints on the next tick.
+    lv_obj_t *scr = lv_screen_active();
+    if (scr) lv_obj_invalidate(scr);
+
+    // 6. Reset LVGL's idle counter so the timer doesn't immediately decide
+    //    to go back to sleep again.
+    lv_display_trigger_activity(NULL);
+
+    // 7. Brightness restore is intentionally NOT done here. main.cpp
+    //    deliberately avoids the meshcore types (Meck, P4NodePrefs) that
+    //    would be needed to read the user's saved brightness — including
+    //    target.h triggers -Wreorder against LilyGo's strict flags. The
+    //    caller (screen_idle_timer_cb in MeckUI.cpp) handles brightness
+    //    restore right after meck_screen_on() returns, where Meck/prefs
+    //    are already in scope.
+
+    meck_screen_state_off = false;
+    printf("meck_screen_on: panel up, DSI bus rebuilt (caller will restore brightness)\n");
+}
+
 // GPS power gate. Switching to OFF puts the L76K into standby (~25 mA
 // savings at the module) and stops device_gps_task from polling. Switch
 // back to TEST wakes the module and resumes parsing. The almanac is
@@ -3379,6 +3597,79 @@ bool Sdspi_Init(const char *base_path)
     return true;
 }
 
+// Forward declaration — App_Video_Init is defined later in this file but
+// referenced earlier by meck_camera_lazy_init below.
+bool App_Video_Init(void);
+
+// ============================================================================
+// Meck power-saving: lazy camera initialisation
+// ----------------------------------------------------------------------------
+// Boot-time camera init wakes up the SGM38121 power rails (DVDD_1, AVDD_1,
+// AVDD_2), runs Camera_Init (which creates a second MIPI-DSI bus
+// duplicating the dsi_phy / dsi_dpi PM lock entries seen in
+// esp_pm_dump_locks), opens the camera fd, and starts the video stream.
+// Until the user opens the camera UI none of this is needed; deferring
+// saves the standby current of the camera-specific rails plus removes one
+// set of duplicate DSI locks.
+//
+// IMPORTANT: Init_Ldo_Channel_Power(3, 1830) is NOT deferred. That LDO
+// powers the MIPI PHY which is shared between MIPI-CSI (camera) and
+// MIPI-DSI (screen). It must stay at boot or the screen init hangs.
+//
+// Called from System_Ui->_win_camera_status_callback on first open if
+// Sys_Status.camera.init_flag is still false. Once successful, the flag
+// stays true for the rest of the session — no de-init on close (that
+// would be the C2 variant; this is C1 lazy-init).
+//
+// Assumes the SGM38121 chip itself (the power management IC) has already
+// been initialised earlier in app_main. We only flip its camera-rail
+// channels here; we don't touch other rails.
+static bool meck_camera_lazy_init(void)
+{
+    printf("meck_camera_lazy_init: starting\n");
+
+#if defined CONFIG_CAMERA_TYPE_SC2336
+    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, 1800);
+    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, 2800);
+    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
+    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
+#elif defined CONFIG_CAMERA_TYPE_OV2710
+    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::DVDD_1, 1500);
+    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, 1700);
+    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, 3000);
+    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::DVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
+    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
+    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
+#elif defined CONFIG_CAMERA_TYPE_OV5645
+    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::DVDD_1, 1500);
+    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, 1800);
+    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, 2800);
+    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::DVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
+    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
+    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+
+    // NOTE: Init_Ldo_Channel_Power(3, 1830) is NOT done here — it powers
+    // the MIPI PHY which is shared between MIPI-CSI (camera) and MIPI-DSI
+    // (screen). It must stay at boot in app_main so the screen can come
+    // up. Only the camera-specific SGM38121 rails defer.
+
+    // Rail-stabilisation delay before talking to the sensor — same as the
+    // original boot sequence.
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    if (App_Video_Init() == false)
+    {
+        printf("meck_camera_lazy_init: App_Video_Init fail\n");
+        return false;
+    }
+
+    printf("meck_camera_lazy_init: App_Video_Init success\n");
+    return true;
+}
+
 void System_Ui_Callback_Init(void)
 {
     System_Ui->_device_vibration_callback = [](uint8_t vibration_count)
@@ -3507,6 +3798,26 @@ void System_Ui_Callback_Init(void)
 
     System_Ui->_win_camera_status_callback = [](bool status)
     {
+        // Meck power-saving: lazy-init the camera on first open. Boot
+        // skipped App_Video_Init + camera power rails + LDO; meck_camera_
+        // lazy_init does them now. Once successful, the flag stays true
+        // for the rest of the session (C1 behaviour — no de-init on close).
+        if (status == true && Sys_Status.camera.init_flag == false)
+        {
+            if (meck_camera_lazy_init() == true)
+            {
+                Sys_Status.camera.init_flag = true;
+            }
+            else
+            {
+                // Lazy init failed — bail out cleanly. The camera screen
+                // will be empty; no further damage. Subsequent reopens
+                // will retry init.
+                printf("Camera open: lazy init failed, aborting\n");
+                return;
+            }
+        }
+
         if (Sys_Status.camera.init_flag == true)
         {
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4
@@ -3802,6 +4113,21 @@ void Lvgl_Init(void)
                                 lv_display_rotation_t rotation = lv_display_get_rotation(disp);
                                 esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
 
+                                // Meck v0.3.6: NULL-safe flush. meck_screen_off
+                                // nulls the display's user_data before tearing
+                                // down the panel. If a flush slips through that
+                                // window (e.g. one was already in flight when
+                                // refresh was paused), we must still signal
+                                // flush_ready or LVGL hangs forever in
+                                // wait_for_flushing waiting for the
+                                // on_color_trans_done event that never fires
+                                // (because esp_lcd_panel_draw_bitmap rejects
+                                // a NULL panel before starting DMA).
+                                if (panel_handle == NULL) {
+                                    lv_display_flush_ready(disp);
+                                    return;
+                                }
+
                                 int32_t offsetx1 = area->x1;
                                 int32_t offsetx2 = area->x2;
                                 int32_t offsety1 = area->y1;
@@ -4002,6 +4328,17 @@ void Lvgl_Init(void)
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER); /*Touchpad should have POINTER type*/
     lv_indev_set_read_cb(indev, my_touchpad_read);
+
+    // Meck power-saving: slow touch polling from default LV_DEF_REFR_PERIOD
+    // (30 ms = 33 Hz) to 50 ms (20 Hz) to reduce I2C_0 hammering by the
+    // Hi8561 touch read. The LVGL display refresh and keyboard indev are
+    // unaffected — they keep using the global default period.
+    {
+        lv_timer_t *touch_read_timer = lv_indev_get_read_timer(indev);
+        if (touch_read_timer) {
+            lv_timer_set_period(touch_read_timer, 50);
+        }
+    }
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     lv_indev_t *indev_2 = lv_indev_create();
@@ -4951,19 +5288,24 @@ void System_Startup_Message_Init(void)
         }
     }
 
-    if (Sys_Status.camera.init_flag == false)
-    {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
-        _lock_acquire(&lvgl_api_lock);
-        System_Ui->create_system_message_box(lv_screen_active(), "device massage", "camera init fail");
-        _lock_release(&lvgl_api_lock);
-
-        while (System_Ui->_registry.system_message_box.occupancy_flag == true)
-        {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-    }
+    // Meck power-saving: camera init is deferred to first camera open, so
+    // Sys_Status.camera.init_flag is intentionally false at boot. Skip the
+    // boot-time "camera init fail" warning that would now fire spuriously.
+    // If lazy init genuinely fails, the camera-open callback handles that
+    // path with its own printf.
+    // if (Sys_Status.camera.init_flag == false)
+    // {
+    //     vTaskDelay(pdMS_TO_TICKS(1000));
+    //
+    //     _lock_acquire(&lvgl_api_lock);
+    //     System_Ui->create_system_message_box(lv_screen_active(), "device massage", "camera init fail");
+    //     _lock_release(&lvgl_api_lock);
+    //
+    //     while (System_Ui->_registry.system_message_box.occupancy_flag == true)
+    //     {
+    //         vTaskDelay(pdMS_TO_TICKS(10));
+    //     }
+    // }
 
     if (Sys_Status.esp32c6.init_flag == false)
     {
@@ -5455,45 +5797,22 @@ extern "C" void app_main(void)
         Sys_Status.sgm38121.init_flag = true;
     }
 
-#if defined CONFIG_CAMERA_TYPE_SC2336
-    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, 1800);
-    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, 2800);
-    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
-    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
-#elif defined CONFIG_CAMERA_TYPE_OV2710
-    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::DVDD_1, 1500);
-    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, 1700);
-    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, 3000);
-    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::DVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
-    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
-    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
-#elif defined CONFIG_CAMERA_TYPE_OV5645
-    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::DVDD_1, 1500);
-    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, 1800);
-    SGM38121->set_output_voltage(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, 2800);
-    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::DVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
-    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_1, Cpp_Bus_Driver::Sgm38121::Status::ON);
-    SGM38121->set_channel_status(Cpp_Bus_Driver::Sgm38121::Channel::AVDD_2, Cpp_Bus_Driver::Sgm38121::Status::ON);
-#else
-#error "unknown macro definition, please select the correct macro definition."
-#endif
-
-    // bsp_init_refresh_monitor_io();
-
+    // Meck power-saving: MIPI PHY LDO is shared between MIPI-CSI (camera)
+    // and MIPI-DSI (screen). It must be enabled at boot so the screen
+    // panel init can talk to the DSI PHY immediately after this point.
+    // Deferring this caused the screen init to hang the main task and
+    // trip the watchdog.
     Init_Ldo_Channel_Power(3, 1830);
 
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    if (App_Video_Init() == false)
-    {
-        printf("App_Video_Init fail\n");
-        Sys_Status.camera.init_flag = false;
-    }
-    else
-    {
-        printf("App_Video_Init success\n");
-        Sys_Status.camera.init_flag = true;
-    }
+    // Meck power-saving: camera init deferred to first camera open.
+    // The camera-specific portion — SGM38121 power rails (DVDD_1, AVDD_1,
+    // AVDD_2), the 100 ms stabilisation delay, and App_Video_Init() —
+    // has been moved into meck_camera_lazy_init() near the top of this
+    // file. Triggered by System_Ui->_win_camera_status_callback(true)
+    // on first camera open. The MIPI PHY LDO above stays at boot because
+    // it powers both the camera and the screen.
+    Sys_Status.camera.init_flag = false;
+    printf("Camera: init deferred (lazy on first camera UI open)\n");
 
 #if (CONFIG_ENABLE_PPA_SCREEN_ROTATION == true) && (!defined SCREEN_ROTATION_DIRECTION_0)
     if (Ppa_Screen_Rotation_Init() == false)
@@ -5972,7 +6291,7 @@ extern "C" void app_main(void)
     // xTaskCreate(iis_transmission_data_stream_task, "iis_transmission_data_stream_task", 4 * 1024, NULL, 4, &Iis_Transmission_Data_Stream_Task);
     // ^ disabled — also drives I²S into the ES8311 that's no longer initialised at boot
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-    xTaskCreate(device_nfc_task, "device_nfc_task", 8 * 1024, NULL, 3, &Nfc_Task_Handle);
+    //xTaskCreate(device_nfc_task, "device_nfc_task", 8 * 1024, NULL, 3, &Nfc_Task_Handle);
 #endif
 
     // 等待lvgl刷新完成
@@ -6002,7 +6321,7 @@ extern "C" void app_main(void)
     // so it can never starve real work. Disable by commenting out this line
     // (or set the configs in sdkconfig to off and the function compiles to
     // a no-op stub).
-   // xTaskCreate(meck_stats_task, "meck_stats_task", 4 * 1024, NULL, 1, NULL);
+   xTaskCreate(meck_stats_task, "meck_stats_task", 4 * 1024, NULL, 1, NULL);
 
     // ---- end Meck ----
 

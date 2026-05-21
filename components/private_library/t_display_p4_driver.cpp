@@ -11,9 +11,18 @@
 #include "t_display_p4_driver.h"
 #include "esp_ldo_regulator.h"
 
+// Meck v0.3.6: file-scope handle to the screen's MIPI-DSI bus. Captured
+// inside Mipi_Dsi_Init when called via Screen_Init (which passes its
+// address as out_dsi_bus). Camera_Init does NOT pass an address, so the
+// camera path does not touch this. The screen-off light-sleep path in
+// main.cpp reads this via Screen_Get_Mipi_Dsi_Bus_Handle() so it can
+// call esp_lcd_del_dsi_bus(bus) and release the dsi_phy PM lock.
+static esp_lcd_dsi_bus_handle_t s_screen_mipi_dsi_bus = NULL;
+
 bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t dpi_clock_freq_mhz, lcd_color_rgb_pixel_format_t color_rgb_pixel_format, uint8_t num_fbs, uint32_t width, uint32_t height,
                    uint32_t mipi_dsi_hsync, uint32_t mipi_dsi_hbp, uint32_t mipi_dsi_hfp, uint32_t mipi_dsi_vsync, uint32_t mipi_dsi_vbp, uint32_t mipi_dsi_vfp,
-                   uint32_t bits_per_pixel, esp_lcd_panel_handle_t *mipi_dpi_panel)
+                   uint32_t bits_per_pixel, esp_lcd_panel_handle_t *mipi_dpi_panel,
+                   esp_lcd_dsi_bus_handle_t *out_dsi_bus)
 {
     esp_lcd_dsi_bus_handle_t mipi_dsi_bus;
     esp_lcd_panel_io_handle_t mipi_dbi_io;
@@ -110,6 +119,14 @@ bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t
 #error "unknown macro definition, please select the correct macro definition."
 #endif
 
+    // Meck v0.3.6: hand the bus handle back to the caller if requested.
+    // Screen_Init asks for it (captured into s_screen_mipi_dsi_bus); the
+    // camera path does not. Only written after every preceding step
+    // succeeded, so callers never see a half-baked bus.
+    if (out_dsi_bus != nullptr) {
+        *out_dsi_bus = mipi_dsi_bus;
+    }
+
     return true;
 }
 
@@ -118,13 +135,24 @@ bool Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
     if (Mipi_Dsi_Init(SCREEN_DATA_LANE_NUM, SCREEN_LANE_BIT_RATE_MBPS, SCREEN_MIPI_DSI_DPI_CLK_MHZ, SCREEN_COLOR_RGB_PIXEL_FORMAT,
                       0, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_MIPI_DSI_HSYNC, SCREEN_MIPI_DSI_HBP,
                       SCREEN_MIPI_DSI_HFP, SCREEN_MIPI_DSI_VSYNC, SCREEN_MIPI_DSI_VBP, SCREEN_MIPI_DSI_VFP,
-                      SCREEN_BITS_PER_PIXEL, mipi_dpi_panel) == false)
+                      SCREEN_BITS_PER_PIXEL, mipi_dpi_panel,
+                      &s_screen_mipi_dsi_bus) == false)
     {
         printf("Mipi_Dsi_Init fail\n");
         return false;
     }
 
     return true;
+}
+
+// Meck v0.3.6: see header for full context. Returns whatever was last
+// written by Screen_Init (or NULL if Screen_Init has never run, or has
+// been followed by an esp_lcd_del_dsi_bus that invalidated the handle —
+// in that case the caller of meck_screen_off is expected to have called
+// Screen_Init again before re-reading this).
+esp_lcd_dsi_bus_handle_t Screen_Get_Mipi_Dsi_Bus_Handle()
+{
+    return s_screen_mipi_dsi_bus;
 }
 
 bool Camera_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)

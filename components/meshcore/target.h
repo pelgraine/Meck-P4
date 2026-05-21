@@ -290,6 +290,39 @@ extern "C" bool meck_export_to_sd_with_flags(uint32_t flags,
 extern "C" void meck_boot_button_init();
 extern "C" bool meck_boot_button_pressed();
 
+// ---- Screen off / on for light-sleep power saving ----
+//
+// meck_screen_off() tears down the MIPI-DSI bus so the dsi_phy
+// NO_LIGHT_SLEEP and dsi_dpi CPU_FREQ_MAX PM locks are released. With those
+// locks released and esp_pm_configure(light_sleep_enable=true) already set
+// at boot, the FreeRTOS idle hook automatically enters light sleep when no
+// tasks are runnable, dropping idle current substantially.
+//
+// Sequence inside meck_screen_off():
+//   1. pause LVGL display refresh timer + touch indev read timer
+//   2. null the LVGL display user_data (panel handle) so any stray flush
+//      bails out instead of dereferencing a freed handle
+//   3. send DISPOFF (0x28) and SLPIN (0x10) via the panel API
+//   4. esp_lcd_panel_del() — destroys DSI bus, releases the PM locks
+//   5. on first call only, register GPIO 35 (boot button) as a light-sleep
+//      wake source via gpio_wakeup_enable + esp_sleep_enable_gpio_wakeup
+//
+// meck_screen_on() does the reverse: Screen_Init + esp_lcd_panel_init
+// replay the vendor command sequence, re-register the panel event callback,
+// re-set the display user_data, send SLPOUT + DISPON, restore brightness,
+// resume the LVGL timers, and invalidate the active screen to force a full
+// redraw.
+//
+// Stage 1 limitation (v0.3.5): wake source is the boot button only. Touch
+// wake via the XL9535 INT line on GPIO 5 is planned for a later stage but
+// not yet implemented. Users wake the device by pressing BOOT.
+//
+// Both functions must be called from the LVGL task (they touch LVGL APIs).
+// meck_screen_is_off() returns the current state for the idle timer.
+extern "C" void meck_screen_off();
+extern "C" void meck_screen_on();
+extern "C" bool meck_screen_is_off();
+
 // ---- Battery readout (BQ27220 fuel gauge owned by main.cpp) ----
 //
 // Voltage is always trustworthy. SoC% from BQ27220 depends on cell

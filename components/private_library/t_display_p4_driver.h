@@ -86,10 +86,24 @@
 
 bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t dpi_clock_freq_mhz, lcd_color_rgb_pixel_format_t color_rgb_pixel_format, uint8_t num_fbs, uint32_t width, uint32_t height,
                    uint32_t mipi_dsi_hsync, uint32_t mipi_dsi_hbp, uint32_t mipi_dsi_hfp, uint32_t mipi_dsi_vsync, uint32_t mipi_dsi_vbp, uint32_t mipi_dsi_vfp,
-                   uint32_t bits_per_pixel, esp_lcd_panel_handle_t *mipi_dpi_panel);
+                   uint32_t bits_per_pixel, esp_lcd_panel_handle_t *mipi_dpi_panel,
+                   esp_lcd_dsi_bus_handle_t *out_dsi_bus = nullptr);
 
 bool Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel);
 
 bool Camera_Init(esp_lcd_panel_handle_t *mipi_dpi_panel);
 
 bool Init_Ldo_Channel_Power(uint8_t chan_id, uint32_t voltage_mv);
+
+// Meck v0.3.6: accessor for the screen's MIPI-DSI bus handle. Needed for
+// the light-sleep screen-off path in main.cpp, which has to call
+// esp_lcd_del_dsi_bus(bus) after esp_lcd_panel_del(panel) to release the
+// dsi_phy NO_LIGHT_SLEEP PM lock. The bus is created inside Mipi_Dsi_Init
+// as a local; the screen-only call site (Screen_Init) now captures it
+// into a file-scope static for later retrieval. Camera_Init does NOT
+// capture, so opening the camera UI won't clobber this handle.
+//
+// Returns NULL if Screen_Init has not yet been called, or if the bus has
+// been deleted (call sites in meck_screen_off are responsible for
+// ensuring the screen is in a state where this handle is valid).
+esp_lcd_dsi_bus_handle_t Screen_Get_Mipi_Dsi_Bus_Handle();

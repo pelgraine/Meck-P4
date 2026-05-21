@@ -210,7 +210,7 @@ static void meck_font_restyle_all() {
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3.4"
+#define MECK_FIRMWARE_VERSION "0.3.5"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -4747,22 +4747,21 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
     if (!mesh) return;
     P4NodePrefs* prefs = mesh->getNodePrefs();
 
-    // Track our own dimmed state rather than reading back from the panel,
-    // so the cost of the timer is constant and we don't over-write the
-    // brightness register on every tick.
-    static bool dimmed = false;
+    // v0.3.5: full screen-off path. State lives in main.cpp (it owns the
+    // panel handle and the LVGL display + indev refs). This timer just
+    // decides when to transition based on inactivity / boot button, and
+    // calls meck_screen_off() / meck_screen_on() to do the heavy lifting.
+    //
+    // Wake source in Stage 1 is the boot button only. Touch wake via the
+    // XL9535 INT line is planned for a later stage; until then a deliberate
+    // BOOT press is the only way out of off-state.
 
-    // Auto-off disabled — make sure the screen is at the user's chosen
-    // brightness in case the user toggled the setting off mid-fade.
+    // Auto-off disabled — if the screen happens to be off (because the
+    // setting changed mid-sleep), wake it back up. Otherwise nothing to do.
     if (!prefs || prefs->screen_off_minutes == 0) {
-        if (dimmed) {
-            uint8_t b = (prefs && prefs->screen_brightness)
-                ? prefs->screen_brightness : 200;
-            meck_screen_set_brightness(b);
-            lv_display_trigger_activity(NULL);
-            dimmed = false;
-            printf("Screen: auto-off disabled mid-dim, restored brightness=%u\n",
-                   (unsigned)b);
+        if (meck_screen_is_off()) {
+            meck_screen_on();
+            printf("Screen: auto-off disabled mid-sleep, screen restored\n");
         }
         return;
     }
@@ -4770,27 +4769,25 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
     uint32_t threshold_ms = (uint32_t)prefs->screen_off_minutes * 60u * 1000u;
     uint32_t inactive_ms = lv_display_get_inactive_time(NULL);
 
-    if (!dimmed) {
+    if (!meck_screen_is_off()) {
         // Sleep path: inactivity-based.
         if (inactive_ms >= threshold_ms) {
-            meck_screen_set_brightness(0);
-            dimmed = true;
-            printf("Screen: auto-off after %u min idle\n",
+            printf("Screen: entering off-state after %u min idle\n",
                    (unsigned)prefs->screen_off_minutes);
+            meck_screen_off();
         }
     } else {
-        // Wake path: any indev activity will have reset LVGL's inactive
-        // counter; if that's reset we wake. Boot button is checked too
-        // as a deliberate secondary wake source.
-        bool indev_active = (inactive_ms < threshold_ms);
-        bool button       = meck_boot_button_pressed();
-        if (indev_active || button) {
+        // Wake path (Stage 1): boot button only. lv_display_get_inactive_time
+        // won't update while off because the touch indev read timer is
+        // paused, so we can't rely on it here.
+        if (meck_boot_button_pressed()) {
+            printf("Screen: woke via boot button\n");
+            meck_screen_on();
+            // Brightness restore lives here (not in meck_screen_on) because
+            // main.cpp can't reference Meck/P4NodePrefs without pulling in
+            // headers that conflict with LilyGo's strict-flag build.
             uint8_t b = prefs->screen_brightness ? prefs->screen_brightness : 200;
             meck_screen_set_brightness(b);
-            lv_display_trigger_activity(NULL);
-            dimmed = false;
-            printf("Screen: woke via %s (brightness=%u)\n",
-                   button ? "boot button" : "touch", (unsigned)b);
         }
     }
 }
@@ -6773,7 +6770,20 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // Battery tile: refresh every tick. Voltage is authoritative; if the
     // BQ27220's reported SoC disagrees with the voltage curve by more than
     // 30 points, surface it so the user can decide what to trust.
-    if (lbl_battery_detail) {
+    //
+    // Gated on the battery tile actually being visible. lbl_battery_detail
+    // is created on first visit and never destroyed, so a bare NULL check
+    // would poll BQ27220 8 times every 500 ms forever after first visit.
+    // That I2C churn (and the PM-lock IPC traffic it generates) combined
+    // with active DFS was reliably crashing the device with a system
+    // watchdog reset in esp_ipc_isr_waiting_for_finish_cmd.
+    bool battery_tile_visible =
+        lbl_battery_detail
+        && lv_screen_active() == scr_home
+        && g_tileview
+        && lv_obj_get_parent(lbl_battery_detail) == lv_tileview_get_tile_act(g_tileview)
+        && !meck_screen_is_off();
+    if (battery_tile_visible) {
         if (!meck_battery_available()) {
             lv_label_set_text(lbl_battery_detail, "BQ27220 not detected");
         } else {
