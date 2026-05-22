@@ -42,6 +42,7 @@
 #include "MeckMapScreen.h"
 
 #include <sys/lock.h>
+#include <algorithm>
 #include "lvgl.h"
 #include "t_display_p4_driver.h"
 #include "esp_timer.h"
@@ -211,7 +212,7 @@ static void meck_font_restyle_all() {
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3.5"
+#define MECK_FIRMWARE_VERSION "0.3.5.1"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -5991,8 +5992,45 @@ static void refresh_contacts_list() {
         return;
     }
 
+    // Build a sorted index array over ALL contacts (regardless of filter).
+    // Sort key is ci.lastmod descending, which is our local RTC time at the
+    // moment we last processed activity from this contact (advert receipt,
+    // message receipt, or message send). Originally tried sorting by
+    // last_advert_timestamp, but that field is the sender's claimed clock
+    // time embedded in the advert payload, not our reception time — so
+    // nodes with forward-dated clocks squat at the top forever and nodes
+    // with behind/stuck clocks sink to the bottom regardless of when we
+    // actually heard from them. lastmod uses our own RTC and is bumped on
+    // every advert receipt (see MeckMesh::onAdvertRecv override, which
+    // works around BaseChatMesh's replay guard that would otherwise leave
+    // lastmod unupdated for nodes whose claimed clock doesn't advance).
+    //
+    // stable_sort keeps contacts with identical timestamps (e.g. ones
+    // never heard, lastmod=0) in their creation order. The filter is
+    // applied below during row construction, so the sort itself does not
+    // depend on g_contact_filter.
+    //
+    // Static BSS allocation (1500 * 8 = ~12 KB). The function only runs
+    // on the LVGL task so reuse between calls is safe. Avoids piling 12 KB
+    // onto the LVGL task stack.
+    struct ContactSortEntry { int idx; uint32_t ts; };
+    static ContactSortEntry s_sort_buf[MAX_CONTACTS];
+    int sort_count = 0;
+    for (int i = 0; i < n && sort_count < MAX_CONTACTS; i++) {
+        ContactInfo ci;
+        if (!mesh->getContactByIdx(i, ci)) continue;
+        s_sort_buf[sort_count].idx = i;
+        s_sort_buf[sort_count].ts  = ci.lastmod;
+        sort_count++;
+    }
+    std::stable_sort(s_sort_buf, s_sort_buf + sort_count,
+        [](const ContactSortEntry& a, const ContactSortEntry& b) {
+            return a.ts > b.ts;
+        });
+
     int shown = 0;
-    for (int i = 0; i < n && shown < 200; i++) {
+    for (int s = 0; s < sort_count; s++) {
+        int i = s_sort_buf[s].idx;
         ContactInfo ci;
         if (!mesh->getContactByIdx(i, ci)) continue;
         if (!contact_matches_filter(ci, g_contact_filter)) continue;

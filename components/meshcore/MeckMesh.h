@@ -2644,6 +2644,33 @@ protected:
                        uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override {
         BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
 
+        // Sort-order override for the contacts list.
+        //
+        // BaseChatMesh::onAdvertRecv early-returns at its replay-attack
+        // guard if the advert's sender-claimed timestamp isn't strictly
+        // greater than the contact's stored last_advert_timestamp. That
+        // path leaves both last_advert_timestamp AND lastmod unupdated.
+        // The contacts list sorts by lastmod (= our local RTC time at
+        // last contact activity), so without this override, any node
+        // whose sender clock is stuck or behind would sit permanently at
+        // the bottom of the list regardless of how recently we actually
+        // heard from it.
+        //
+        // We unconditionally bump lastmod to local RTC time on any
+        // pubkey-matching advert. In the non-replay case the base class
+        // has already set lastmod to the same value at its line 175,
+        // so this is a harmless no-op. In the replay case it's the only
+        // update that runs.
+        //
+        // Safe to write contacts[] without _mutex here: contacts[] is
+        // BaseChatMesh-owned and writes from this task happen alongside
+        // the base class's own non-locked writes (lines 168-175). _mutex
+        // in this class protects only _recent[] and _discovered[].
+        ContactInfo* known = lookupContactByPubKey(id.pub_key, PUB_KEY_SIZE);
+        if (known != NULL) {
+            known->lastmod = _rtc_ref.getCurrentTime();
+        }
+
         // Clock sync: first valid sync wins, then we trust our own clock.
         // Window is deliberately wide so we don't reject the entire mesh
         // because of a missed annual constant bump. Real-world clock drift
