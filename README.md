@@ -8,6 +8,8 @@ with a `meshcore` ESP-IDF component added on top.
 
 [Check out the Meck-P4 discussion channel on the MeshCore Discord](https://discord.com/channels/1495203904898728149/1500323702859104457)
 
+<img width="260" height="460" alt="IMG_3095" src="https://github.com/user-attachments/assets/f2a3eeb8-d23a-49aa-a725-da6429b20d9e" />
+
 ### Contents
 
 - [Supported Devices](#supported-devices)
