@@ -2,7 +2,7 @@
 
 A port of [Meck](https://github.com/pelgraine/Meck) (a MeshCore fork) to the
 LilyGo T-Display P4. Targets the ESP32-P4 main MCU; the onboard ESP32-C6 is
-not currently used by Meck on this device. Built on top of LilyGo's
+not currently used by Meck on this device while the firmware is still at pre-release stage. Built on top of LilyGo's
 [T-Display-P4](https://github.com/Xinyuan-LilyGO/T-Display-P4) example tree
 with a `meshcore` ESP-IDF component added on top.
 
