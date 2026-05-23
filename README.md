@@ -270,12 +270,6 @@ unread message badges.
 The Public and #test channels are configured by default. Other
 channels can be added through the channel screen.
 
-**Self-healing channel migration:** earlier firmware revisions used a
-derived secret for the Public channel that didn't match the rest of the
-network. Meck-P4 detects and repairs this automatically on every boot, so
-upgrading from an older build won't leave you stuck on a wrong-secret
-channel.
-
 ---
 
 ## Contacts
