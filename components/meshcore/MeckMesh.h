@@ -3599,7 +3599,7 @@ private:
         // Slots 1+: hashtag channels — first 16 bytes of SHA-256(name) is
         // the secret, with the leading '#' included. Matches addHashChannel()
         // and the rest of the AU mesh.
-        const char* hashed_defaults[] = { "#test", "#sydney" };
+        const char* hashed_defaults[] = { "#test" };
         const int n_hashed = (int)(sizeof(hashed_defaults) / sizeof(hashed_defaults[0]));
         for (int i = 0; i < n_hashed; i++) {
             ChannelDetails ch;

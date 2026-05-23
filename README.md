@@ -267,7 +267,7 @@ unread message badges.
 | Tap a channel | Switch to that channel |
 | Tap **Back** | Return to messages |
 
-The Public, #test, and #sydney channels are configured by default. Other
+The Public and #test channels are configured by default. Other
 channels can be added through the channel screen.
 
 **Self-healing channel migration:** earlier firmware revisions used a
