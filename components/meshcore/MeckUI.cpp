@@ -10986,12 +10986,18 @@ static void on_admin_cmd_input_focused(lv_event_t *e) {
     if (!kb_admin_cmd_input) return;
     lv_keyboard_set_textarea(kb_admin_cmd_input, ta_admin_cmd_input);
     lv_obj_remove_flag(kb_admin_cmd_input, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(kb_admin_cmd_input);
     if (ta_admin_cmd_input)
         lv_obj_align(ta_admin_cmd_input, LV_ALIGN_BOTTOM_LEFT, 10,
                      -(15 + MECK_KB_HEIGHT));
     if (btn_admin_cmd_send)
         lv_obj_align(btn_admin_cmd_send, LV_ALIGN_BOTTOM_RIGHT, -10,
                      -(15 + MECK_KB_HEIGHT));
+    // Shrink scrollback to make room for keyboard + textarea (same
+    // pattern as meck_relayout_compose in the channel messages screen)
+    if (obj_admin_cmd_scroll)
+        lv_obj_set_height(obj_admin_cmd_scroll,
+                          SCREEN_HEIGHT - 110 - 90 - MECK_KB_HEIGHT);
 }
 
 static void on_admin_cmd_input_defocused(lv_event_t *e) {
@@ -11001,6 +11007,9 @@ static void on_admin_cmd_input_defocused(lv_event_t *e) {
         lv_obj_align(ta_admin_cmd_input, LV_ALIGN_BOTTOM_LEFT, 10, -10);
     if (btn_admin_cmd_send)
         lv_obj_align(btn_admin_cmd_send, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    // Restore scrollback to full height
+    if (obj_admin_cmd_scroll)
+        lv_obj_set_height(obj_admin_cmd_scroll, SCREEN_HEIGHT - 200);
 }
 
 // Keyboard event → handle enter (send) and cancel (close keyboard).

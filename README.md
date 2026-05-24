@@ -26,6 +26,8 @@ with a `meshcore` ESP-IDF component added on top.
 - [Direct Messages](#direct-messages)
 - [Repeater Admin](#repeater-admin)
 - [Room Servers](#room-servers)
+- [Region Scope](#region-scope)
+- [Notification Sounds](#notification-sounds)
 - [Per-Contact Path Editor](#per-contact-path-editor)
 - [Trace Route](#trace-route)
 - [Discover](#discover)
@@ -267,8 +269,9 @@ unread message badges.
 | Tap a channel | Switch to that channel |
 | Tap **Back** | Return to messages |
 
-The Public and #test channels are configured by default. Other
-channels can be added through the channel screen.
+The Public and #test channels are configured by default. New channels
+can be added via the channel picker's Add Channel button (with a
+Confirm button and virtual keyboard) or through Settings → Channels.
 
 ---
 
@@ -363,6 +366,67 @@ Tap a Room-type contact in the contacts list (filter to **Room** to find them qu
 **Persistence:** post history is saved per-room to `/sdcard/meshcore/posts/` and reloaded into PSRAM on boot, so you don't need to re-login to see what's already been received.
 
 **Live re-render:** posts arriving while you're sitting on the room view land in the bubble list without leaving the screen — no need to refresh.
+
+---
+
+## Region Scope
+
+Regions limit how far your flood messages propagate through the mesh. When you set a region, outgoing messages are tagged with a transport code that repeaters use to decide whether to forward them. Messages sent without a region reach all repeaters via the default wildcard, same as always.
+
+Meck-P4 does not pre-set any region on a fresh flash. Region names are determined by your local mesh community. Common patterns follow ISO 3166 country/subdivision codes (e.g. `au` for Australia, `au-nsw` for New South Wales, `gb-eng` for England, `us-ca` for California), but communities may also use custom names for their area. Region names must be lowercase alphanumeric characters and hyphens only, max 30 characters. Check with your local group for the names in use; there is currently no discover-regions feature.
+
+**Device-wide default region:** Set in Settings > Default Region. This applies to all channels and DMs unless a channel has its own override.
+
+**Per-channel region:** In Settings > Channels, tap a channel, then tap Region Scope to edit. This overrides the device default for that specific channel only. Empty = use the device default.
+
+**Repeater region management:** Repeaters running MeshCore v1.10+ support region management via CLI commands. From the Repeater Admin screen, log in and use the Cmd Line to send region commands directly. All remote-capable region commands work through this interface:
+
+| Command | Description |
+| --- | --- |
+| `region put <name> [parent]` | Create a new region |
+| `region remove <name>` | Remove a region |
+| `region allowf <name>` | Allow flooding for a region |
+| `region denyf <name>` | Block flooding for a region |
+| `region get <name>` | Show info for a region |
+| `region home` / `region home <name>` | View or set the repeater's home region |
+| `region default` / `region default <name>` | View or set the repeater's default scope |
+| `region save` | Persist region changes to flash |
+| `region list allowed` / `region list denied` | View regions (firmware 1.12+) |
+| `region load <name> [F]` | Single-line region load |
+
+The interactive multi-line `region load` (without parameters) is not supported because serial CLI commands are not currently available on the P4. Use individual `region put` and `region allowf` commands instead. See the [MeshCore CLI documentation](https://docs.meshcore.io/cli_commands/#region-management-v110) for full details and examples.
+
+---
+
+## Notification Sounds
+
+Meck-P4 supports per-channel notification tones. When a new message arrives on a channel that has a tone assigned and notifications are not muted, the tone plays through the ES8311 audio codec at a fixed 80% volume. The previous volume level is restored automatically when the tone finishes. Tones are skipped if the audio player is already playing music or an audiobook.
+
+### Bundled tones
+
+Seven notification tones are embedded in the firmware and copied to `/sdcard/audio/tones/` on first boot:
+
+- Bell-01, Ding-01, High-Trill-01, Low-Ding-02, Low-Ding-03, Mid-Trill-01, Soft-Notif
+
+Users can add their own MP3 files (44.1 kHz) to the same folder. The tone picker scans the folder each time it opens.
+
+### Setting a tone
+
+Open Settings > Channels, tap a channel, then tap Notification Tone. A scrollable picker lists all available tones plus "None (silent)" at the top. Tapping a tone selects it and plays a preview. The currently assigned tone is highlighted with a cyan border. Tone assignments persist across reboots (stored in `/sdcard/meshcore/notif_sounds.cfg`).
+
+### Notification preferences
+
+Each channel also has a notification preference, editable from the same channel detail screen:
+
+| Preference | Behaviour |
+| --- | --- |
+| **All** (default) | Notification tone plays on every new message |
+| **Mentions** | Tone plays on every new message (mention-only filtering is planned for a future release) |
+| **None** | Channel is muted; no tone plays and no unread badge increments |
+
+### Channels settings sub-screen
+
+The Channels sub-screen (Settings > Channels) provides a centralised view of all your channels. Each row shows the channel name, region scope tag, and notification preference. Tap any channel to open its detail screen where you can edit the region scope, notification preference, notification tone, or delete the channel. An "Add Channel" button at the bottom lets you create new hashtag channels without leaving the settings flow. Channel adding and deleting also remain available in the channel picker for convenience.
 
 ---
 
@@ -486,18 +550,24 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 
 | Setting | Edit Method |
 | --- | --- |
-| **Node Name** | Tap to open virtual keyboard, type, **Enter** to confirm |
-| **Radio Preset** | Tap to open preset picker — 17 community presets covering AU, US, EU, CN regions |
+| **Node Name** | Tap to open virtual keyboard, type, **Confirm** to save |
+| **Frequency** | Tap to open numeric editor, type exact value (e.g. 916.575), **Confirm** to save and apply |
+| **Bandwidth** | Tap to open numeric editor, type value in kHz (e.g. 62.5), **Confirm** to save and apply |
+| **Spreading Factor** | Tap to open numeric editor, type value (5-12), **Confirm** to save and apply |
+| **Coding Rate** | Tap to cycle: 4/5, 4/6, 4/7, 4/8 |
+| **Radio Preset** | Tap to open preset picker — 17 community presets covering AU, US, EU, CN regions. Selecting a preset populates the Frequency, Bandwidth, SF, and CR fields above. Shows "Custom" when the current values don't match any preset. |
 | **TX Power** | Tap to cycle: 10 / 14 / 17 / 20 / 22 dBm |
 | **Path Hash Mode** | Tap to cycle: 1-byte / 2-byte / 3-byte (default 2-byte matches the AU mesh) |
+| **Default Region** | Tap to open text editor, enter region name (e.g. `au-nsw`), **Confirm** to save. Empty = unscoped. See [Region Scope](#region-scope). |
 | **UTC Offset** | Tap to adjust (-12 to +14) |
 | **Home Color** | Tap to cycle: Plain / Multi |
-| **Brightness** | Tap to cycle: eight-step ladder (13% / 25% / 38% / 50% / 63% / 75% / 88% / 100%) — applies live |
+| **Contacts >>** | Opens the Contacts sub-screen (auto-add policies, type toggles) |
+| **Channels >>** | Opens the Channels sub-screen (per-channel region scope, notification preferences, notification tones, add/delete channels) |
+| **Backup to SD** | Force-write of every NVS blob to the SD card. Tap shows OK (count) or Failed |
+| **Brightness** | Slider: 12% to 100% — applies live |
 | **Auto Off** | Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — when idle, the screen tears down the MIPI-DSI bus and CPU usage drops from ~94% to ~57% CPU_MAX. Wake with the **boot button** (touch wake is not yet supported) |
 | **KB Theme** | Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details. |
 | **KB Layout** | Tap to cycle: QWERTY / AZERTY / QWERTZ. Layout switches apply live to every keyboard instance. |
-| **Contacts >>** | Opens the Contacts sub-screen (auto-add policies, type toggles) |
-| **Backup to SD** | Force-write of every NVS blob to the SD card. Tap shows OK (count) or Failed |
 | **Identity** | Read-only display of your public key |
 
 All settings persist via NVS with an SD card mirror.
@@ -590,11 +660,15 @@ Meck-P4 uses **NVS-primary, SD-mirror** persistence:
 
 Meck-P4 boots on **Australia Narrow**: 916.575 MHz / SF7 / BW 62.5 kHz /
 CR 4/8 / sync word 0x1424 / TX 22 dBm. Change these via Settings on the
-device, or edit the defaults in `components/meshcore/variant.h` before
-building if you want a different region's defaults baked in.
+device (either by selecting a radio preset or by editing Frequency,
+Bandwidth, Spreading Factor, and Coding Rate individually), or edit the
+defaults in `components/meshcore/variant.h` before building if you want a
+different region's defaults baked in.
 
 The radio preset picker covers 17 presets across AU, US, EU, and CN
-regions.
+regions. Selecting a preset populates all four radio parameter fields;
+you can then customise individual values (e.g. changing only the Coding
+Rate) and the preset row will show "Custom".
 
 ---
 
@@ -619,6 +693,8 @@ Files of particular note:
 - `MeckDataStore.h` — NVS and SD persistence
 - `MeckAudio.cpp` / `MeckAudio.h` — audio backend wrapping `chmorgan/esp-audio-player` for WAV + MP3 playback
 - `MeckAudioUI.cpp` / `MeckAudioUI.h` — audio browser and Now Playing screens
+- `NotifSounds.h` — per-channel notification tone config, SD scanning, and playback request queue
+- `BundledSounds.h` — 7 default notification MP3s embedded as byte arrays, copied to SD on first boot
 - `es8311.cpp` — codec write-fn / clock reconfig / volume control routed through LilyGo's `Cpp_Bus_Driver::Es8311`
 - `meck_app.cpp` — lifecycle: NVS init, identity, prefs, mesh task spawn
 - `target.cpp` — radio attach, deferred-config queue, battery accessors,
@@ -707,6 +783,10 @@ no particular timeframes attached.
 - [x] **Map screen** — slippy-tile viewer over `/sdcard/tiles/{z}/{x}/{y}.png` with pan, zoom, GPS dot, contact markers, filter modal
 - [x] **Config export to SD** — Settings → Export Config writes a MeshCore-app-compatible JSON file with selectable sections
 - [x] **Debug logs to SD** — Settings → Debug Logs → Start redirects printf to a per-session log file
+- [x] **Custom radio parameters** — editable Frequency, Bandwidth, Spreading Factor (text edit with confirm button) and Coding Rate (tap to cycle) in Settings. Radio Preset row shows "Custom" when values diverge from any preset.
+- [x] **Region scope** — device-wide default region in Settings, per-channel scope via Settings → Channels. Scope key derived via SHA-256, matching upstream Meck v1.7+ / MeshCore v1.15+ protocol. Repeater region management supported via CLI commands in the Repeater Admin screen.
+- [x] **Channels settings sub-screen** — Settings → Channels with per-channel region scope, notification preferences (All / Mentions / None), notification tone picker, add and delete channels
+- [x] **Notification sounds** — 7 bundled MP3 tones copied to SD on first boot, per-channel tone assignment via picker, automatic playback at 80% volume on new messages (skips if audio player is active), tone config persisted to SD
 
 **Pending:**
 
@@ -726,7 +806,6 @@ no particular timeframes attached.
       dynamic frequency scaling instead.
 - [ ] Touch wake from screen-off — currently boot-button only
 - [ ] OTA firmware updates over WiFi via the ESP32-C6
-- [ ] Region scope (MeshCore v1.15+ compatibility)
 - [ ] GPS cold-boot acquisition speed-up — EASY (predicted ephemeris)
       doesn't appear to be persisting across reboots as intended;
       targeted for v0.3.6
