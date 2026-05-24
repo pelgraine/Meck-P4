@@ -66,8 +66,13 @@ struct P4ChannelRecord {
     char name[P4_CHANNEL_NAME_MAX];
     uint8_t secret[P4_CHANNEL_SECRET_LEN];
     uint8_t active;     // 1 = in use, 0 = empty slot
-    uint8_t reserved[3]; // pad to 68 bytes
+    uint8_t reserved[3]; // pad (kept for layout compatibility with v1 records)
+    char scope_name[31]; // Region scope name (v2+), empty = use device default
 };
+
+// Size of a v1 channel record (before scope_name was added), used by
+// loadChannels to migrate old NVS/SD data.
+#define P4_CHANNEL_RECORD_V1_SIZE 68
 
 // Binary header for channels file (NVS blob and SD backup)
 struct P4ChannelsHeader {
@@ -125,6 +130,20 @@ struct P4NodePrefs {
                                   // bit 7 set = user has explicitly chosen
                                   // bits 0..3 = chat | repeater | room | sensor
 
+    // Region scope (MeshCore v1.15+ compatibility). Device-wide default for
+    // flood messages. Empty = unscoped (legacy flood, reaches all repeaters).
+    // Per-channel scope in ChannelDetails.scope_name takes priority when set.
+    // Appending here is safe — loadPrefs memsets to zero and tolerates short
+    // reads, so existing NVS blobs come up unscoped (empty name, zero key).
+    char default_scope_name[31];     // e.g. "au-nsw", empty = unscoped
+    uint8_t default_scope_key[16];   // TransportKey derived from "#" + name
+
+    // Per-channel notification preferences. Index 0..MAX_GROUP_CHANNELS-1
+    // for group channels, index MAX_GROUP_CHANNELS for DMs. Values:
+    // 0 = All (default), 1 = Mentions only, 2 = None (muted).
+    // Appending here is safe — loadPrefs tolerates short reads.
+    uint8_t channel_notif[21];       // 20 group channels + 1 DM slot
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -150,6 +169,9 @@ struct P4NodePrefs {
         map_last_lon_e7 = 0;    // not set
         map_last_zoom = 0;      // not set -> mid of detected range
         map_filter_mask = 0;    // not set -> repeaters only
+        memset(default_scope_name, 0, sizeof(default_scope_name));
+        memset(default_scope_key, 0, sizeof(default_scope_key));
+        memset(channel_notif, 0, sizeof(channel_notif));  // 0 = NOTIF_ALL
     }
 };
 
@@ -521,18 +543,33 @@ public:
 
         // Parse header
         P4ChannelsHeader* hdr = (P4ChannelsHeader*)blob;
-        if (memcmp(hdr->magic, "MCH", 3) != 0 || hdr->version != 1) {
+        if (memcmp(hdr->magic, "MCH", 3) != 0 || (hdr->version != 1 && hdr->version != 2)) {
             ESP_LOGW(TAG, "loadChannels: bad header magic/version");
             free(blob);
             return false;
         }
 
-        // Copy channel records
+        // Copy channel records — v1 records are 68 bytes (no scope_name),
+        // v2 records include scope_name. Migrate v1 on the fly.
         int count = hdr->count;
         if (count > maxChannels) count = maxChannels;
 
-        P4ChannelRecord* records = (P4ChannelRecord*)(blob + sizeof(P4ChannelsHeader));
-        memcpy(channels, records, sizeof(P4ChannelRecord) * count);
+        if (hdr->version == 1) {
+            // v1: each record is P4_CHANNEL_RECORD_V1_SIZE bytes, no scope_name
+            const uint8_t* src = blob + sizeof(P4ChannelsHeader);
+            for (int i = 0; i < count; i++) {
+                memcpy(channels[i].name, src, P4_CHANNEL_NAME_MAX);
+                memcpy(channels[i].secret, src + P4_CHANNEL_NAME_MAX, P4_CHANNEL_SECRET_LEN);
+                channels[i].active = src[P4_CHANNEL_NAME_MAX + P4_CHANNEL_SECRET_LEN];
+                memset(channels[i].scope_name, 0, sizeof(channels[i].scope_name));
+                src += P4_CHANNEL_RECORD_V1_SIZE;
+            }
+            ESP_LOGI(TAG, "loadChannels: migrated %d v1 channels", count);
+        } else {
+            // v2: records include scope_name, same layout as current struct
+            P4ChannelRecord* records = (P4ChannelRecord*)(blob + sizeof(P4ChannelsHeader));
+            memcpy(channels, records, sizeof(P4ChannelRecord) * count);
+        }
         outCount = count;
 
         ESP_LOGI(TAG, "loadChannels: %d channels loaded", count);
@@ -557,7 +594,7 @@ public:
         P4ChannelsHeader* hdr = (P4ChannelsHeader*)blob;
         memcpy(hdr->magic, "MCH", 3);
         hdr->magic[3] = 0;
-        hdr->version = 1;
+        hdr->version = 2;
         hdr->count = (uint8_t)activeCount;
         hdr->max_channels = (uint8_t)maxChannels;
         hdr->reserved = 0;

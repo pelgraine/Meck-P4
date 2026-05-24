@@ -1438,6 +1438,8 @@ public:
                 strncpy(records[i].name, ch.name, P4_CHANNEL_NAME_MAX - 1);
                 memcpy(records[i].secret, ch.channel.secret, P4_CHANNEL_SECRET_LEN);
                 records[i].active = 1;
+                strncpy(records[i].scope_name, ch.scope_name, sizeof(records[i].scope_name) - 1);
+                records[i].scope_name[sizeof(records[i].scope_name) - 1] = '\0';
             }
         }
         _store->saveChannels(records, MAX_GROUP_CHANNELS);
@@ -1462,6 +1464,8 @@ public:
                 memset(&ch, 0, sizeof(ch));
                 strncpy(ch.name, records[i].name, sizeof(ch.name) - 1);
                 memcpy(ch.channel.secret, records[i].secret, 32);
+                strncpy(ch.scope_name, records[i].scope_name, sizeof(ch.scope_name) - 1);
+                ch.scope_name[sizeof(ch.scope_name) - 1] = '\0';
                 setChannel(i, ch);
                 loaded++;
             }
@@ -1690,6 +1694,46 @@ public:
         return true;
     }
     P4DataStore* getDataStore() { return _store; }
+
+    // ---- Region scope helpers ----
+
+    // Derive a 16-byte scope key from a region name (e.g. "au-nsw").
+    // Prepends '#' and takes SHA-256, mirroring upstream MyMesh::deriveScopeKey
+    // / TransportKeyStore::getAutoKeyFor. Writes the first 16 bytes of the
+    // hash into keyOut. Returns true if name is non-empty and key was derived.
+    //
+    // NOTE: sendFloodScoped overrides (which attach transport codes to
+    // outgoing flood packets using this key) are deferred until
+    // TransportKeyStore.h is added to the P4 build's meshcore_src/helpers/.
+    // Until then, scope names are stored and editable from the UI, and
+    // companion apps can read them, but outgoing floods are unscoped.
+    bool deriveScopeKey(const char* scopeName, uint8_t keyOut[16]) {
+        if (!scopeName || scopeName[0] == '\0') {
+            memset(keyOut, 0, 16);
+            return false;
+        }
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "#%s", scopeName);
+        uint8_t hash[32];
+        mbedtls_sha256((const uint8_t*)tmp, strlen(tmp), hash, 0);
+        memcpy(keyOut, hash, 16);
+        return true;
+    }
+
+    // Look up per-channel scope name by GroupChannel secret match.
+    // Returns nullptr if no scope set for that channel.
+    const char* getChannelScopeName(const mesh::GroupChannel& channel) {
+        ChannelDetails ch;
+        for (uint8_t i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            if (getChannel(i, ch) && ch.name[0] != '\0') {
+                if (memcmp(ch.channel.secret, channel.secret,
+                           sizeof(channel.secret)) == 0) {
+                    return ch.scope_name;
+                }
+            }
+        }
+        return nullptr;
+    }
 
     // ---- Thread-safe accessors for LVGL UI ----
 

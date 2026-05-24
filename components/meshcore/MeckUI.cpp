@@ -212,7 +212,7 @@ static void meck_font_restyle_all() {
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3.5.1"
+#define MECK_FIRMWARE_VERSION "0.3.6"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -346,8 +346,10 @@ static lv_obj_t *lbl_home_audio[MECK_HOME_PAGE_COUNT]   = {};
 // Channel Picker, Messages, Contacts, Contact Detail, Discover); slot
 // 8..9 for the two semi-transparent overlay modals (name-edit, channel-add).
 // Slot 10 = Trace Path screen, slot 11 = Path Editor screen.
+// Slots 12-13 = Channels settings + Channel detail screens.
+// Slots 15-17 = Admin sub-screens (placeholder, fw info, neighbours).
 // Updated by the same timer block that drives the home page arrays.
-#define MECK_SCREEN_HOST_COUNT 12
+#define MECK_SCREEN_HOST_COUNT 20
 static lv_obj_t *lbl_screen_clock[MECK_SCREEN_HOST_COUNT]   = {};
 static lv_obj_t *lbl_screen_battery[MECK_SCREEN_HOST_COUNT] = {};
 static lv_obj_t *lbl_screen_audio[MECK_SCREEN_HOST_COUNT]   = {};
@@ -370,6 +372,10 @@ static int g_last_noise_floor_displayed = INT_MIN;
 // Settings screen
 static lv_obj_t *scr_settings      = NULL;
 static lv_obj_t *lbl_set_name      = NULL;
+static lv_obj_t *lbl_set_freq      = NULL;
+static lv_obj_t *lbl_set_bw        = NULL;
+static lv_obj_t *lbl_set_sf        = NULL;
+static lv_obj_t *lbl_set_cr        = NULL;
 static lv_obj_t *lbl_set_radio     = NULL;
 static lv_obj_t *lbl_set_txpower   = NULL;
 static lv_obj_t *lbl_set_utc       = NULL;
@@ -404,6 +410,41 @@ static lv_obj_t *lbl_set_identity  = NULL;
 static lv_obj_t *obj_name_edit_panel = NULL;
 static lv_obj_t *ta_settings_name    = NULL;
 static lv_obj_t *kb_settings         = NULL;
+
+// Numeric edit overlay (shared by Frequency and Spreading Factor text editors)
+static lv_obj_t *obj_num_edit_panel = NULL;
+static lv_obj_t *ta_num_edit        = NULL;
+static lv_obj_t *kb_num_edit        = NULL;
+static int        g_num_edit_field  = 0;  // 0 = freq, 1 = SF, 2 = BW
+
+// Default Region edit overlay (text editor for region scope name)
+static lv_obj_t *obj_region_edit_panel = NULL;
+static lv_obj_t *ta_region_edit        = NULL;
+static lv_obj_t *kb_region_edit        = NULL;
+static lv_obj_t *lbl_set_region        = NULL;
+
+// Channels settings sub-screen (Settings > Channels)
+static lv_obj_t *scr_settings_channels   = NULL;
+static lv_obj_t *obj_ch_settings_scroll  = NULL;
+
+// Channel detail sub-screen (Settings > Channels > [channel])
+static lv_obj_t *scr_channel_detail      = NULL;
+static lv_obj_t *lbl_ch_detail_name      = NULL;
+static lv_obj_t *lbl_ch_detail_scope     = NULL;
+static lv_obj_t *lbl_ch_detail_notif     = NULL;
+static lv_obj_t *lbl_ch_detail_delete    = NULL;
+static int        g_detail_channel_idx   = -1;
+static uint32_t   g_delete_confirm_until = 0;   // millis deadline for tap-again
+
+// Channel scope edit overlay (on channel detail screen)
+static lv_obj_t *obj_ch_scope_edit_panel = NULL;
+static lv_obj_t *ta_ch_scope_edit        = NULL;
+static lv_obj_t *kb_ch_scope_edit        = NULL;
+
+// Channel add overlay (on channels settings sub-screen)
+static lv_obj_t *obj_ch_settings_add_panel = NULL;
+static lv_obj_t *ta_ch_settings_add        = NULL;
+static lv_obj_t *kb_ch_settings_add        = NULL;
 
 // Radio preset picker
 static lv_obj_t *scr_radio_picker  = NULL;
@@ -913,6 +954,32 @@ static void on_settings_kb_event(lv_event_t *e);
 static void on_settings_radio_tap(lv_event_t *e);
 static void on_settings_txpower_tap(lv_event_t *e);
 static void on_settings_utc_tap(lv_event_t *e);
+static void on_settings_freq_tap(lv_event_t *e);
+static void on_settings_bw_tap(lv_event_t *e);
+static void on_settings_sf_tap(lv_event_t *e);
+static void on_settings_cr_tap(lv_event_t *e);
+static void on_num_edit_save(lv_event_t *e);
+static void on_num_edit_cancel(lv_event_t *e);
+static void on_num_edit_kb_event(lv_event_t *e);
+static void on_settings_region_tap(lv_event_t *e);
+static void on_region_edit_save(lv_event_t *e);
+static void on_region_edit_cancel(lv_event_t *e);
+static void on_region_edit_kb_event(lv_event_t *e);
+static void goto_settings_channels(lv_event_t *e);
+static void on_ch_settings_row_tap(lv_event_t *e);
+static void on_ch_settings_add_tap(lv_event_t *e);
+static void on_ch_detail_scope_tap(lv_event_t *e);
+static void on_ch_detail_notif_tap(lv_event_t *e);
+static void on_ch_detail_delete_tap(lv_event_t *e);
+static void on_ch_scope_edit_save(lv_event_t *e);
+static void on_ch_scope_edit_cancel(lv_event_t *e);
+static void on_ch_scope_edit_kb_event(lv_event_t *e);
+static void on_ch_settings_add_save(lv_event_t *e);
+static void on_ch_settings_add_kb_event(lv_event_t *e);
+static void refresh_channels_settings_list();
+static void refresh_channel_detail_labels();
+static void create_settings_channels_screen();
+static void create_channel_detail_screen();
 static void on_radio_preset_select(lv_event_t *e);
 
 static void on_send_clicked(lv_event_t *e);
@@ -1816,6 +1883,10 @@ static void meck_kb_restyle_all() {
     if (kb_ch_add)         meck_style_keyboard(kb_ch_add);
     if (kb_admin_password) meck_style_keyboard(kb_admin_password);
     if (kb_admin_cmd_input) meck_style_keyboard(kb_admin_cmd_input);
+    if (kb_num_edit)        meck_style_keyboard(kb_num_edit);
+    if (kb_region_edit)     meck_style_keyboard(kb_region_edit);
+    if (kb_ch_scope_edit)   meck_style_keyboard(kb_ch_scope_edit);
+    if (kb_ch_settings_add) meck_style_keyboard(kb_ch_settings_add);
 }
 
 // ============================================================================
@@ -1830,6 +1901,34 @@ static void settings_update_labels() {
 
     if (lbl_set_name) {
         lv_label_set_text(lbl_set_name, prefs->node_name);
+    }
+    if (lbl_set_freq) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.3f MHz", (double)prefs->freq);
+        lv_label_set_text(lbl_set_freq, buf);
+    }
+    if (lbl_set_bw) {
+        char buf[16];
+        if (prefs->bw == (float)(int)prefs->bw) {
+            snprintf(buf, sizeof(buf), "%.0f kHz", (double)prefs->bw);
+        } else {
+            snprintf(buf, sizeof(buf), "%.2f kHz", (double)prefs->bw);
+        }
+        lv_label_set_text(lbl_set_bw, buf);
+    }
+    if (lbl_set_sf) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "SF %d", (int)prefs->sf);
+        lv_label_set_text(lbl_set_sf, buf);
+    }
+    if (lbl_set_cr) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "4/%d", (int)prefs->cr);
+        lv_label_set_text(lbl_set_cr, buf);
+    }
+    if (lbl_set_region) {
+        lv_label_set_text(lbl_set_region,
+            prefs->default_scope_name[0] ? prefs->default_scope_name : "(none)");
     }
     if (lbl_set_radio) {
         // Find matching preset name (or "Custom")
@@ -3026,6 +3125,409 @@ static void on_settings_txpower_tap(lv_event_t *e) {
     settings_update_labels();
     update_radio_detail_label();
 }
+
+// ---- Frequency text editor ----
+
+static void on_settings_freq_tap(lv_event_t *e) {
+    if (!obj_num_edit_panel || !ta_num_edit) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    g_num_edit_field = 0;
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.3f", (double)prefs->freq);
+    lv_textarea_set_text(ta_num_edit, buf);
+    lv_obj_remove_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    if (kb_num_edit) lv_keyboard_set_textarea(kb_num_edit, ta_num_edit);
+}
+
+// ---- Spreading Factor text editor ----
+
+static void on_settings_sf_tap(lv_event_t *e) {
+    if (!obj_num_edit_panel || !ta_num_edit) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    g_num_edit_field = 1;
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%d", (int)prefs->sf);
+    lv_textarea_set_text(ta_num_edit, buf);
+    lv_obj_remove_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    if (kb_num_edit) lv_keyboard_set_textarea(kb_num_edit, ta_num_edit);
+}
+
+static void on_num_edit_save(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!ta_num_edit || !mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    const char* text = lv_textarea_get_text(ta_num_edit);
+    if (!text || !text[0]) {
+        if (obj_num_edit_panel) lv_obj_add_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if (g_num_edit_field == 0) {
+        // Frequency
+        float f = strtof(text, nullptr);
+        if (f >= 400.0f && f <= 2500.0f) {
+            prefs->freq = f;
+            mesh->getDataStore()->savePrefs(*prefs);
+            radio_request_reconfig(prefs->freq, prefs->bw, prefs->sf, prefs->cr, prefs->tx_power_dbm);
+            printf("Settings: Freq = %.3f MHz\n", (double)f);
+            settings_update_labels();
+            update_radio_detail_label();
+        }
+    } else if (g_num_edit_field == 1) {
+        // Spreading Factor
+        int sf = atoi(text);
+        if (sf >= 5 && sf <= 12) {
+            prefs->sf = (uint8_t)sf;
+            mesh->getDataStore()->savePrefs(*prefs);
+            radio_request_reconfig(prefs->freq, prefs->bw, prefs->sf, prefs->cr, prefs->tx_power_dbm);
+            printf("Settings: SF = %d\n", sf);
+            settings_update_labels();
+            update_radio_detail_label();
+        }
+    } else if (g_num_edit_field == 2) {
+        // Bandwidth
+        float bw = strtof(text, nullptr);
+        if (bw >= 7.8f && bw <= 500.0f) {
+            prefs->bw = bw;
+            mesh->getDataStore()->savePrefs(*prefs);
+            radio_request_reconfig(prefs->freq, prefs->bw, prefs->sf, prefs->cr, prefs->tx_power_dbm);
+            printf("Settings: BW = %.2f kHz\n", (double)bw);
+            settings_update_labels();
+            update_radio_detail_label();
+        }
+    }
+    if (obj_num_edit_panel) lv_obj_add_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_num_edit_cancel(lv_event_t *e) {
+    if (obj_num_edit_panel) lv_obj_add_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_num_edit_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)       on_num_edit_save(NULL);
+    else if (code == LV_EVENT_CANCEL) on_num_edit_cancel(NULL);
+}
+
+// ---- Bandwidth text editor ----
+
+static void on_settings_bw_tap(lv_event_t *e) {
+    if (!obj_num_edit_panel || !ta_num_edit) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    g_num_edit_field = 2;
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.2f", (double)prefs->bw);
+    lv_textarea_set_text(ta_num_edit, buf);
+    lv_obj_remove_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    if (kb_num_edit) lv_keyboard_set_textarea(kb_num_edit, ta_num_edit);
+}
+
+// ---- Coding Rate: tap to cycle (5-8) ----
+
+static void on_settings_cr_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->cr = (prefs->cr >= 8) ? 5 : prefs->cr + 1;
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    radio_request_reconfig(prefs->freq, prefs->bw, prefs->sf, prefs->cr, prefs->tx_power_dbm);
+
+    printf("Settings: CR = 4/%d\n", (int)prefs->cr);
+    settings_update_labels();
+    update_radio_detail_label();
+}
+
+// ---- Default Region text editor ----
+
+static void on_settings_region_tap(lv_event_t *e) {
+    if (!obj_region_edit_panel || !ta_region_edit) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    lv_textarea_set_text(ta_region_edit, prefs->default_scope_name);
+    lv_obj_remove_flag(obj_region_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    if (kb_region_edit) lv_keyboard_set_textarea(kb_region_edit, ta_region_edit);
+}
+
+static void on_region_edit_save(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!ta_region_edit || !mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    const char* text = lv_textarea_get_text(ta_region_edit);
+
+    // Copy into prefs (empty = unscoped)
+    if (text && text[0]) {
+        strncpy(prefs->default_scope_name, text, sizeof(prefs->default_scope_name) - 1);
+        prefs->default_scope_name[sizeof(prefs->default_scope_name) - 1] = '\0';
+        // Derive the transport key via mesh helper
+        mesh->deriveScopeKey(text, prefs->default_scope_key);
+    } else {
+        memset(prefs->default_scope_name, 0, sizeof(prefs->default_scope_name));
+        memset(prefs->default_scope_key, 0, sizeof(prefs->default_scope_key));
+    }
+    mesh->getDataStore()->savePrefs(*prefs);
+    printf("Settings: Default region = '%s'\n",
+           prefs->default_scope_name[0] ? prefs->default_scope_name : "(unscoped)");
+    settings_update_labels();
+    if (obj_region_edit_panel) lv_obj_add_flag(obj_region_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_region_edit_cancel(lv_event_t *e) {
+    if (obj_region_edit_panel) lv_obj_add_flag(obj_region_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_region_edit_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)       on_region_edit_save(NULL);
+    else if (code == LV_EVENT_CANCEL) on_region_edit_cancel(NULL);
+}
+
+// ============================================================================
+// Channels settings sub-screen handlers
+// ============================================================================
+
+static const char* notif_label(uint8_t val) {
+    switch (val) {
+        case 1:  return "Mentions";
+        case 2:  return "None";
+        default: return "All";
+    }
+}
+
+static void goto_settings_channels(lv_event_t *e) {
+    refresh_channels_settings_list();
+    if (scr_settings_channels) lv_screen_load(scr_settings_channels);
+}
+
+static void on_ch_settings_row_tap(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    g_detail_channel_idx = idx;
+    g_delete_confirm_until = 0;
+    refresh_channel_detail_labels();
+    if (scr_channel_detail) lv_screen_load(scr_channel_detail);
+}
+
+static void on_ch_settings_add_tap(lv_event_t *e) {
+    if (obj_ch_settings_add_panel && ta_ch_settings_add) {
+        lv_textarea_set_text(ta_ch_settings_add, "#");
+        lv_obj_remove_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
+        if (kb_ch_settings_add) lv_keyboard_set_textarea(kb_ch_settings_add, ta_ch_settings_add);
+    }
+}
+
+static void on_ch_settings_add_save(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!ta_ch_settings_add || !mesh) return;
+    const char* text = lv_textarea_get_text(ta_ch_settings_add);
+    if (!text || !text[0]) return;
+
+    char name[32] = {};
+    if (text[0] == '#') {
+        strncpy(name, text, sizeof(name) - 1);
+    } else {
+        name[0] = '#';
+        strncpy(name + 1, text, sizeof(name) - 2);
+    }
+    mesh->addHashChannel(name);
+    printf("Channels (settings): added '%s'\n", name);
+    if (obj_ch_settings_add_panel) lv_obj_add_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
+    refresh_channels_settings_list();
+    // Also refresh the channel picker if it exists
+    refresh_channel_picker();
+}
+
+static void on_ch_settings_add_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)  on_ch_settings_add_save(NULL);
+    else if (code == LV_EVENT_CANCEL) {
+        if (obj_ch_settings_add_panel)
+            lv_obj_add_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// ---- Channel detail handlers ----
+
+static void refresh_channel_detail_labels() {
+    Meck* mesh = meck_get_instance();
+    if (!mesh || g_detail_channel_idx < 0) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    ChannelDetails ch;
+    if (!mesh->getChannel(g_detail_channel_idx, ch)) return;
+
+    if (lbl_ch_detail_name) lv_label_set_text(lbl_ch_detail_name, ch.name);
+    if (lbl_ch_detail_scope)
+        lv_label_set_text(lbl_ch_detail_scope,
+            ch.scope_name[0] ? ch.scope_name : "(device default)");
+    if (lbl_ch_detail_notif)
+        lv_label_set_text(lbl_ch_detail_notif,
+            notif_label(prefs->channel_notif[g_detail_channel_idx]));
+    if (lbl_ch_detail_delete)
+        lv_label_set_text(lbl_ch_detail_delete, "Delete Channel");
+}
+
+static void on_ch_detail_scope_tap(lv_event_t *e) {
+    if (!obj_ch_scope_edit_panel || !ta_ch_scope_edit) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh || g_detail_channel_idx < 0) return;
+    ChannelDetails ch;
+    if (!mesh->getChannel(g_detail_channel_idx, ch)) return;
+    lv_textarea_set_text(ta_ch_scope_edit, ch.scope_name);
+    lv_obj_remove_flag(obj_ch_scope_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    if (kb_ch_scope_edit) lv_keyboard_set_textarea(kb_ch_scope_edit, ta_ch_scope_edit);
+}
+
+static void on_ch_scope_edit_save(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!ta_ch_scope_edit || !mesh || g_detail_channel_idx < 0) return;
+    ChannelDetails ch;
+    if (!mesh->getChannel(g_detail_channel_idx, ch)) return;
+    const char* text = lv_textarea_get_text(ta_ch_scope_edit);
+    if (text) {
+        strncpy(ch.scope_name, text, sizeof(ch.scope_name) - 1);
+        ch.scope_name[sizeof(ch.scope_name) - 1] = '\0';
+    } else {
+        memset(ch.scope_name, 0, sizeof(ch.scope_name));
+    }
+    mesh->setChannel(g_detail_channel_idx, ch);
+    mesh->saveChannels();
+    printf("Channel %d scope set to '%s'\n", g_detail_channel_idx,
+           ch.scope_name[0] ? ch.scope_name : "(device default)");
+    refresh_channel_detail_labels();
+    if (obj_ch_scope_edit_panel) lv_obj_add_flag(obj_ch_scope_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_ch_scope_edit_cancel(lv_event_t *e) {
+    if (obj_ch_scope_edit_panel) lv_obj_add_flag(obj_ch_scope_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_ch_scope_edit_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)       on_ch_scope_edit_save(NULL);
+    else if (code == LV_EVENT_CANCEL) on_ch_scope_edit_cancel(NULL);
+}
+
+static void on_ch_detail_notif_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh || g_detail_channel_idx < 0) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    prefs->channel_notif[g_detail_channel_idx] =
+        (prefs->channel_notif[g_detail_channel_idx] + 1) % 3;
+    mesh->getDataStore()->savePrefs(*prefs);
+    printf("Channel %d notif = %s\n", g_detail_channel_idx,
+           notif_label(prefs->channel_notif[g_detail_channel_idx]));
+    refresh_channel_detail_labels();
+}
+
+static void on_ch_detail_delete_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh || g_detail_channel_idx < 0) return;
+
+    // Don't allow deleting the primary channel (index 0)
+    if (g_detail_channel_idx == 0) return;
+
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if (g_delete_confirm_until > 0 && now < g_delete_confirm_until) {
+        // Confirmed — delete the channel
+        ChannelDetails empty;
+        memset(&empty, 0, sizeof(empty));
+        mesh->setChannel(g_detail_channel_idx, empty);
+        mesh->saveChannels();
+        printf("Channel %d deleted\n", g_detail_channel_idx);
+        // Navigate back to channels list
+        refresh_channels_settings_list();
+        refresh_channel_picker();
+        if (scr_settings_channels) lv_screen_load(scr_settings_channels);
+    } else {
+        // First tap — show confirmation prompt
+        g_delete_confirm_until = now + 3000;
+        if (lbl_ch_detail_delete)
+            lv_label_set_text(lbl_ch_detail_delete, "Tap again to confirm");
+    }
+}
+
+// ---- Channels settings list rebuild ----
+
+static void refresh_channels_settings_list() {
+    Meck* mesh = meck_get_instance();
+    if (!obj_ch_settings_scroll || !mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+
+    lv_obj_clean(obj_ch_settings_scroll);
+
+    int y = 5;
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+        ChannelDetails ch;
+        if (!mesh->getChannel(i, ch) || ch.name[0] == '\0') continue;
+
+        lv_obj_t *btn = lv_button_create(obj_ch_settings_scroll);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 40, 70);
+        lv_obj_set_pos(btn, 10, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
+        lv_obj_add_event_cb(btn, on_ch_settings_row_tap, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)i);
+
+        lv_obj_t *name_lbl = lv_label_create(btn);
+        lv_label_set_text(name_lbl, ch.name);
+        lv_obj_set_style_text_color(name_lbl, lv_color_white(), 0);
+        meck_set_font(name_lbl, &meck_montserrat_18, 0);
+        lv_obj_align(name_lbl, LV_ALIGN_LEFT_MID, 10, -10);
+
+        // Scope + notification tag line
+        char tag[64];
+        const char* scope = ch.scope_name[0] ? ch.scope_name : "*";
+        const char* notif = prefs ? notif_label(prefs->channel_notif[i]) : "All";
+        snprintf(tag, sizeof(tag), "[%s]  Notif: %s", scope, notif);
+        lv_obj_t *tag_lbl = lv_label_create(btn);
+        lv_label_set_text(tag_lbl, tag);
+        lv_obj_set_style_text_color(tag_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(tag_lbl, &meck_montserrat_14, 0);
+        lv_obj_align(tag_lbl, LV_ALIGN_LEFT_MID, 10, 12);
+
+        lv_obj_t *arrow = lv_label_create(btn);
+        lv_label_set_text(arrow, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(arrow, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(arrow, &meck_montserrat_16, 0);
+        lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -10, 0);
+
+        y += 80;
+    }
+
+    // "Add Channel" button at the bottom
+    lv_obj_t *add_btn = lv_button_create(obj_ch_settings_scroll);
+    lv_obj_set_size(add_btn, SCREEN_WIDTH - 40, 55);
+    lv_obj_set_pos(add_btn, 10, y);
+    lv_obj_set_style_bg_color(add_btn, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(add_btn, 10, 0);
+    lv_obj_set_style_border_width(add_btn, 1, 0);
+    lv_obj_set_style_border_color(add_btn, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_add_event_cb(add_btn, on_ch_settings_add_tap, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *add_lbl = lv_label_create(add_btn);
+    lv_label_set_text(add_lbl, LV_SYMBOL_PLUS " Add Channel");
+    lv_obj_set_style_text_color(add_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(add_lbl, &meck_montserrat_18, 0);
+    lv_obj_center(add_lbl);
+}
+
 static void on_settings_pathhash_tap(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!mesh) return;
@@ -4944,11 +5446,21 @@ static void create_settings_screen() {
     int y = 5;
     create_settings_row(scroll, "Node Name",                 &lbl_set_name,    on_settings_name_tap,    y);
     y += 65;
+    create_settings_row(scroll, "Frequency (tap to edit)",   &lbl_set_freq,    on_settings_freq_tap,    y);
+    y += 65;
+    create_settings_row(scroll, "Bandwidth (tap to edit)",   &lbl_set_bw,      on_settings_bw_tap,      y);
+    y += 65;
+    create_settings_row(scroll, "Spreading Factor (tap to edit)", &lbl_set_sf, on_settings_sf_tap,      y);
+    y += 65;
+    create_settings_row(scroll, "Coding Rate (tap to cycle)",&lbl_set_cr,      on_settings_cr_tap,      y);
+    y += 65;
     create_settings_row(scroll, "Radio Preset",              &lbl_set_radio,   on_settings_radio_tap,   y);
     y += 65;
     create_settings_row(scroll, "TX Power (tap to cycle)",   &lbl_set_txpower, on_settings_txpower_tap, y);
     y += 65;
     create_settings_row(scroll, "Path Hash (tap to cycle)", &lbl_set_pathhash, on_settings_pathhash_tap, y);
+    y += 65;
+    create_settings_row(scroll, "Default Region (tap to edit)", &lbl_set_region, on_settings_region_tap, y);
     y += 65;
     create_settings_row(scroll, "UTC Offset (tap to cycle)", &lbl_set_utc,     on_settings_utc_tap,     y);
     y += 65;
@@ -4971,6 +5483,18 @@ static void create_settings_screen() {
     if (contacts_value_lbl) {
         lv_label_set_text(contacts_value_lbl, LV_SYMBOL_RIGHT);
         lv_obj_set_style_text_color(contacts_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
+    // Channels navigation row → opens the Channels sub-screen for
+    // per-channel region scope and notification preferences.
+    lv_obj_t *channels_value_lbl = NULL;
+    create_settings_row(scroll, "Channels",
+        &channels_value_lbl, goto_settings_channels, y);
+    if (channels_value_lbl) {
+        lv_label_set_text(channels_value_lbl, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(channels_value_lbl,
             lv_palette_main(LV_PALETTE_GREY), 0);
     }
     y += 65;
@@ -5180,6 +5704,22 @@ static void create_settings_screen() {
     lv_obj_set_style_text_color(ta_settings_name, lv_color_white(), 0);
     meck_set_font(ta_settings_name, &meck_montserrat_18, 0);
     lv_obj_set_style_border_color(ta_settings_name, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_border_color(ta_settings_name, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_settings_name, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_settings_name,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_settings_name,   LV_OPA_COVER,          LV_PART_CURSOR);
+
+    lv_obj_t *btn_name_confirm = lv_button_create(obj_name_edit_panel);
+    lv_obj_set_size(btn_name_confirm, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_name_confirm, LV_ALIGN_TOP_MID, 0, 165);
+    lv_obj_set_style_bg_color(btn_name_confirm, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_name_confirm, 8, 0);
+    lv_obj_t *name_confirm_lbl = lv_label_create(btn_name_confirm);
+    lv_label_set_text(name_confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(name_confirm_lbl, lv_color_black(), 0);
+    meck_set_font(name_confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(name_confirm_lbl);
+    lv_obj_add_event_cb(btn_name_confirm, on_settings_name_save, LV_EVENT_CLICKED, NULL);
 
     kb_settings = lv_keyboard_create(obj_name_edit_panel);
     meck_style_keyboard(kb_settings);
@@ -5187,6 +5727,112 @@ static void create_settings_screen() {
     lv_obj_add_event_cb(kb_settings, on_settings_kb_event, LV_EVENT_READY,  NULL);
     lv_obj_add_event_cb(kb_settings, on_settings_kb_event, LV_EVENT_CANCEL, NULL);
     lv_obj_add_event_cb(kb_settings, on_kb_long_press,
+                        LV_EVENT_LONG_PRESSED, NULL);
+
+    // ---- Numeric edit overlay (Frequency / Spreading Factor) ----
+    obj_num_edit_panel = lv_obj_create(scr_settings);
+    lv_obj_set_size(obj_num_edit_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_num_edit_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_num_edit_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_num_edit_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_num_edit_panel, 0, 0);
+    lv_obj_add_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_num_edit_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_num_edit_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *num_edit_title = lv_label_create(obj_num_edit_panel);
+    lv_label_set_text(num_edit_title, "Edit Value");
+    lv_obj_set_style_text_color(num_edit_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(num_edit_title, &meck_montserrat_22, 0);
+    lv_obj_align(num_edit_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    ta_num_edit = lv_textarea_create(obj_num_edit_panel);
+    lv_obj_set_size(ta_num_edit, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(ta_num_edit, LV_ALIGN_TOP_MID, 0, 100);
+    lv_textarea_set_one_line(ta_num_edit, true);
+    lv_textarea_set_max_length(ta_num_edit, 12);
+    lv_obj_set_style_bg_color(ta_num_edit, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_num_edit, lv_color_white(), 0);
+    meck_set_font(ta_num_edit, &meck_montserrat_18, 0);
+    lv_obj_set_style_border_color(ta_num_edit, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_border_color(ta_num_edit, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_num_edit, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_num_edit,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_num_edit,   LV_OPA_COVER,          LV_PART_CURSOR);
+
+    lv_obj_t *btn_num_confirm = lv_button_create(obj_num_edit_panel);
+    lv_obj_set_size(btn_num_confirm, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_num_confirm, LV_ALIGN_TOP_MID, 0, 165);
+    lv_obj_set_style_bg_color(btn_num_confirm, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_num_confirm, 8, 0);
+    lv_obj_t *num_confirm_lbl = lv_label_create(btn_num_confirm);
+    lv_label_set_text(num_confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(num_confirm_lbl, lv_color_black(), 0);
+    meck_set_font(num_confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(num_confirm_lbl);
+    lv_obj_add_event_cb(btn_num_confirm, on_num_edit_save, LV_EVENT_CLICKED, NULL);
+
+    kb_num_edit = lv_keyboard_create(obj_num_edit_panel);
+    meck_style_keyboard(kb_num_edit);
+    lv_keyboard_set_textarea(kb_num_edit, ta_num_edit);
+    lv_obj_add_event_cb(kb_num_edit, on_num_edit_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_num_edit, on_num_edit_kb_event, LV_EVENT_CANCEL, NULL);
+
+    // ---- Default Region edit overlay ----
+    obj_region_edit_panel = lv_obj_create(scr_settings);
+    lv_obj_set_size(obj_region_edit_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_region_edit_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_region_edit_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_region_edit_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_region_edit_panel, 0, 0);
+    lv_obj_add_flag(obj_region_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_region_edit_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_region_edit_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *region_edit_title = lv_label_create(obj_region_edit_panel);
+    lv_label_set_text(region_edit_title, "Default Region");
+    lv_obj_set_style_text_color(region_edit_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(region_edit_title, &meck_montserrat_22, 0);
+    lv_obj_align(region_edit_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    lv_obj_t *region_hint = lv_label_create(obj_region_edit_panel);
+    lv_label_set_text(region_hint, "e.g. au-nsw (empty = unscoped)");
+    lv_obj_set_style_text_color(region_hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(region_hint, &meck_montserrat_14, 0);
+    lv_obj_align(region_hint, LV_ALIGN_TOP_MID, 0, 90);
+
+    ta_region_edit = lv_textarea_create(obj_region_edit_panel);
+    lv_obj_set_size(ta_region_edit, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(ta_region_edit, LV_ALIGN_TOP_MID, 0, 120);
+    lv_textarea_set_one_line(ta_region_edit, true);
+    lv_textarea_set_max_length(ta_region_edit, 30);
+    lv_obj_set_style_bg_color(ta_region_edit, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_region_edit, lv_color_white(), 0);
+    meck_set_font(ta_region_edit, &meck_montserrat_18, 0);
+    lv_obj_set_style_border_color(ta_region_edit, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_border_color(ta_region_edit, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_region_edit, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_region_edit,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_region_edit,   LV_OPA_COVER,          LV_PART_CURSOR);
+
+    lv_obj_t *btn_region_confirm = lv_button_create(obj_region_edit_panel);
+    lv_obj_set_size(btn_region_confirm, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_region_confirm, LV_ALIGN_TOP_MID, 0, 185);
+    lv_obj_set_style_bg_color(btn_region_confirm, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_region_confirm, 8, 0);
+    lv_obj_t *region_confirm_lbl = lv_label_create(btn_region_confirm);
+    lv_label_set_text(region_confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(region_confirm_lbl, lv_color_black(), 0);
+    meck_set_font(region_confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(region_confirm_lbl);
+    lv_obj_add_event_cb(btn_region_confirm, on_region_edit_save, LV_EVENT_CLICKED, NULL);
+
+    kb_region_edit = lv_keyboard_create(obj_region_edit_panel);
+    meck_style_keyboard(kb_region_edit);
+    lv_keyboard_set_textarea(kb_region_edit, ta_region_edit);
+    lv_obj_add_event_cb(kb_region_edit, on_region_edit_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_region_edit, on_region_edit_kb_event, LV_EVENT_CANCEL, NULL);
+    lv_obj_add_event_cb(kb_region_edit, on_kb_long_press,
                         LV_EVENT_LONG_PRESSED, NULL);
 
     // ---- Export Config modal ----
@@ -5292,6 +5938,223 @@ static void create_settings_screen() {
 // ============================================================================
 // Radio preset picker screen
 // ============================================================================
+
+// ============================================================================
+// Channels settings sub-screen (Settings > Channels)
+// ============================================================================
+
+static void create_settings_channels_screen() {
+    scr_settings_channels = lv_obj_create(NULL);
+    lock_screen_scroll(scr_settings_channels);
+    lv_obj_set_style_bg_color(scr_settings_channels, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_settings_channels, 12, &meck_montserrat_24, 30);
+
+    // Back button → return to main settings
+    lv_obj_t *btn_back = lv_button_create(scr_settings_channels);
+    lv_obj_set_size(btn_back, 80, 50);
+    lv_obj_set_pos(btn_back, 10, 25);
+    lv_obj_set_style_bg_opa(btn_back, 0, 0);
+    lv_obj_t *back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(back_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        if (scr_settings) lv_screen_load(scr_settings);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_settings_channels);
+    lv_label_set_text(title, "Channels");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    obj_ch_settings_scroll = lv_obj_create(scr_settings_channels);
+    lv_obj_set_size(obj_ch_settings_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
+    lv_obj_set_pos(obj_ch_settings_scroll, 0, 90);
+    lv_obj_set_style_bg_opa(obj_ch_settings_scroll, 0, 0);
+    lv_obj_set_style_border_width(obj_ch_settings_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_ch_settings_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_ch_settings_scroll, LV_DIR_VER);
+
+    // ---- Add Channel overlay (hidden by default) ----
+    obj_ch_settings_add_panel = lv_obj_create(scr_settings_channels);
+    lv_obj_set_size(obj_ch_settings_add_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_ch_settings_add_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_ch_settings_add_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_ch_settings_add_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_ch_settings_add_panel, 0, 0);
+    lv_obj_add_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_ch_settings_add_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *add_title = lv_label_create(obj_ch_settings_add_panel);
+    lv_label_set_text(add_title, "Add Channel");
+    lv_obj_set_style_text_color(add_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(add_title, &meck_montserrat_22, 0);
+    lv_obj_align(add_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    lv_obj_t *hint = lv_label_create(obj_ch_settings_add_panel);
+    lv_label_set_text(hint, "Enter channel name (e.g. #sydney)");
+    lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(hint, &meck_montserrat_14, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 90);
+
+    ta_ch_settings_add = lv_textarea_create(obj_ch_settings_add_panel);
+    lv_obj_set_size(ta_ch_settings_add, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(ta_ch_settings_add, LV_ALIGN_TOP_MID, 0, 120);
+    lv_textarea_set_one_line(ta_ch_settings_add, true);
+    lv_textarea_set_max_length(ta_ch_settings_add, 30);
+    lv_textarea_set_text(ta_ch_settings_add, "#");
+    lv_obj_set_style_bg_color(ta_ch_settings_add, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_ch_settings_add, lv_color_white(), 0);
+    meck_set_font(ta_ch_settings_add, &meck_montserrat_18, 0);
+    lv_obj_set_style_border_color(ta_ch_settings_add, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_border_color(ta_ch_settings_add, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_ch_settings_add, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_ch_settings_add,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_ch_settings_add,   LV_OPA_COVER,          LV_PART_CURSOR);
+
+    lv_obj_t *btn_confirm = lv_button_create(obj_ch_settings_add_panel);
+    lv_obj_set_size(btn_confirm, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_confirm, LV_ALIGN_TOP_MID, 0, 185);
+    lv_obj_set_style_bg_color(btn_confirm, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_radius(btn_confirm, 8, 0);
+    lv_obj_t *confirm_lbl = lv_label_create(btn_confirm);
+    lv_label_set_text(confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(confirm_lbl, lv_color_black(), 0);
+    meck_set_font(confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(confirm_lbl);
+    lv_obj_add_event_cb(btn_confirm, on_ch_settings_add_save, LV_EVENT_CLICKED, NULL);
+
+    kb_ch_settings_add = lv_keyboard_create(obj_ch_settings_add_panel);
+    meck_style_keyboard(kb_ch_settings_add);
+    lv_keyboard_set_textarea(kb_ch_settings_add, ta_ch_settings_add);
+    lv_obj_add_event_cb(kb_ch_settings_add, on_ch_settings_add_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_ch_settings_add, on_ch_settings_add_kb_event, LV_EVENT_CANCEL, NULL);
+    lv_obj_add_event_cb(kb_ch_settings_add, on_kb_long_press,
+                        LV_EVENT_LONG_PRESSED, NULL);
+}
+
+// ============================================================================
+// Channel detail sub-screen (Settings > Channels > [channel])
+// ============================================================================
+
+static void create_channel_detail_screen() {
+    scr_channel_detail = lv_obj_create(NULL);
+    lock_screen_scroll(scr_channel_detail);
+    lv_obj_set_style_bg_color(scr_channel_detail, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_channel_detail, 13, &meck_montserrat_24, 30);
+
+    // Back button → return to channels list
+    lv_obj_t *btn_back = lv_button_create(scr_channel_detail);
+    lv_obj_set_size(btn_back, 80, 50);
+    lv_obj_set_pos(btn_back, 10, 25);
+    lv_obj_set_style_bg_opa(btn_back, 0, 0);
+    lv_obj_t *back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(back_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        refresh_channels_settings_list();
+        if (scr_settings_channels) lv_screen_load(scr_settings_channels);
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Channel name title (updated by refresh_channel_detail_labels)
+    lbl_ch_detail_name = lv_label_create(scr_channel_detail);
+    lv_label_set_text(lbl_ch_detail_name, "");
+    lv_obj_set_style_text_color(lbl_ch_detail_name, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(lbl_ch_detail_name, &meck_montserrat_24, 0);
+    lv_obj_align(lbl_ch_detail_name, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    int y = 100;
+
+    // Row 1: Region Scope
+    create_settings_row(scr_channel_detail, "Region Scope",
+        &lbl_ch_detail_scope, on_ch_detail_scope_tap, y);
+    y += 75;
+
+    // Row 2: Notifications
+    create_settings_row(scr_channel_detail, "Notifications (tap to cycle)",
+        &lbl_ch_detail_notif, on_ch_detail_notif_tap, y);
+    y += 75;
+
+    // Row 3: Delete Channel (not shown for primary channel; handled in tap)
+    {
+        lv_obj_t *del_btn = lv_button_create(scr_channel_detail);
+        lv_obj_set_size(del_btn, SCREEN_WIDTH - 40, 55);
+        lv_obj_set_pos(del_btn, 20, y);
+        lv_obj_set_style_bg_color(del_btn, lv_color_make(60, 20, 20), 0);
+        lv_obj_set_style_radius(del_btn, 10, 0);
+        lv_obj_set_style_border_width(del_btn, 1, 0);
+        lv_obj_set_style_border_color(del_btn, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_add_event_cb(del_btn, on_ch_detail_delete_tap, LV_EVENT_CLICKED, NULL);
+
+        lbl_ch_detail_delete = lv_label_create(del_btn);
+        lv_label_set_text(lbl_ch_detail_delete, "Delete Channel");
+        lv_obj_set_style_text_color(lbl_ch_detail_delete, lv_palette_main(LV_PALETTE_RED), 0);
+        meck_set_font(lbl_ch_detail_delete, &meck_montserrat_18, 0);
+        lv_obj_center(lbl_ch_detail_delete);
+    }
+
+    // ---- Scope edit overlay (on this screen) ----
+    obj_ch_scope_edit_panel = lv_obj_create(scr_channel_detail);
+    lv_obj_set_size(obj_ch_scope_edit_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_ch_scope_edit_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_ch_scope_edit_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_ch_scope_edit_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_ch_scope_edit_panel, 0, 0);
+    lv_obj_add_flag(obj_ch_scope_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_ch_scope_edit_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_ch_scope_edit_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *scope_title = lv_label_create(obj_ch_scope_edit_panel);
+    lv_label_set_text(scope_title, "Channel Region");
+    lv_obj_set_style_text_color(scope_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(scope_title, &meck_montserrat_22, 0);
+    lv_obj_align(scope_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    lv_obj_t *scope_hint = lv_label_create(obj_ch_scope_edit_panel);
+    lv_label_set_text(scope_hint, "Empty = use device default");
+    lv_obj_set_style_text_color(scope_hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(scope_hint, &meck_montserrat_14, 0);
+    lv_obj_align(scope_hint, LV_ALIGN_TOP_MID, 0, 90);
+
+    ta_ch_scope_edit = lv_textarea_create(obj_ch_scope_edit_panel);
+    lv_obj_set_size(ta_ch_scope_edit, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(ta_ch_scope_edit, LV_ALIGN_TOP_MID, 0, 120);
+    lv_textarea_set_one_line(ta_ch_scope_edit, true);
+    lv_textarea_set_max_length(ta_ch_scope_edit, 30);
+    lv_obj_set_style_bg_color(ta_ch_scope_edit, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_ch_scope_edit, lv_color_white(), 0);
+    meck_set_font(ta_ch_scope_edit, &meck_montserrat_18, 0);
+    lv_obj_set_style_border_color(ta_ch_scope_edit, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_border_color(ta_ch_scope_edit, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_ch_scope_edit, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_ch_scope_edit,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_ch_scope_edit,   LV_OPA_COVER,          LV_PART_CURSOR);
+
+    lv_obj_t *btn_scope_confirm = lv_button_create(obj_ch_scope_edit_panel);
+    lv_obj_set_size(btn_scope_confirm, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_scope_confirm, LV_ALIGN_TOP_MID, 0, 185);
+    lv_obj_set_style_bg_color(btn_scope_confirm, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_scope_confirm, 8, 0);
+    lv_obj_t *scope_confirm_lbl = lv_label_create(btn_scope_confirm);
+    lv_label_set_text(scope_confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(scope_confirm_lbl, lv_color_black(), 0);
+    meck_set_font(scope_confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(scope_confirm_lbl);
+    lv_obj_add_event_cb(btn_scope_confirm, on_ch_scope_edit_save, LV_EVENT_CLICKED, NULL);
+
+    kb_ch_scope_edit = lv_keyboard_create(obj_ch_scope_edit_panel);
+    meck_style_keyboard(kb_ch_scope_edit);
+    lv_keyboard_set_textarea(kb_ch_scope_edit, ta_ch_scope_edit);
+    lv_obj_add_event_cb(kb_ch_scope_edit, on_ch_scope_edit_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_ch_scope_edit, on_ch_scope_edit_kb_event, LV_EVENT_CANCEL, NULL);
+    lv_obj_add_event_cb(kb_ch_scope_edit, on_kb_long_press,
+                        LV_EVENT_LONG_PRESSED, NULL);
+}
 
 static void create_radio_picker_screen() {
     scr_radio_picker = lv_obj_create(NULL);
@@ -5508,6 +6371,10 @@ static void create_channel_picker_screen() {
     lv_obj_set_style_bg_opa(obj_ch_add_panel, LV_OPA_90, 0);
     lv_obj_set_style_border_width(obj_ch_add_panel, 0, 0);
     lv_obj_add_flag(obj_ch_add_panel, LV_OBJ_FLAG_HIDDEN);
+    // Lock the panel down — no scrolling, no scrollbars. Otherwise edge
+    // taps near the keyboard's left/right corners pan the whole screen.
+    lv_obj_clear_flag(obj_ch_add_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_ch_add_panel, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *add_title = lv_label_create(obj_ch_add_panel);
     lv_label_set_text(add_title, "Add Channel");
@@ -5531,6 +6398,26 @@ static void create_channel_picker_screen() {
     lv_obj_set_style_text_color(ta_ch_add, lv_color_white(), 0);
     meck_set_font(ta_ch_add, &meck_montserrat_18, 0);
     lv_obj_set_style_border_color(ta_ch_add, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_border_color(ta_ch_add, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_ch_add, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_ch_add,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_ch_add,   LV_OPA_COVER,          LV_PART_CURSOR);
+
+    // Confirm button between the textarea and the keyboard. Provides an
+    // obvious tap target for submitting the channel name — the keyboard's
+    // enter key (LV_SYMBOL_NEW_LINE) also fires on_ch_add_save via
+    // LV_EVENT_READY, but users don't recognise it as the confirm action.
+    lv_obj_t *btn_ch_confirm = lv_button_create(obj_ch_add_panel);
+    lv_obj_set_size(btn_ch_confirm, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_ch_confirm, LV_ALIGN_TOP_MID, 0, 185);
+    lv_obj_set_style_bg_color(btn_ch_confirm, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_radius(btn_ch_confirm, 8, 0);
+    lv_obj_t *confirm_lbl = lv_label_create(btn_ch_confirm);
+    lv_label_set_text(confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(confirm_lbl, lv_color_black(), 0);
+    meck_set_font(confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(confirm_lbl);
+    lv_obj_add_event_cb(btn_ch_confirm, on_ch_add_save, LV_EVENT_CLICKED, NULL);
 
     kb_ch_add = lv_keyboard_create(obj_ch_add_panel);
     meck_style_keyboard(kb_ch_add);
@@ -11067,6 +11954,8 @@ extern "C" void meck_ui_init() {
     create_settings_screen();
     create_debug_logs_screen();
     create_settings_contacts_screen();
+    create_settings_channels_screen();
+    create_channel_detail_screen();
     create_radio_picker_screen();
     create_channel_picker_screen();
     create_messages_screen();
