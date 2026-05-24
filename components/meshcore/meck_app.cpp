@@ -30,6 +30,8 @@
 // land in the SD log file when Settings > Debug Logs > Start is active.
 // See meck_log.h for the macro mechanism.
 #include "meck_log.h"
+#include "BundledSounds.h"
+#include "NotifSounds.h"
 
 // ---- Static instances ----
 static P4DataStore g_dataStore;
@@ -45,6 +47,7 @@ static P4RTCClock g_rtc;
 // MeckMesh.h for the full rationale.
 static P4MeshTables g_mesh_tables;
 static Meck* g_the_mesh = nullptr;
+NotifSounds g_notif_sounds;
 
 // ---- Internal accessor (declared in target.h) ----
 Meck* meck_get_instance() { return g_the_mesh; }
@@ -128,6 +131,10 @@ extern "C" bool meck_app_init() {
 
     // 5. Initialize Meck (loads or generates identity, loads channels, contacts)
     g_the_mesh->begin(g_dataStore, g_node_prefs);
+
+    // 6. Copy bundled notification tones to SD and load tone config
+    copyBundledSoundsToSD();
+    g_notif_sounds.begin();
 
     printf("meck_app_init: Meck stack ready\n");
     return true;

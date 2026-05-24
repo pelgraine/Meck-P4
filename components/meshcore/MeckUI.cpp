@@ -39,6 +39,7 @@
 #include "MeckDataStore.h"
 #include "MeckAudioUI.h"
 #include "MeckAudio.h"
+#include "NotifSounds.h"
 #include "MeckMapScreen.h"
 
 #include <sys/lock.h>
@@ -445,6 +446,11 @@ static lv_obj_t *kb_ch_scope_edit        = NULL;
 static lv_obj_t *obj_ch_settings_add_panel = NULL;
 static lv_obj_t *ta_ch_settings_add        = NULL;
 static lv_obj_t *kb_ch_settings_add        = NULL;
+
+// Tone picker overlay (on channel detail screen)
+static lv_obj_t *obj_tone_picker_panel  = NULL;
+static lv_obj_t *obj_tone_picker_scroll = NULL;
+static lv_obj_t *lbl_ch_detail_tone     = NULL;
 
 // Radio preset picker
 static lv_obj_t *scr_radio_picker  = NULL;
@@ -980,6 +986,10 @@ static void refresh_channels_settings_list();
 static void refresh_channel_detail_labels();
 static void create_settings_channels_screen();
 static void create_channel_detail_screen();
+static void on_ch_detail_tone_tap(lv_event_t *e);
+static void on_tone_picker_select(lv_event_t *e);
+static void on_tone_picker_cancel(lv_event_t *e);
+static void refresh_tone_picker_list();
 static void on_radio_preset_select(lv_event_t *e);
 
 static void on_send_clicked(lv_event_t *e);
@@ -3378,6 +3388,11 @@ static void refresh_channel_detail_labels() {
             notif_label(prefs->channel_notif[g_detail_channel_idx]));
     if (lbl_ch_detail_delete)
         lv_label_set_text(lbl_ch_detail_delete, "Delete Channel");
+    if (lbl_ch_detail_tone) {
+        const char* tone = g_notif_sounds.getSoundForChannel(g_detail_channel_idx);
+        lv_label_set_text(lbl_ch_detail_tone,
+            (tone && tone[0]) ? tone : "None");
+    }
 }
 
 static void on_ch_detail_scope_tap(lv_event_t *e) {
@@ -3458,6 +3473,97 @@ static void on_ch_detail_delete_tap(lv_event_t *e) {
         g_delete_confirm_until = now + 3000;
         if (lbl_ch_detail_delete)
             lv_label_set_text(lbl_ch_detail_delete, "Tap again to confirm");
+    }
+}
+
+// ---- Notification Tone picker ----
+
+static void on_ch_detail_tone_tap(lv_event_t *e) {
+    if (!obj_tone_picker_panel) return;
+    g_notif_sounds.scanSoundFiles();
+    refresh_tone_picker_list();
+    lv_obj_remove_flag(obj_tone_picker_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_tone_picker_cancel(lv_event_t *e) {
+    if (obj_tone_picker_panel) lv_obj_add_flag(obj_tone_picker_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_tone_picker_select(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (g_detail_channel_idx < 0) return;
+
+    if (idx == 0) {
+        // "None" selected
+        g_notif_sounds.clearSoundForChannel(g_detail_channel_idx);
+    } else {
+        int fileIdx = idx - 1;
+        const auto& files = g_notif_sounds.getSoundFiles();
+        if (fileIdx >= 0 && fileIdx < (int)files.size()) {
+            g_notif_sounds.setSoundForChannel(g_detail_channel_idx,
+                                               files[fileIdx].c_str());
+            // Preview: play the selected tone
+            char path[64];
+            NotifSounds::buildTonePath(path, sizeof(path), files[fileIdx].c_str());
+            meck_audio_play_file(path, 0);
+        }
+    }
+
+    refresh_channel_detail_labels();
+    if (obj_tone_picker_panel) lv_obj_add_flag(obj_tone_picker_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void refresh_tone_picker_list() {
+    if (!obj_tone_picker_scroll) return;
+    lv_obj_clean(obj_tone_picker_scroll);
+
+    const auto& files = g_notif_sounds.getSoundFiles();
+    int y = 5;
+
+    // Row 0: "None (silent)"
+    {
+        lv_obj_t *btn = lv_button_create(obj_tone_picker_scroll);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 40, 55);
+        lv_obj_set_pos(btn, 10, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
+        lv_obj_add_event_cb(btn, on_tone_picker_select, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)0);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, "None (silent)");
+        lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(lbl, &meck_montserrat_18, 0);
+        lv_obj_center(lbl);
+        y += 65;
+    }
+
+    // One row per scanned tone file
+    for (int i = 0; i < (int)files.size(); i++) {
+        lv_obj_t *btn = lv_button_create(obj_tone_picker_scroll);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 40, 55);
+        lv_obj_set_pos(btn, 10, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
+        lv_obj_add_event_cb(btn, on_tone_picker_select, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)(i + 1));
+
+        // Highlight the currently selected tone
+        const char* current = g_notif_sounds.getSoundForChannel(g_detail_channel_idx);
+        if (current && current[0] && files[i] == current) {
+            lv_obj_set_style_border_color(btn, lv_palette_main(LV_PALETTE_CYAN), 0);
+        }
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, files[i].c_str());
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_18, 0);
+        lv_obj_center(lbl);
+        y += 65;
     }
 }
 
@@ -6080,7 +6186,12 @@ static void create_channel_detail_screen() {
         &lbl_ch_detail_notif, on_ch_detail_notif_tap, y);
     y += 75;
 
-    // Row 3: Delete Channel (not shown for primary channel; handled in tap)
+    // Row 3: Notification Tone
+    create_settings_row(scr_channel_detail, "Notification Tone",
+        &lbl_ch_detail_tone, on_ch_detail_tone_tap, y);
+    y += 75;
+
+    // Row 4: Delete Channel (not shown for primary channel; handled in tap)
     {
         lv_obj_t *del_btn = lv_button_create(scr_channel_detail);
         lv_obj_set_size(del_btn, SCREEN_WIDTH - 40, 55);
@@ -6154,6 +6265,50 @@ static void create_channel_detail_screen() {
     lv_obj_add_event_cb(kb_ch_scope_edit, on_ch_scope_edit_kb_event, LV_EVENT_CANCEL, NULL);
     lv_obj_add_event_cb(kb_ch_scope_edit, on_kb_long_press,
                         LV_EVENT_LONG_PRESSED, NULL);
+
+    // ---- Tone picker overlay ----
+    obj_tone_picker_panel = lv_obj_create(scr_channel_detail);
+    lv_obj_set_size(obj_tone_picker_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_tone_picker_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_tone_picker_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_tone_picker_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_tone_picker_panel, 0, 0);
+    lv_obj_add_flag(obj_tone_picker_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_tone_picker_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_tone_picker_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *tone_title = lv_label_create(obj_tone_picker_panel);
+    lv_label_set_text(tone_title, "Select Tone");
+    lv_obj_set_style_text_color(tone_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(tone_title, &meck_montserrat_22, 0);
+    lv_obj_align(tone_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    lv_obj_t *tone_hint = lv_label_create(obj_tone_picker_panel);
+    lv_label_set_text(tone_hint, "Tap to select and preview");
+    lv_obj_set_style_text_color(tone_hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(tone_hint, &meck_montserrat_14, 0);
+    lv_obj_align(tone_hint, LV_ALIGN_TOP_MID, 0, 85);
+
+    // Cancel button
+    lv_obj_t *tone_cancel = lv_button_create(obj_tone_picker_panel);
+    lv_obj_set_size(tone_cancel, 80, 40);
+    lv_obj_align(tone_cancel, LV_ALIGN_TOP_LEFT, 10, 45);
+    lv_obj_set_style_bg_opa(tone_cancel, 0, 0);
+    lv_obj_t *cancel_lbl = lv_label_create(tone_cancel);
+    lv_label_set_text(cancel_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(cancel_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(cancel_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(cancel_lbl);
+    lv_obj_add_event_cb(tone_cancel, on_tone_picker_cancel, LV_EVENT_CLICKED, NULL);
+
+    // Scrollable list area
+    obj_tone_picker_scroll = lv_obj_create(obj_tone_picker_panel);
+    lv_obj_set_size(obj_tone_picker_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 110);
+    lv_obj_set_pos(obj_tone_picker_scroll, 0, 110);
+    lv_obj_set_style_bg_opa(obj_tone_picker_scroll, 0, 0);
+    lv_obj_set_style_border_width(obj_tone_picker_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_tone_picker_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_tone_picker_scroll, LV_DIR_VER);
 }
 
 static void create_radio_picker_screen() {
@@ -8723,9 +8878,11 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         rebuild_message_bubbles(g_active_channel);
     }
 
-    // Channel picker unread badges
+    // Channel picker unread badges + notification tone trigger
     if (mesh) {
+        static int prev_unread[8] = {};
         int num_ch = mesh->getActiveChannelCount();
+        P4NodePrefs* nprefs = mesh->getNodePrefs();
         for (int i = 0; i < num_ch && i < 8; i++) {
             if (!lbl_picker_unread[i]) continue;
             int unread = mesh->getUnreadCount(i);
@@ -8736,6 +8893,22 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             } else {
                 lv_label_set_text(lbl_picker_unread[i], "");
             }
+            // Tone trigger: unread count just increased for this channel
+            if (unread > prev_unread[i] && nprefs) {
+                uint8_t notif = nprefs->channel_notif[i];
+                if (notif != 2 && g_notif_sounds.hasSoundForChannel(i)) {
+                    // Don't interrupt active audio playback
+                    MeckAudioState audio_st = meck_audio_get_state();
+                    if (audio_st != MECK_AUDIO_STATE_PLAYING &&
+                        audio_st != MECK_AUDIO_STATE_PAUSED) {
+                        char path[64];
+                        NotifSounds::buildTonePath(path, sizeof(path),
+                            g_notif_sounds.getSoundForChannel(i));
+                        meck_audio_play_file(path, 0);
+                    }
+                }
+            }
+            prev_unread[i] = unread;
         }
     }
 
