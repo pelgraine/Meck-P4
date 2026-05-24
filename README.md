@@ -178,7 +178,7 @@ needed.
 | --- | --- |
 | **Tap** | Touch and release quickly. Opens tiles, selects items, advances pages. |
 | **Swipe** | Touch, drag, release. Direction determines action (scroll, page turn, switch tile/filter). |
-| **Long press** | Touch and hold. Context-dependent: send advert, toggle GPS, delete contacts, power off. |
+| **Long press** | Touch and hold. Context-dependent: send advert, toggle GPS, delete contacts, retry failed messages, power off. |
 
 ---
 
@@ -254,7 +254,12 @@ so messages survive reboots when an SD card is present.
 **Per-message metadata:**
 
 - **Incoming messages** display a small hop-count badge showing how many repeaters the packet passed through to reach you. Direct receptions show 0 hops.
-- **Outgoing messages** show an ACK indicator next to each send. The indicator updates from "pending" to "acked" as repeater echoes confirm the packet propagated; subsequent acks bump a delivery counter so you can see how many neighbours heard you.
+- **Outgoing messages** show a send status that updates as repeater echoes arrive:
+  - **Sending...** -- the message has been transmitted but no repeater echo has been heard yet.
+  - **✓ Heard N Repeats** -- one or more repeaters relayed the message back. The count shows how many echoes were received, confirming the message propagated through the mesh.
+  - **✕ Failed** -- 18 seconds elapsed with no repeater echo. The message was transmitted but no repeater confirmed receipt. This typically means no repeater is in range, or the channel's radio parameters don't match the repeater's.
+
+**Retry send:** long-press any failed outgoing message (channel or DM) to open a retry prompt. Tap **Retry Send** to re-queue the message with a fresh timestamp. The recipient may see a duplicate if the original arrives late via a slow path.
 
 ---
 

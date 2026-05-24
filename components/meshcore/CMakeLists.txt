@@ -22,7 +22,6 @@ file(GLOB MESHCORE_SRCS
 
 # Prune Arduino-FS-dependent files
 list(FILTER MESHCORE_SRCS EXCLUDE REGEX ".*IdentityStore\\.cpp$")
-list(FILTER MESHCORE_SRCS EXCLUDE REGEX ".*TransportKeyStore\\.cpp$")
 
 file(GLOB ED25519_SRCS
     "meshcore_src/ed25519/*.c"

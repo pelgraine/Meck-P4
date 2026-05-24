@@ -1,15 +1,26 @@
+// TransportKeyStore.cpp -- P4 adaptation using mbedtls instead of Arduino SHA256
+
 #include "TransportKeyStore.h"
-#include <SHA256.h>
+#include "mbedtls/sha256.h"
+#include "mbedtls/md.h"
+#include <cstring>
 
 uint16_t TransportKey::calcTransportCode(const mesh::Packet* packet) const {
   uint16_t code;
-  SHA256 sha;
-  sha.resetHMAC(key, sizeof(key));
+  uint8_t hmac[32];
+
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1);
+  mbedtls_md_hmac_starts(&ctx, key, sizeof(key));
   uint8_t type = packet->getPayloadType();
-  sha.update(&type, 1);
-  sha.update(packet->payload, packet->payload_len);
-  sha.finalizeHMAC(key, sizeof(key), &code, 2);
-  if (code == 0) {     // reserve codes 0000 and FFFF
+  mbedtls_md_hmac_update(&ctx, &type, 1);
+  mbedtls_md_hmac_update(&ctx, packet->payload, packet->payload_len);
+  mbedtls_md_hmac_finish(&ctx, hmac);
+  mbedtls_md_free(&ctx);
+
+  memcpy(&code, hmac, 2);
+  if (code == 0) {
     code++;
   } else if (code == 0xFFFF) {
     code--;
@@ -18,10 +29,10 @@ uint16_t TransportKey::calcTransportCode(const mesh::Packet* packet) const {
 }
 
 bool TransportKey::isNull() const {
-  for (int i = 0; i < sizeof(key); i++) {
+  for (size_t i = 0; i < sizeof(key); i++) {
     if (key[i]) return false;
   }
-  return true;  // key is all zeroes
+  return true;
 }
 
 void TransportKeyStore::putCache(uint16_t id, const TransportKey& key) {
@@ -29,64 +40,43 @@ void TransportKeyStore::putCache(uint16_t id, const TransportKey& key) {
     cache_ids[num_cache] = id;
     cache_keys[num_cache] = key;
     num_cache++;
-  } else {
-    // TODO: evict oldest cache entry
   }
 }
 
 void TransportKeyStore::getAutoKeyFor(uint16_t id, const char* name, TransportKey& dest) {
-  for (int i = 0; i < num_cache; i++) {  // first, check cache
-    if (cache_ids[i] == id) {   // cache hit!
+  for (int i = 0; i < num_cache; i++) {
+    if (cache_ids[i] == id) {
       dest = cache_keys[i];
       return;
     }
   }
-  // calc key for publicly-known hashtag region name
-  SHA256 sha;
-  sha.update(name, strlen(name));
-  sha.finalize(&dest.key, sizeof(dest.key));
-
+  uint8_t hash[32];
+  mbedtls_sha256((const uint8_t*)name, strlen(name), hash, 0);
+  memcpy(dest.key, hash, sizeof(dest.key));
   putCache(id, dest);
 }
 
 int TransportKeyStore::loadKeysFor(uint16_t id, TransportKey keys[], int max_num) {
   int n = 0;
-  for (int i = 0; i < num_cache && n < max_num; i++) {  // first, check cache
+  for (int i = 0; i < num_cache && n < max_num; i++) {
     if (cache_ids[i] == id) {
       keys[n++] = cache_keys[i];
     }
-  }
-  if (n > 0) return n;   // cache hit!
-
-  // TODO:  retrieve from difficult-to-copy keystore
-
-  // store in cache (if room)
-  for (int i = 0; i < n; i++) {
-    putCache(id, keys[i]);
   }
   return n;
 }
 
 bool TransportKeyStore::saveKeysFor(uint16_t id, const TransportKey keys[], int num) {
   invalidateCache();
-
-  // TODO: update hardware keystore
-
-  return false;  // failed
+  return false;
 }
 
 bool TransportKeyStore::removeKeys(uint16_t id) {
   invalidateCache();
-
-  // TODO: remove from hardware keystore
-
-  return false;  // failed
+  return false;
 }
 
 bool TransportKeyStore::clear() {
   invalidateCache();
-
-  // TODO: clear hardware keystore
-
-  return false;  // failed
+  return false;
 }

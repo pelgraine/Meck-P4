@@ -25,6 +25,7 @@
 #include "esp_heap_caps.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/base64.h"
+#include "TransportKeyStore.h"
 #include <strings.h>   // strcasecmp for case-insensitive name match in migrateChannelSecrets
 
 // Debug Logs: rewrites printf -> meck_debug_log_printf so calls below
@@ -1701,12 +1702,6 @@ public:
     // Prepends '#' and takes SHA-256, mirroring upstream MyMesh::deriveScopeKey
     // / TransportKeyStore::getAutoKeyFor. Writes the first 16 bytes of the
     // hash into keyOut. Returns true if name is non-empty and key was derived.
-    //
-    // NOTE: sendFloodScoped overrides (which attach transport codes to
-    // outgoing flood packets using this key) are deferred until
-    // TransportKeyStore.h is added to the P4 build's meshcore_src/helpers/.
-    // Until then, scope names are stored and editable from the UI, and
-    // companion apps can read them, but outgoing floods are unscoped.
     bool deriveScopeKey(const char* scopeName, uint8_t keyOut[16]) {
         if (!scopeName || scopeName[0] == '\0') {
             memset(keyOut, 0, 16);
@@ -1723,18 +1718,58 @@ public:
     // Look up per-channel scope name by GroupChannel secret match.
     // Returns nullptr if no scope set for that channel.
     const char* getChannelScopeName(const mesh::GroupChannel& channel) {
+        static char _scope_buf[31];
         ChannelDetails ch;
         for (uint8_t i = 0; i < MAX_GROUP_CHANNELS; i++) {
             if (getChannel(i, ch) && ch.name[0] != '\0') {
                 if (memcmp(ch.channel.secret, channel.secret,
                            sizeof(channel.secret)) == 0) {
-                    return ch.scope_name;
+                    strncpy(_scope_buf, ch.scope_name, sizeof(_scope_buf) - 1);
+                    _scope_buf[sizeof(_scope_buf) - 1] = '\0';
+                    return _scope_buf;
                 }
             }
         }
         return nullptr;
     }
 
+protected:
+    void sendFloodScoped(const ContactInfo& recipient, mesh::Packet* pkt,
+                         uint32_t delay_millis = 0) override {
+        TransportKey scope;
+        memcpy(scope.key, _prefs->default_scope_key, sizeof(scope.key));
+        sendFloodWithScope(scope, pkt, delay_millis);
+    }
+
+    void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt,
+                         uint32_t delay_millis = 0) override {
+        TransportKey scope;
+        const char* ch_scope = getChannelScopeName(channel);
+        if (ch_scope && ch_scope[0]) {
+            TransportKeyStore tempStore;
+            char tmp[32];
+            snprintf(tmp, sizeof(tmp), "#%s", ch_scope);
+            tempStore.getAutoKeyFor(0, tmp, scope);
+        } else {
+            memcpy(scope.key, _prefs->default_scope_key, sizeof(scope.key));
+        }
+        sendFloodWithScope(scope, pkt, delay_millis);
+    }
+
+private:
+    void sendFloodWithScope(const TransportKey& scope, mesh::Packet* pkt,
+                            uint32_t delay_millis) {
+        if (scope.isNull()) {
+            sendFlood(pkt, delay_millis, getPathHashSize());
+        } else {
+            uint16_t codes[2];
+            codes[0] = scope.calcTransportCode(pkt);
+            codes[1] = 0;
+            sendFlood(pkt, codes, delay_millis, getPathHashSize());
+        }
+    }
+
+public:
     // ---- Thread-safe accessors for LVGL UI ----
 
     bool isMessageDirty() {

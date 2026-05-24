@@ -479,6 +479,7 @@ static lv_obj_t *obj_dm_inbox_scroll = NULL;
 // Messages screen
 static lv_obj_t *scr_messages           = NULL;
 static lv_obj_t *lbl_msg_channel_name   = NULL;
+static lv_obj_t *lbl_msg_channel_scope  = NULL;
 static lv_obj_t *lbl_messages_body      = NULL;
 static lv_obj_t *obj_msg_scroll         = NULL;
 static lv_obj_t *ta_compose             = NULL;
@@ -2471,6 +2472,13 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
     P4ChannelMessage msgs[16];
     int n = mesh ? mesh->getMessages(msgs, 16, ch_idx) : 0;
 
+    // Current UTC for send-timeout detection
+    uint32_t now_utc = 0;
+    if (mesh) {
+        mesh::RTCClock* rtc = mesh->getRTCClock();
+        if (rtc) now_utc = rtc->getCurrentTime();
+    }
+
     if (n == 0) {
         lv_obj_t *empty = lv_label_create(obj_msg_scroll);
         lv_label_set_text(empty, "No messages yet.");
@@ -2607,7 +2615,13 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
         if (is_sent) {
             uint8_t hc = msgs[i].heard_count;
             if (hc == 0) {
-                snprintf(meta, sizeof(meta), "Sending...");
+                if (now_utc >= msgs[i].timestamp &&
+                    msgs[i].timestamp > 0 &&
+                    (now_utc - msgs[i].timestamp) >= MECK_RETRY_CHANNEL_THRESHOLD_SEC) {
+                    snprintf(meta, sizeof(meta), LV_SYMBOL_CLOSE " Failed");
+                } else {
+                    snprintf(meta, sizeof(meta), "Sending...");
+                }
             } else {
                 snprintf(meta, sizeof(meta), LV_SYMBOL_OK " Heard %u Repeat%s",
                          (unsigned)hc, hc == 1 ? "" : "s");
@@ -6772,6 +6786,12 @@ static void create_messages_screen() {
     meck_set_font(lbl_msg_channel_name, &meck_montserrat_22, 0);
     lv_obj_align(lbl_msg_channel_name, LV_ALIGN_TOP_LEFT, 120, 30);
 
+    lbl_msg_channel_scope = lv_label_create(scr_messages);
+    lv_label_set_text(lbl_msg_channel_scope, "");
+    lv_obj_set_style_text_color(lbl_msg_channel_scope, lv_color_white(), 0);
+    meck_set_font(lbl_msg_channel_scope, &meck_montserrat_14, 0);
+    lv_obj_align(lbl_msg_channel_scope, LV_ALIGN_TOP_LEFT, 120, 58);
+
     obj_msg_scroll = lv_obj_create(scr_messages);
     lv_obj_set_size(obj_msg_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 160);
     lv_obj_set_pos(obj_msg_scroll, 10, 90);
@@ -6860,8 +6880,23 @@ static void load_channel_view(uint8_t ch_idx) {
         ChannelDetails ch;
         if (mesh->getChannel(ch_idx, ch) && ch.name[0] != '\0') {
             lv_label_set_text(lbl_msg_channel_name, ch.name);
+            // Show per-channel or device-default scope under the title
+            if (lbl_msg_channel_scope) {
+                P4NodePrefs* np = mesh->getNodePrefs();
+                const char* scope = (ch.scope_name[0] != '\0') ? ch.scope_name
+                                  : (np && np->default_scope_name[0] != '\0')
+                                    ? np->default_scope_name : nullptr;
+                if (scope) {
+                    char buf[40];
+                    snprintf(buf, sizeof(buf), "[%s]", scope);
+                    lv_label_set_text(lbl_msg_channel_scope, buf);
+                } else {
+                    lv_label_set_text(lbl_msg_channel_scope, "");
+                }
+            }
         } else {
             lv_label_set_text(lbl_msg_channel_name, "???");
+            if (lbl_msg_channel_scope) lv_label_set_text(lbl_msg_channel_scope, "");
         }
         lv_color_t color = lv_palette_main(CH_COLORS[ch_idx % NUM_CH_COLORS]);
         lv_obj_set_style_text_color(lbl_msg_channel_name, color, 0);

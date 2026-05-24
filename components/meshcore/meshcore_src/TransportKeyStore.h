@@ -1,8 +1,8 @@
 #pragma once
 
-#include "arduino_compat.h"   // needed for PlatformIO
+#include <cstdint>
+#include <cstring>
 #include <Packet.h>
-#include "IdentityStore.h"
 
 struct TransportKey {
   uint8_t key[16];
