@@ -187,7 +187,7 @@ needed.
 
 The Auto Off timer (Settings > Auto Off, tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes) puts the device into a low-power screen-off state after the set period of inactivity. When the timer fires, the MIPI-DSI display bus is torn down and CPU usage drops from ~94% to ~57%. The radio stays active and continues receiving messages in the background.
 
-> **To wake the device, press the boot button on the top edge of the T-Display P4.** Touch wake is not yet supported. The boot button is the small physical button near the USB-C ports. If the screen stays black after a period of inactivity, this is normal – press the boot button to bring it back.
+> **To wake the device, press the P4 boot button on the side of the T-Display P4.** Touch wake is not yet supported. The P4 boot button is the third button from the top on the right edge, between the C6 Reset and P4 Reset buttons (labelled “BOOT” under the “P4” heading on the case). If the screen stays black after a period of inactivity, this is normal – press the boot button to bring it back.
 
 This is not true light sleep. The PM config sets `light_sleep_enable=true`, but some PM locks are still preventing light sleep from actually engaging. The visible power saving comes from dynamic frequency scaling running more aggressively when the screen-on workload disappears. With low to moderate usage at 35% brightness, screen-off idle can add roughly an hour to an hour and a half of additional run time.
 
