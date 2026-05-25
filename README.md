@@ -95,6 +95,11 @@ and application combined into a single image — flash it at address `0x0`.
 1. Select the `meck-p4-X.Y.bin` file you downloaded
 1. Click **Flash**, choose your device in the popup, and click **Connect**
 
+Ensure you use the **right-side USB-C port** (the data port), not the high-speed charger port, to flash.
+<img width="377" height="284" alt="correct port usage for flashing" src="https://github.com/user-attachments/assets/803b96bd-c93b-4699-a0d5-a680d3c304a9" />
+
+If the flasher has completed successfully and your screen hasn't changed after flashing for the first time, unplug the device, turn it off and then on again.
+
 **Using esptool.py:**
 
 ```
@@ -188,6 +193,8 @@ needed.
 The Auto Off timer (Settings > Auto Off, tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes) puts the device into a low-power screen-off state after the set period of inactivity. When the timer fires, the MIPI-DSI display bus is torn down and CPU usage drops from ~94% to ~57%. The radio stays active and continues receiving messages in the background.
 
 > **To wake the device, press the P4 boot button on the side of the T-Display P4.** Touch wake is not yet supported. The P4 boot button is the third button from the top on the right edge, between the C6 Reset and P4 Reset buttons (labelled “BOOT” under the “P4” heading on the case). If the screen stays black after a period of inactivity, this is normal – press the boot button to bring it back.
+
+<img width="300" height="600" alt="40BA63C0-4825-4C39-BA60-AAA020A8F475" src="https://github.com/user-attachments/assets/a5eebc32-ac66-459a-80e4-13d4081b1456" />
 
 This is not true light sleep. The PM config sets `light_sleep_enable=true`, but some PM locks are still preventing light sleep from actually engaging. The visible power saving comes from dynamic frequency scaling running more aggressively when the screen-on workload disappears. With low to moderate usage at 35% brightness, screen-off idle can add roughly an hour to an hour and a half of additional run time.
 
