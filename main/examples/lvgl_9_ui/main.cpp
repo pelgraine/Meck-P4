@@ -4409,7 +4409,7 @@ void Lvgl_Startup(void)
 
     // 创建白色"LILYGO"标签
     lv_obj_t *logo_label = lv_label_create(bg);
-    lv_label_set_text(logo_label, "LILYGO");
+    lv_label_set_text(logo_label, "Meck-P4");
     lv_obj_set_style_text_color(logo_label, lv_color_white(), LV_PART_MAIN);
     lv_obj_set_style_text_font(logo_label, &lv_font_montserrat_48, LV_PART_MAIN); // 可根据需要调整字体
     // logo放在进度条上方，整体居中
@@ -6232,9 +6232,8 @@ extern "C" void app_main(void)
     // -- End Meck L76K extra config --
 
     _lock_acquire(&lvgl_api_lock);
-    Set_Lvgl_Startup_Progress_Bar(90);
+    Set_Lvgl_Startup_Progress_Bar(80);
     _lock_release(&lvgl_api_lock);
-
     XL9535->pin_mode(XL9535_SX1262_DIO1, Cpp_Bus_Driver::Xl95x5::Mode::INPUT);
     // LORA复位
     XL9535->pin_mode(XL9535_SX1262_RST, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
@@ -6265,11 +6264,38 @@ extern "C" void app_main(void)
     System_Ui->set_config_rf_params(System_Ui->_device_sx1262);
 
     _lock_acquire(&lvgl_api_lock);
-    Set_Lvgl_Startup_Progress_Bar(100);
+    Set_Lvgl_Startup_Progress_Bar(85);
     _lock_release(&lvgl_api_lock);
 
+    // System_Ui->begin() must run so its widgets exist for background tasks
+    // (e.g. device_battery_health_task updates the LilyGo status bar).
+    // begin() destroys the original splash screen, so we create a fresh
+    // Meck-P4 splash with a new progress bar immediately after.
     _lock_acquire(&lvgl_api_lock);
     System_Ui->begin();
+
+    // Fresh splash screen replacing the LilyGo UI
+    lv_obj_t *meck_splash = lv_obj_create(NULL);
+    lv_obj_set_size(meck_splash, lv_display_get_horizontal_resolution(lv_display_get_default()),
+                    lv_display_get_vertical_resolution(lv_display_get_default()));
+    lv_obj_set_style_bg_color(meck_splash, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_border_width(meck_splash, 0, LV_PART_MAIN);
+
+    Lvgl_Startup_Progress_Bar = lv_bar_create(meck_splash);
+    lv_obj_set_size(Lvgl_Startup_Progress_Bar, lv_pct(70), 10);
+    lv_bar_set_range(Lvgl_Startup_Progress_Bar, 0, 100);
+    lv_bar_set_value(Lvgl_Startup_Progress_Bar, 85, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(Lvgl_Startup_Progress_Bar, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(Lvgl_Startup_Progress_Bar, lv_color_white(), LV_PART_INDICATOR);
+    lv_obj_align(Lvgl_Startup_Progress_Bar, LV_ALIGN_CENTER, 0, 15);
+
+    lv_obj_t *meck_logo = lv_label_create(meck_splash);
+    lv_label_set_text(meck_logo, "Meck-P4");
+    lv_obj_set_style_text_color(meck_logo, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_text_font(meck_logo, &lv_font_montserrat_48, LV_PART_MAIN);
+    lv_obj_align_to(meck_logo, Lvgl_Startup_Progress_Bar, LV_ALIGN_OUT_TOP_MID, 0, -30);
+
+    lv_screen_load(meck_splash);
     _lock_release(&lvgl_api_lock);
 
 #if CONFIG_ENABLE_USB_DISPLAY == true
@@ -6310,18 +6336,33 @@ extern "C" void app_main(void)
     printf("system ui init finish\n");
     System_Ui->set_vibration();
 
+    _lock_acquire(&lvgl_api_lock);
+    Set_Lvgl_Startup_Progress_Bar(88);
+    _lock_release(&lvgl_api_lock);
+
    
-    // ---- Meck (MeshCore) radio attach — C.6 step A smoke test ----
-    // Wraps LilyGo's already-running SX1262 with our mesh::Radio adapter and
-    // reconfigures LoRa params to MeshCore's Australia Narrow preset
-    // (916.575 MHz / 62.5 kHz / SF7 / sync word 0x1424).
-    // Nothing else in Meck is wired up yet — this only proves coexistence.
+    // ---- Meck (MeshCore) radio attach ----
     meck_radio_attach();
+
+    _lock_acquire(&lvgl_api_lock);
+    Set_Lvgl_Startup_Progress_Bar(92);
+    _lock_release(&lvgl_api_lock);
+
     meck_app_init();
+
+    _lock_acquire(&lvgl_api_lock);
+    Set_Lvgl_Startup_Progress_Bar(96);
+    _lock_release(&lvgl_api_lock);
+
     meck_app_start();
 
      //     System_Startup_Message_Init();  // disabled, Meck does not need LilyGo factory popups
     meck_ui_init();
+
+    _lock_acquire(&lvgl_api_lock);
+    Set_Lvgl_Startup_Progress_Bar(100);
+    _lock_release(&lvgl_api_lock);
+
     meck_ui_show_home();
 
     // Diagnostic — dumps task list + CPU% every 10s to serial. Low priority
