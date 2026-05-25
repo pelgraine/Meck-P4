@@ -4282,8 +4282,8 @@ static void create_page_home(lv_obj_t *page) {
     create_tile_button(page, LV_SYMBOL_FILE     "\nReader",   cb_todo_reader,      1, 1);
     create_tile_button(page, LV_SYMBOL_EDIT     "\nNotes",    cb_todo_notes,       0, 2);
     create_tile_button(page, LV_SYMBOL_GPS      "\nDiscover", cb_todo_discover,    1, 2);
-    create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
     create_tile_button(page, LV_SYMBOL_IMAGE    "\nMaps",     cb_todo_maps,        1, 3);
+    create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
     create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    goto_audio_browser,  0, 4);
     create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_todo_web,         1, 4);
 
