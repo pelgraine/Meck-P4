@@ -69,6 +69,7 @@ idf_component_register(
         chmorgan__esp-audio-player
         driver
         espressif__cjson
+        codec2
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
@@ -83,8 +84,9 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 )
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
-    -DMAX_GROUP_CHANNELS=8
+    -DMAX_GROUP_CHANNELS=12
     -DMAX_CONTACTS=2000
+    -DHAVE_CODEC2=1
 )
 
 # Capture the actual UTC build epoch and inject it into the firmware so

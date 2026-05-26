@@ -140,6 +140,9 @@ extern "C" bool meck_app_init() {
     return true;
 }
 
+// ---- Forward declarations for functions defined later ----
+static void meck_apply_pending_voice_send(void);
+
 // ---- Mesh task ----
 static void meck_task(void* arg) {
     printf("meck_task: started\n");
@@ -152,6 +155,7 @@ static void meck_task(void* arg) {
         meck_apply_pending_admin_cli();
         meck_apply_pending_admin_telemetry();
         meck_apply_pending_admin_neighbours();
+        meck_apply_pending_voice_send();
         meck_apply_pending_save();
         if (g_the_mesh) {
             g_the_mesh->loop();
@@ -895,6 +899,156 @@ extern "C" void meck_apply_pending_save() {
 // through to meck_export_to_sd. Same pattern as meck_get_instance() for
 // the mesh.
 // ============================================================================
+
+// ============================================================================
+// Voice over LoRa bridge
+// ----------------------------------------------------------------------------
+// Receive-side: the LVGL task calls meck_drain_pending_voice() periodically,
+// which pops VE3 envelopes and 0x56 voice data packets from the Meck pending
+// rings and feeds them to the global MeckVoice instance.
+//
+// Send-side: the LVGL task queues a voice send via meck_request_voice_send().
+// meck_task drains via meck_apply_pending_voice_send(), which sends the VE3
+// envelope DM followed by staggered raw voice data packets. The Dispatcher's
+// delay parameter handles the stagger timing: first data packet at 3s (after
+// VE3 + ACK settle), subsequent packets every 3s.
+//
+// Fetch-serve: when a 0x72 fetch request arrives, the LVGL task responds
+// by re-sending the requested packets from the cached outgoing session.
+// ============================================================================
+
+#include "MeckVoice.h"
+
+static MeckVoice g_meck_voice;
+
+MeckVoice* meck_get_voice_instance() { return &g_meck_voice; }
+
+// ---- Receive drain (called from LVGL task via ui_update_timer_cb) ----
+extern "C" void meck_drain_pending_voice() {
+    if (!g_the_mesh) return;
+
+    // Drain VE3 envelopes
+    Meck::PendingVoiceEnvelope ve;
+    while (g_the_mesh->drainPendingVoiceEnvelope(ve)) {
+        g_meck_voice.onVE3Received(ve.senderName, ve.ve3Text);
+    }
+
+    // Drain voice data packets
+    Meck::PendingVoicePacket pkt;
+    while (g_the_mesh->drainPendingVoicePacket(pkt)) {
+        uint8_t magic = pkt.data[0];
+        if (magic == VOICE_PKT_MAGIC && pkt.len > 6) {
+            g_meck_voice.onVoicePacketReceived(pkt.data, pkt.len);
+        } else if (magic == VOICE_FETCH_MAGIC && pkt.len >= 6) {
+            // Fetch request — serve from cached outgoing session
+            uint32_t sessionId;
+            memcpy(&sessionId, &pkt.data[1], 4);
+            if (g_meck_voice.hasValidOutSession() &&
+                g_meck_voice.getOutSessionId() == sessionId) {
+                printf("Voice: serving fetch for session 0x%08lX\n", (unsigned long)sessionId);
+                // Re-send all packets from cache
+                // Note: fetch serving requires sendDirect which touches
+                // the radio. We'd need to queue this for meck_task. For
+                // now, log it — full fetch support comes in a later pass.
+                printf("Voice: fetch serve deferred (TODO: queue for meck_task)\n");
+            }
+        }
+    }
+}
+
+// ---- Voice send queue (LVGL -> meck_task) ----
+static volatile bool g_voice_send_pending       = false;
+static volatile int  g_voice_send_contact_idx   = -1;
+
+extern "C" void meck_request_voice_send(int contact_idx) {
+    g_voice_send_contact_idx = contact_idx;
+    g_voice_send_pending = true;
+    printf("meck_request_voice_send: queued to contact[%d]\n", contact_idx);
+}
+
+static void meck_apply_pending_voice_send() {
+    if (!g_voice_send_pending) return;
+    g_voice_send_pending = false;
+    if (!g_the_mesh) return;
+
+    int contact_idx = g_voice_send_contact_idx;
+    if (!g_meck_voice.isCodec2Valid()) {
+        printf("Voice: no valid Codec2 data to send\n");
+        return;
+    }
+
+    // Generate session ID
+    uint32_t sessionId = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFF);
+
+    // Cache outgoing session for fetch requests
+    g_meck_voice.cacheOutSession(sessionId);
+
+    // Format and send VE3 envelope as a DM
+    char envelope[64];
+    g_meck_voice.formatEnvelope(envelope, sizeof(envelope), sessionId);
+    uint32_t expected_ack = 0;
+    bool dmOk = g_the_mesh->sendDirectMessage(contact_idx, envelope, &expected_ack);
+    printf("Voice: VE3 DM '%s' to idx %d: %s\n",
+           envelope, contact_idx, dmOk ? "OK" : "FAIL");
+
+    if (!dmOk) {
+        printf("Voice: envelope send failed, aborting\n");
+        return;
+    }
+
+    // Look up recipient for direct routing.
+    // Note: paths don't persist across reboots (OUT_PATH_UNKNOWN on boot).
+    // The VE3 DM above was sent via flood; its ACK will establish a return
+    // path. We delay the first data packet by 5s to give the ACK time to
+    // arrive and populate out_path. If the path is still unknown at send
+    // time, the Dispatcher floods the packet.
+    ContactInfo ci;
+    g_the_mesh->getContactByIdx((uint32_t)contact_idx, ci);
+    ContactInfo* recipient = g_the_mesh->lookupContactByPubKey(
+        ci.id.pub_key, PUB_KEY_SIZE);
+
+    bool hasDirect = (recipient && recipient->out_path_len != OUT_PATH_UNKNOWN);
+    printf("Voice: routing to %s — %s (path_len=%d)\n",
+           ci.name,
+           hasDirect ? "DIRECT" : "FLOOD (no path yet, DM ACK may establish one)",
+           recipient ? (int)recipient->out_path_len : -1);
+
+    int totalPkts = g_meck_voice.getPacketCount();
+    int sentPkts = 0;
+
+    for (int p = 0; p < totalPkts; p++) {
+        uint8_t pktBuf[184];
+        int pktLen = g_meck_voice.buildVoicePacket(
+            pktBuf, sizeof(pktBuf), sessionId, p);
+        if (pktLen <= 0) continue;
+
+        mesh::Packet* raw = g_the_mesh->createRawData(pktBuf, pktLen);
+        if (!raw) continue;
+
+        // First packet at 5s (wait for DM ACK to establish path),
+        // subsequent packets 3s apart.
+        uint32_t delayMs = 5000 + (uint32_t)p * 3000;
+
+        if (hasDirect) {
+            g_the_mesh->sendDirect(raw, recipient->out_path,
+                                   recipient->out_path_len, delayMs);
+        } else {
+            // Flood — if the DM ACK returns before the Dispatcher fires
+            // this packet, the packet still floods. A future improvement
+            // could re-check the path in a deferred callback.
+            g_the_mesh->sendFlood(raw, delayMs);
+        }
+        sentPkts++;
+        printf("Voice: queued pkt %d/%d (%s, delay %lums)\n",
+               p + 1, totalPkts,
+               hasDirect ? "direct" : "flood",
+               (unsigned long)delayMs);
+    }
+
+    printf("Voice: sent %d/%d packets to %s\n",
+           sentPkts, totalPkts, ci.name);
+}
+
 extern "C" bool meck_export_to_sd_with_flags(uint32_t flags,
                                              char* out_path,
                                              size_t out_path_size) {

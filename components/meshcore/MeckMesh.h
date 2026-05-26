@@ -106,6 +106,12 @@ extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
 #define RESP_SERVER_LOGIN_OK        0
 
 // ============================================================================
+// Voice over LoRa — VE3 protocol magic bytes
+// ============================================================================
+#define VOICE_PKT_MAGIC     0x56  // 'V' — voice data packet (RAW_CUSTOM)
+#define VOICE_FETCH_MAGIC   0x72  // 'r' — voice fetch request (RAW_CUSTOM)
+
+// ============================================================================
 // RepeaterStats — payload format for REQ_TYPE_GET_STATUS responses
 // ----------------------------------------------------------------------------
 // 56-byte struct verbatim from upstream simple_repeater's MyMesh.h. The
@@ -478,6 +484,21 @@ struct DiscoveredNode {
     bool already_in_contacts;
 };
 
+// ---- Channel invite received via DM ----
+// Stored in RAM until accepted/dismissed by the user in the Channels
+// settings screen. Same shape as the companion_radio reference (commit
+// 4cc15f7) but adapted for the P4 pending-ring model.
+#define MAX_PENDING_INVITES   8
+#define MECK_CH_PREFIX        "[MECK:CH]"
+#define MECK_CH_PREFIX_LEN    9
+
+struct PendingChannelInvite {
+    char    name[32];       // channel name
+    uint8_t secret[16];     // channel secret (CIPHER_KEY_SIZE bytes)
+    char    senderName[32]; // who shared it
+    bool    active;         // is this slot in use
+};
+
 // ============================================================
 // P4Mesh — standalone mesh for T-Display P4
 // ============================================================
@@ -521,10 +542,6 @@ public:
         _discovery_tag = 0;
         _discovery_dirty = false;
         memset(_discovered, 0, sizeof(_discovered));
-
-        _advert_enabled = false;
-        _next_advert_ms = 0;
-        _advert_interval_ms = 0;  // No auto-advert — companion nodes advert manually only
 
         _contacts_save_pending = false;
         _contacts_save_at = 0;
@@ -604,18 +621,6 @@ public:
             if (now - _last_identity_sd_check >= 5000) {
                 _last_identity_sd_check = now;
                 _store->ensureIdentityOnSD();
-            }
-        }
-
-        if (_advert_enabled && _advert_interval_ms > 0) {
-            unsigned long now = millis();
-            if (now >= _next_advert_ms) {
-                mesh::Packet* adv = createSelfAdvert(_prefs->node_name);
-                if (adv) {
-                    sendFlood(adv);
-                    printf("Meck: sent advert as '%s'\n", _prefs->node_name);
-                }
-                _next_advert_ms = now + _advert_interval_ms;
             }
         }
 
@@ -851,6 +856,58 @@ public:
             _pending_post_recv[_pending_post_tail].valid = false;
             _pending_post_tail = (_pending_post_tail + 1) % P4_PENDING_POST_RING;
             _pending_post_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    // =====================================================================
+    // Voice over LoRa — pending envelope and raw packet rings
+    // ---------------------------------------------------------------------
+    // VE3 envelope DMs (session metadata) arrive via onMessageRecv and
+    // are stashed here. Raw 0x56 voice data packets arrive via
+    // onRawDataRecv. Both are drained by the LVGL task, which feeds
+    // them to MeckVoice for session reassembly and Codec2 decode.
+    // =====================================================================
+
+    static constexpr int P4_PENDING_VOICE_ENV_RING = 4;
+    static constexpr int P4_PENDING_VOICE_PKT_RING = 16;
+
+    struct PendingVoiceEnvelope {
+        bool valid;
+        char senderName[32];
+        char ve3Text[64];
+    };
+
+    struct PendingVoicePacket {
+        bool    valid;
+        uint8_t data[184];  // MAX_PACKET_PAYLOAD
+        uint8_t len;
+    };
+
+    bool drainPendingVoiceEnvelope(PendingVoiceEnvelope& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_voice_env_count > 0) {
+            out = _pending_voice_env[_pending_voice_env_tail];
+            _pending_voice_env[_pending_voice_env_tail].valid = false;
+            _pending_voice_env_tail = (_pending_voice_env_tail + 1) % P4_PENDING_VOICE_ENV_RING;
+            _pending_voice_env_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    bool drainPendingVoicePacket(PendingVoicePacket& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_voice_pkt_count > 0) {
+            out = _pending_voice_pkt[_pending_voice_pkt_tail];
+            _pending_voice_pkt[_pending_voice_pkt_tail].valid = false;
+            _pending_voice_pkt_tail = (_pending_voice_pkt_tail + 1) % P4_PENDING_VOICE_PKT_RING;
+            _pending_voice_pkt_count--;
             ok = true;
         }
         xSemaphoreGive(_mutex);
@@ -1318,19 +1375,36 @@ public:
     // Channel management — add, delete, save, load
     // =====================================================================
 
-    // Add a hashtag channel by name. SHA-256s the name, uses first 16 bytes
-    // as the 128-bit channel secret. Matches Meck and all MeshCore nodes.
-    void addHashChannel(const char* name) {
-        // SHA-256 the channel name → first 16 bytes become the secret
+    // Create a channel. '#' prefix = public (SHA-256 derived secret from
+    // the name, matches all MeshCore nodes). No '#' prefix = private
+    // (random 16-byte secret via esp_random).
+    void createChannel(const char* name) {
         ChannelDetails newCh;
         memset(&newCh, 0, sizeof(newCh));
-        strncpy(newCh.name, name, sizeof(newCh.name) - 1);
-        newCh.name[sizeof(newCh.name) - 1] = '\0';
 
-        uint8_t hash[32];
-        mesh::Utils::sha256(hash, 32, (const uint8_t*)name, strlen(name));
-        memcpy(newCh.channel.secret, hash, 16);
-        // Upper 16 bytes left as zero → setChannel uses 128-bit mode
+        if (name[0] == '#') {
+            // Public hashtag channel -- derive secret from SHA-256 of name
+            strncpy(newCh.name, name, sizeof(newCh.name) - 1);
+            newCh.name[sizeof(newCh.name) - 1] = '\0';
+
+            uint8_t hash[32];
+            mesh::Utils::sha256(hash, 32, (const uint8_t*)name, strlen(name));
+            memcpy(newCh.channel.secret, hash, 16);
+            printf("Meck: creating public channel '%s'\n", name);
+        } else {
+            // Private channel -- random 16-byte secret
+            strncpy(newCh.name, name, sizeof(newCh.name) - 1);
+            newCh.name[sizeof(newCh.name) - 1] = '\0';
+
+            uint8_t secret[16];
+            uint32_t r = 0;
+            for (int i = 0; i < 16; i++) {
+                if (i % 4 == 0) r = esp_random();
+                secret[i] = (r >> ((i % 4) * 8)) & 0xFF;
+            }
+            memcpy(newCh.channel.secret, secret, 16);
+            printf("Meck: creating private channel '%s'\n", name);
+        }
 
         // Find next empty slot
         for (uint8_t i = 0; i < MAX_GROUP_CHANNELS; i++) {
@@ -1338,12 +1412,95 @@ public:
             if (!getChannel(i, existing) || existing.name[0] == '\0') {
                 if (setChannel(i, newCh)) {
                     saveChannels();
-                    printf("Meck: added channel '%s' at idx %d\n", name, i);
+                    printf("Meck: channel '%s' created at idx %d\n", newCh.name, i);
                 }
                 return;
             }
         }
         printf("Meck: no empty slot for channel '%s'\n", name);
+    }
+
+    // Create a channel from a shared invite (name + pre-set secret).
+    // Used when accepting a pending channel invite.
+    void createChannelFromInvite(const char* name, const uint8_t* secret) {
+        ChannelDetails newCh;
+        memset(&newCh, 0, sizeof(newCh));
+        strncpy(newCh.name, name, sizeof(newCh.name) - 1);
+        newCh.name[sizeof(newCh.name) - 1] = '\0';
+        memcpy(newCh.channel.secret, secret, 16);
+
+        for (uint8_t i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            ChannelDetails existing;
+            if (!getChannel(i, existing) || existing.name[0] == '\0') {
+                if (setChannel(i, newCh)) {
+                    saveChannels();
+                    printf("Meck: accepted channel '%s' at idx %d\n", name, i);
+                }
+                return;
+            }
+        }
+        printf("Meck: no empty slot for invited channel '%s'\n", name);
+    }
+
+    // --- Pending channel invites (received via DM) ---
+    int getPendingInviteCount() const {
+        int count = 0;
+        for (int i = 0; i < MAX_PENDING_INVITES; i++) {
+            if (_pendingInvites[i].active) count++;
+        }
+        return count;
+    }
+    const PendingChannelInvite* getPendingInvite(int idx) const {
+        int seen = 0;
+        for (int i = 0; i < MAX_PENDING_INVITES; i++) {
+            if (_pendingInvites[i].active) {
+                if (seen == idx) return &_pendingInvites[i];
+                seen++;
+            }
+        }
+        return nullptr;
+    }
+    bool addPendingInvite(const char* name, const uint8_t* secret, const char* senderName) {
+        for (int i = 0; i < MAX_PENDING_INVITES; i++) {
+            if (!_pendingInvites[i].active) {
+                strncpy(_pendingInvites[i].name, name, 31);
+                _pendingInvites[i].name[31] = '\0';
+                memcpy(_pendingInvites[i].secret, secret, 16);
+                strncpy(_pendingInvites[i].senderName, senderName, 31);
+                _pendingInvites[i].senderName[31] = '\0';
+                _pendingInvites[i].active = true;
+                return true;
+            }
+        }
+        return false; // no free slots
+    }
+    void removePendingInvite(int idx) {
+        int seen = 0;
+        for (int i = 0; i < MAX_PENDING_INVITES; i++) {
+            if (_pendingInvites[i].active) {
+                if (seen == idx) { _pendingInvites[i].active = false; return; }
+                seen++;
+            }
+        }
+    }
+
+    // Build the [MECK:CH] share message for a channel and send it as a DM.
+    // Returns true if the DM was queued successfully.
+    bool shareChannelViaDM(int channel_idx, int contact_idx) {
+        ChannelDetails ch;
+        if (!getChannel(channel_idx, ch) || ch.name[0] == '\0') return false;
+
+        ContactInfo contact;
+        if (!getContactByIdx((uint32_t)contact_idx, contact)) return false;
+
+        // Build share message: [MECK:CH]name|secret_hex
+        char shareMsg[128];
+        char hexSecret[33];
+        mesh::Utils::toHex(hexSecret, ch.channel.secret, 16);
+        snprintf(shareMsg, sizeof(shareMsg), "%s%s|%s",
+                 MECK_CH_PREFIX, ch.name, hexSecret);
+
+        return sendDirectMessage(contact_idx, shareMsg);
     }
 
     // Delete a channel by index, compact remaining channels down.
@@ -2124,8 +2281,6 @@ public:
         return ok;
     }
 
-    void setAdvertEnabled(bool en) { _advert_enabled = en; }
-    bool isAdvertEnabled() const { return _advert_enabled; }
     const mesh::LocalIdentity& getIdentity() const { return self_id; }
     bool isClockSynced() const {
         // Mirrors the SYNC_THRESHOLD computation in onAdvertRecv:
@@ -2262,6 +2417,61 @@ protected:
                from.name, (unsigned)sender_timestamp,
                (unsigned)path_len, (double)snr, text);
 
+        // Intercept channel share messages before they reach the DM ring.
+        // Parse [MECK:CH]name|secret_hex, stash as a pending invite, and
+        // replace the display text with a sanitised version.
+        const char* display_text = text;
+        char sanitised[64];
+        if (text && strncmp(text, MECK_CH_PREFIX, MECK_CH_PREFIX_LEN) == 0) {
+            const char* payload = text + MECK_CH_PREFIX_LEN;
+            const char* sep = strchr(payload, '|');
+            if (sep && (sep - payload) > 0 && (sep - payload) < 32) {
+                char chName[32];
+                int nameLen = sep - payload;
+                memcpy(chName, payload, nameLen);
+                chName[nameLen] = '\0';
+
+                // Parse hex secret (32 hex chars = 16 bytes)
+                const char* hexStr = sep + 1;
+                int hexLen = strlen(hexStr);
+                if (hexLen >= 32) {
+                    uint8_t secret[16];
+                    mesh::Utils::fromHex(secret, 16, hexStr);
+                    addPendingInvite(chName, secret, from.name);
+                    printf("Meck: channel invite from %s: '%s'\n", from.name, chName);
+                }
+
+                snprintf(sanitised, sizeof(sanitised), "Shared channel: %s", chName);
+                display_text = sanitised;
+            }
+        }
+
+        // Intercept VE3 voice envelope DMs. The actual voice data arrives
+        // separately as PAYLOAD_TYPE_RAW_CUSTOM packets; this DM carries
+        // the session metadata (ID, packet count, duration). Stash into
+        // a pending ring for the LVGL task; sanitise the display text.
+        if (text && strncmp(text, "VE3:", 4) == 0) {
+            printf("Meck: VE3 envelope from %s: %s\n", from.name, text);
+            // Stash into pending voice envelope ring
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            PendingVoiceEnvelope& ve = _pending_voice_env[_pending_voice_env_head];
+            ve.valid = true;
+            strncpy(ve.senderName, from.name, sizeof(ve.senderName) - 1);
+            ve.senderName[sizeof(ve.senderName) - 1] = '\0';
+            strncpy(ve.ve3Text, text, sizeof(ve.ve3Text) - 1);
+            ve.ve3Text[sizeof(ve.ve3Text) - 1] = '\0';
+            _pending_voice_env_head = (_pending_voice_env_head + 1) % P4_PENDING_VOICE_ENV_RING;
+            if (_pending_voice_env_count < P4_PENDING_VOICE_ENV_RING) {
+                _pending_voice_env_count++;
+            } else {
+                _pending_voice_env_tail = (_pending_voice_env_tail + 1) % P4_PENDING_VOICE_ENV_RING;
+            }
+            xSemaphoreGive(_mutex);
+
+            snprintf(sanitised, sizeof(sanitised), "Voice message (%s)", from.name);
+            display_text = sanitised;
+        }
+
         xSemaphoreTake(_mutex, portMAX_DELAY);
         PendingDMRecv& slot = _pending_dm_recv[_pending_dm_head];
         slot.valid = true;
@@ -2272,7 +2482,7 @@ protected:
         memcpy(slot.from_pub_key, from.id.pub_key, PUB_KEY_SIZE);
         strncpy(slot.from_name, from.name, sizeof(slot.from_name) - 1);
         slot.from_name[sizeof(slot.from_name) - 1] = '\0';
-        strncpy(slot.text, text, sizeof(slot.text) - 1);
+        strncpy(slot.text, display_text, sizeof(slot.text) - 1);
         slot.text[sizeof(slot.text) - 1] = '\0';
 
         _pending_dm_head = (_pending_dm_head + 1) % P4_PENDING_DM_RING;
@@ -3338,6 +3548,120 @@ public:
         if (_mutex) xSemaphoreGive(_mutex);
     }
 
+    // ---- Zero-hop ping (single-hop trace to a repeater) ----
+    //
+    // Sends a TRACE packet with a single hop hash (the target's pub_key
+    // prefix) via sendDirect. The target repeater appends its received
+    // SNR and retransmits; we receive the completed trace in onTraceRecv
+    // which matches against _ping_pending_tag (separate from the Trace
+    // screen's _trace_pending_tag so both can coexist).
+    //
+    // Result fields:
+    //   duration_ms  — round-trip time in milliseconds
+    //   snr_there    — SNR×4 at the target (from path_snrs[0])
+    //   snr_back     — SNR×4 as received by us (from packet->_snr)
+
+    struct MeckPingResult {
+        uint32_t duration_ms;
+        int8_t   snr_there;       // SNR×4 at the repeater
+        int8_t   snr_back;        // SNR×4 heard locally
+        char     target_name[32]; // repeater name for display
+    };
+
+    // Count contacts (repeaters and room servers only) whose pub_key
+    // prefix matches the given contact at the specified byte width.
+    // Used by the UI to decide whether to show a duplicate prefix
+    // warning before sending a 1-byte ping.
+    int countMatchingPrefixes(int contact_idx, int prefix_bytes) {
+        ContactInfo target;
+        if (!getContactByIdx((uint32_t)contact_idx, target)) return 0;
+
+        int count = 0;
+        for (int i = 0; i < getNumContacts(); i++) {
+            ContactInfo ci;
+            if (!getContactByIdx((uint32_t)i, ci)) continue;
+            if (ci.type != 2 /* ADV_TYPE_REPEATER */ &&
+                ci.type != 3 /* ADV_TYPE_ROOM */)
+                continue;
+            if (memcmp(ci.id.pub_key, target.id.pub_key, prefix_bytes) == 0)
+                count++;
+        }
+        return count;
+    }
+
+    // Send a zero-hop ping (single-hop trace) to the contact at
+    // contact_idx. path_hash_size is 1 or 2 (bytes per hop hash).
+    // Returns true if the trace was queued successfully.
+    bool uiSendPing(int contact_idx, uint8_t path_hash_size) {
+        if (contact_idx < 0) return false;
+        if (path_hash_size < 1 || path_hash_size > 2) return false;
+
+        ContactInfo contact;
+        if (!getContactByIdx((uint32_t)contact_idx, contact)) {
+            printf("Meck: uiSendPing idx %d not found\n", contact_idx);
+            return false;
+        }
+
+        uint32_t tag = 0, auth = 0;
+        mesh::RNG *rng = getRNG();
+        if (rng) {
+            rng->random((uint8_t*)&tag,  4);
+            rng->random((uint8_t*)&auth, 4);
+        }
+        uint8_t flags = (path_hash_size == 2) ? 1 : 0;
+
+        mesh::Packet *pkt = createTrace(tag, auth, flags);
+        if (!pkt) {
+            printf("Meck: uiSendPing packet pool empty\n");
+            return false;
+        }
+
+        // Single hop: the target's pub_key prefix
+        uint8_t hop_hash[2];
+        memcpy(hop_hash, contact.id.pub_key, path_hash_size);
+
+        unsigned long now = millis();
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+        _ping_pending_tag  = tag;
+        _ping_pending_auth = auth;
+        _ping_sent_at_ms   = now;
+        _ping_dirty        = false;
+        strncpy(_ping_target_name, contact.name,
+                sizeof(_ping_target_name) - 1);
+        _ping_target_name[sizeof(_ping_target_name) - 1] = '\0';
+        if (_mutex) xSemaphoreGive(_mutex);
+
+        sendDirect(pkt, hop_hash, path_hash_size);
+
+        printf("Meck: uiSendPing to %s tag=0x%08X %d-byte mode\n",
+               contact.name, (unsigned)tag, (int)path_hash_size);
+        return true;
+    }
+
+    // UI polls this every refresh tick. Returns true ONCE per result.
+    bool consumePingResult(MeckPingResult& out) {
+        bool got = false;
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+        if (_ping_dirty) {
+            out = _ping_result;
+            _ping_dirty = false;
+            got = true;
+        }
+        if (_mutex) xSemaphoreGive(_mutex);
+        return got;
+    }
+
+    // Cancel any pending ping. Called when the user leaves the contact
+    // detail screen or starts a new ping.
+    void pingClearPending() {
+        if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+        _ping_pending_tag  = 0;
+        _ping_pending_auth = 0;
+        _ping_sent_at_ms   = 0;
+        _ping_dirty        = false;
+        if (_mutex) xSemaphoreGive(_mutex);
+    }
+
     // ---- Contact custom path setters ----
     //
     // Used by the Path Editor screen. encoded_path_len is the standard
@@ -3443,12 +3767,62 @@ protected:
                    (unsigned)tag, (unsigned)hops, (unsigned)hash_size,
                    (int)_trace_result.final_snr,
                    (unsigned)_trace_result.duration_ms);
+        } else if (_ping_pending_tag != 0 && tag == _ping_pending_tag) {
+            // Ping response (single-hop trace used as zero-hop ping)
+            uint8_t hops = path_len & 63;
+
+            _ping_result.duration_ms = (uint32_t)(millis() - _ping_sent_at_ms);
+            _ping_result.snr_there   = (hops > 0 && path_snrs)
+                                     ? (int8_t)path_snrs[0] : 0;
+            _ping_result.snr_back    = packet ? packet->_snr : 0;
+            strncpy(_ping_result.target_name, _ping_target_name,
+                    sizeof(_ping_result.target_name) - 1);
+            _ping_result.target_name[sizeof(_ping_result.target_name) - 1] = '\0';
+
+            _ping_dirty = true;
+            _ping_pending_tag  = 0;
+            _ping_pending_auth = 0;
+
+            printf("Meck: onTraceRecv PING MATCH tag=0x%08X dur=%ums "
+                   "snr_there=%.2fdB snr_back=%.2fdB\n",
+                   (unsigned)tag, (unsigned)_ping_result.duration_ms,
+                   (float)_ping_result.snr_there / 4.0f,
+                   (float)_ping_result.snr_back / 4.0f);
         } else {
             printf("Meck: onTraceRecv ignored tag=0x%08X (pending=0x%08X)\n",
                    (unsigned)tag, (unsigned)_trace_pending_tag);
         }
 
         if (_mutex) xSemaphoreGive(_mutex);
+    }
+
+    // ---- onRawDataRecv ----
+    //
+    // Fires for PAYLOAD_TYPE_RAW_CUSTOM (0x0F) packets. Voice data uses
+    // magic byte 0x56, fetch requests use 0x72. Stash into pending rings
+    // for the LVGL task to drain via MeckVoice.
+    void onRawDataRecv(mesh::Packet* pkt) override {
+        if (!pkt || pkt->payload_len < 1) return;
+        uint8_t magic = pkt->payload[0];
+
+        if (magic == VOICE_PKT_MAGIC || magic == VOICE_FETCH_MAGIC) {
+            printf("Meck: onRawDataRecv magic=0x%02X len=%u\n",
+                   magic, (unsigned)pkt->payload_len);
+
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            PendingVoicePacket& slot = _pending_voice_pkt[_pending_voice_pkt_head];
+            slot.valid = true;
+            slot.len = (uint8_t)(pkt->payload_len > 184 ? 184 : pkt->payload_len);
+            memcpy(slot.data, pkt->payload, slot.len);
+            _pending_voice_pkt_head = (_pending_voice_pkt_head + 1) % P4_PENDING_VOICE_PKT_RING;
+            if (_pending_voice_pkt_count < P4_PENDING_VOICE_PKT_RING) {
+                _pending_voice_pkt_count++;
+            } else {
+                _pending_voice_pkt_tail = (_pending_voice_pkt_tail + 1) % P4_PENDING_VOICE_PKT_RING;
+                printf("Meck: voice pkt ring full, dropping oldest\n");
+            }
+            xSemaphoreGive(_mutex);
+        }
     }
 
 private:
@@ -3482,10 +3856,6 @@ private:
     uint32_t _discovery_tag;
     volatile bool _discovery_dirty;
 
-    bool _advert_enabled;
-    unsigned long _next_advert_ms;
-    unsigned long _advert_interval_ms;
-
     bool _contacts_save_pending;
     unsigned long _contacts_save_at;
 
@@ -3500,6 +3870,19 @@ private:
     unsigned long _trace_sent_at_ms   = 0;
     volatile bool _trace_dirty        = false;
     MeckTraceResult _trace_result{};
+
+    // ---- Ping state (single-hop trace used as zero-hop ping) ----
+    // Same pattern as trace state. Separate so pings don't conflict
+    // with the Trace Path screen.
+    uint32_t      _ping_pending_tag  = 0;
+    uint32_t      _ping_pending_auth = 0;
+    unsigned long _ping_sent_at_ms   = 0;
+    volatile bool _ping_dirty        = false;
+    MeckPingResult _ping_result{};
+    char          _ping_target_name[32] = {};
+
+    // ---- Pending channel invites (RAM-only) ----
+    PendingChannelInvite _pendingInvites[MAX_PENDING_INVITES] = {};
 
     // Last millis() at which Meck::loop() called ensureIdentityOnSD().
     // Spaced 5 seconds apart so the periodic SD-mount probe doesn't run
@@ -3527,6 +3910,18 @@ private:
     int  _pending_post_head  = 0;
     int  _pending_post_tail  = 0;
     int  _pending_post_count = 0;
+
+    // ---- Pending voice envelope ring (VE3 DMs) ----
+    PendingVoiceEnvelope _pending_voice_env[P4_PENDING_VOICE_ENV_RING] = {};
+    int  _pending_voice_env_head  = 0;
+    int  _pending_voice_env_tail  = 0;
+    int  _pending_voice_env_count = 0;
+
+    // ---- Pending voice data packet ring (0x56 raw packets) ----
+    PendingVoicePacket _pending_voice_pkt[P4_PENDING_VOICE_PKT_RING] = {};
+    int  _pending_voice_pkt_head  = 0;
+    int  _pending_voice_pkt_tail  = 0;
+    int  _pending_voice_pkt_count = 0;
 
     // ---- Expected-ACK tracking table for outgoing DMs ----
     // Direct port of upstream MyMesh's circular ack table. Each entry
@@ -3676,7 +4071,7 @@ private:
         }
 
         // Slots 1+: hashtag channels — first 16 bytes of SHA-256(name) is
-        // the secret, with the leading '#' included. Matches addHashChannel()
+        // the secret, with the leading '#' included. Matches createChannel()
         // and the rest of the AU mesh.
         const char* hashed_defaults[] = { "#test" };
         const int n_hashed = (int)(sizeof(hashed_defaults) / sizeof(hashed_defaults[0]));

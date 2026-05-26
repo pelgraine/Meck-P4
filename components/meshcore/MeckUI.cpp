@@ -29,7 +29,7 @@
  * bus contention. See radio_request_reconfig and meck_request_send_text
  * in target.h. Read-only mesh accessors (getContactByIdx, getMessages,
  * getChannel, getNumContacts, etc) and persistence-only writes
- * (addHashChannel, deleteChannel) are safe to call directly from LVGL.
+ * (createChannel, deleteChannel) are safe to call directly from LVGL.
  */
 
 #include "MeckUI.h"
@@ -39,6 +39,12 @@
 #include "MeckDataStore.h"
 #include "MeckAudioUI.h"
 #include "MeckAudio.h"
+#include "MeckVoice.h"
+
+// Voice bridge functions (defined in meck_app.cpp)
+extern "C" void meck_drain_pending_voice(void);
+extern "C" void meck_request_voice_send(int contact_idx);
+extern MeckVoice* meck_get_voice_instance(void);
 #include "NotifSounds.h"
 #include "MeckMapScreen.h"
 
@@ -53,6 +59,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <cstdlib>
 #include <ctime>
 #include <climits>
@@ -207,13 +215,20 @@ static void meck_font_restyle_all() {
     }
 }
 
-#define NOTCH_SAFE_X  20
-#define NOTCH_SAFE_Y  20
+#if defined(CONFIG_SCREEN_TYPE_RM69A10)
+  #define MECK_IS_AMOLED  1
+  #define NOTCH_SAFE_X  30
+  #define NOTCH_SAFE_Y  35
+#else
+  #define MECK_IS_AMOLED  0
+  #define NOTCH_SAFE_X  20
+  #define NOTCH_SAFE_Y  20
+#endif
 
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3.6.1"
+#define MECK_FIRMWARE_VERSION "0.3.7"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -322,7 +337,7 @@ typedef enum {
 
 static int g_home_color_scheme = HOME_COLOR_PLAIN;
 
-#define MECK_HOME_TILE_COUNT 10
+#define MECK_HOME_TILE_COUNT 12
 static lv_obj_t *tile_buttons[MECK_HOME_TILE_COUNT] = {};
 static int       tile_button_count = 0;
 
@@ -391,6 +406,11 @@ static lv_obj_t *lbl_set_homecolor = NULL;
 // recursive mutex so cross-task printf calls serialise on the FILE*.
 static lv_obj_t *scr_debug_logs        = NULL;
 static lv_obj_t *lbl_set_debug_logs    = NULL;  // value label on the Settings row
+
+// "Not yet implemented" placeholder screen — shared by Reader, Notes, Web,
+// Voice, Camera tiles. Title label is updated per-tile before screen load.
+static lv_obj_t *scr_not_implemented   = NULL;
+static lv_obj_t *lbl_not_impl_title    = NULL;
 static lv_obj_t *lbl_debug_status      = NULL;  // status text on the subpage
 static lv_obj_t *btn_debug_start       = NULL;
 static lv_obj_t *btn_debug_stop        = NULL;
@@ -451,6 +471,76 @@ static lv_obj_t *kb_ch_settings_add        = NULL;
 static lv_obj_t *obj_tone_picker_panel  = NULL;
 static lv_obj_t *obj_tone_picker_scroll = NULL;
 static lv_obj_t *lbl_ch_detail_tone     = NULL;
+
+// Position settings sub-screen (Settings > Position)
+static lv_obj_t *scr_settings_position   = NULL;
+static lv_obj_t *lbl_pos_lat_value       = NULL;
+static lv_obj_t *lbl_pos_lon_value       = NULL;
+static lv_obj_t *lbl_pos_mode_value      = NULL;
+
+// Position numeric edit overlay (on scr_settings_position)
+static lv_obj_t *obj_pos_edit_panel      = NULL;
+static lv_obj_t *ta_pos_edit             = NULL;
+static lv_obj_t *kb_pos_edit             = NULL;
+static int       g_pos_edit_field        = 0;  // 3 = lat, 4 = lon
+
+// Paste position buffer — filled by Copy Position on the position
+// subscreen, consumed by compose textareas on channel/DM/room screens.
+static char g_position_paste_buffer[32]  = {};
+static lv_obj_t *btn_paste_position      = NULL;  // on scr_messages
+static lv_obj_t *btn_room_paste_position = NULL;  // on scr_room_messages
+
+// Share channel — contact picker overlay on scr_channel_detail
+static lv_obj_t *obj_ch_share_picker_panel  = NULL;
+static lv_obj_t *obj_ch_share_picker_scroll = NULL;
+static int g_share_channel_idx              = -1;
+
+// Voice screens — landing (Inbox/Record picker), inbox, and record
+static lv_obj_t *scr_voice_landing          = NULL;  // Inbox / Record picker
+static lv_obj_t *btn_voice_inbox            = NULL;  // Inbox button on landing
+static lv_obj_t *lbl_voice_inbox_badge      = NULL;  // unread count badge
+static lv_obj_t *btn_voice_record_nav       = NULL;  // Record button on landing
+
+static lv_obj_t *scr_voice_inbox            = NULL;  // received message list
+static lv_obj_t *obj_voice_inbox_scroll     = NULL;  // scrollable container
+
+static lv_obj_t *scr_voice                  = NULL;  // recording screen
+static lv_obj_t *lbl_voice_status           = NULL;
+static lv_obj_t *lbl_voice_timer            = NULL;
+static lv_obj_t *btn_voice_record           = NULL;
+static lv_obj_t *lbl_voice_record_btn       = NULL;
+static lv_obj_t *btn_voice_play             = NULL;
+static lv_obj_t *btn_voice_send             = NULL;
+static lv_obj_t *btn_voice_discard          = NULL;
+static lv_obj_t *obj_voice_contact_panel    = NULL;
+static lv_obj_t *obj_voice_contact_scroll   = NULL;
+static bool      g_voice_has_recording      = false;
+static char      g_voice_last_wav_path[96]  = {};
+
+// Voice send status tracking
+static uint32_t  g_voice_send_complete_ms   = 0;     // millis when send should be done
+static bool      g_voice_send_in_flight     = false;
+
+// Previous recordings scroll area on record screen
+static lv_obj_t *obj_voice_prev_scroll      = NULL;
+
+// Voice inbox metadata — persisted to /sdcard/voice/inbox.cfg
+#define VOICE_INBOX_MAX       32
+#define VOICE_INBOX_FOLDER    "/sdcard/voice/inbox"
+#define VOICE_INBOX_CFG       "/sdcard/voice/inbox.cfg"
+
+struct VoiceInboxEntry {
+    char     senderName[32];
+    char     filename[48];      // just the basename, inside VOICE_INBOX_FOLDER
+    uint32_t timestamp;         // UTC epoch
+    uint8_t  durationSec;
+    bool     played;
+    bool     valid;
+};
+
+static VoiceInboxEntry g_voice_inbox[VOICE_INBOX_MAX] = {};
+static int g_voice_inbox_count   = 0;
+static int g_voice_inbox_unread  = 0;
 
 // Radio preset picker
 static lv_obj_t *scr_radio_picker  = NULL;
@@ -748,6 +838,20 @@ static lv_obj_t *kb_room_compose            = NULL;  // composer keyboard (Piece
 static lv_obj_t *btn_contact_admin          = NULL;  // visible only for ADV_TYPE_REPEATER/ROOM
 static lv_obj_t *lbl_contact_admin_btn      = NULL;  // text inside btn_contact_admin; updated per contact type ("Admin" for repeater, "Login" for room)
 static lv_obj_t *btn_contact_dm             = NULL;  // visible only for ADV_TYPE_CHAT
+static lv_obj_t *btn_contact_ping           = NULL;  // visible only for ADV_TYPE_REPEATER/ROOM
+
+// ---- Ping UI state ----
+// Ping result modal (green success / red failure), prefix warning
+// dialog, and byte-size chooser (long-press).
+static lv_obj_t *obj_ping_result_panel      = NULL;  // full-screen overlay for result
+static lv_obj_t *lbl_ping_result            = NULL;  // multi-line result text
+static lv_obj_t *obj_ping_warning_panel     = NULL;  // prefix warning overlay
+static lv_obj_t *obj_ping_chooser_panel     = NULL;  // 1/2 byte long-press chooser
+
+static bool     g_ping_in_flight            = false;
+static uint8_t  g_ping_byte_size            = 1;     // 1 or 2
+static unsigned long g_ping_timeout_ms      = 0;     // millis() when ping times out
+#define MECK_PING_TIMEOUT_SEC  15
 static lv_obj_t *lbl_admin_login_title      = NULL;
 static lv_obj_t *lbl_admin_login_subtitle   = NULL;
 static lv_obj_t *lbl_admin_login_status     = NULL;
@@ -993,6 +1097,42 @@ static void on_tone_picker_cancel(lv_event_t *e);
 static void refresh_tone_picker_list();
 static void on_radio_preset_select(lv_event_t *e);
 
+// Position subscreen
+static void goto_settings_position(lv_event_t *e);
+static void on_pos_lat_tap(lv_event_t *e);
+static void on_pos_lon_tap(lv_event_t *e);
+static void on_pos_mode_tap(lv_event_t *e);
+static void on_pos_copy_tap(lv_event_t *e);
+static void create_settings_position_screen();
+static void refresh_position_labels();
+
+// Paste position
+static void on_paste_position_tap(lv_event_t *e);
+static void on_room_paste_position_tap(lv_event_t *e);
+
+// Channel share picker
+static void on_ch_detail_share_tap(lv_event_t *e);
+static void on_ch_share_picker_select(lv_event_t *e);
+static void on_ch_share_picker_cancel(lv_event_t *e);
+
+// Voice screens
+static void on_voice_record_tap(lv_event_t *e);
+static void on_voice_play_tap(lv_event_t *e);
+static void on_voice_send_tap(lv_event_t *e);
+static void on_voice_contact_select(lv_event_t *e);
+static void on_voice_contact_cancel(lv_event_t *e);
+static void on_voice_discard_tap(lv_event_t *e);
+static void create_voice_landing_screen(void);
+static void create_voice_inbox_screen(void);
+static void create_voice_record_screen(void);
+static void voice_update_ui(void);
+static void voice_inbox_load(void);
+static void voice_inbox_save(void);
+static void voice_inbox_add(const char *senderName, const char *wavPath,
+                            uint32_t timestamp, uint8_t durationSec);
+static void voice_inbox_refresh(void);
+static void voice_inbox_update_badge(void);
+
 static void on_send_clicked(lv_event_t *e);
 static void on_compose_focused(lv_event_t *e);
 static void on_compose_defocused(lv_event_t *e);
@@ -1018,6 +1158,15 @@ static void on_admin_password_defocused(lv_event_t *e);
 static void on_admin_password_eye_tap(lv_event_t *e);
 static void on_admin_home_back(lv_event_t *e);
 static void on_admin_subpage_back(lv_event_t *e);
+// Ping (zero-hop trace)
+static void on_contact_ping_tap(lv_event_t *e);
+static void on_contact_ping_longpress(lv_event_t *e);
+static void ping_send_now(uint8_t byte_size);
+static void ping_dismiss_result(lv_event_t *e);
+static void ping_show_result(bool success, const char *body);
+static void ping_dismiss_warning(lv_event_t *e);
+static void ping_confirm_warning(lv_event_t *e);
+static void ping_chooser_select(lv_event_t *e);
 // Room messages (Piece A: stub screen, no storage/rendering yet)
 static void create_room_messages_screen();
 static void on_room_back(lv_event_t *e);
@@ -1143,8 +1292,12 @@ static void on_ch_add_kb_event(lv_event_t *e);
 // Home grid stub callbacks (for tiles that don't have ports yet)
 // ============================================================================
 
-static void cb_todo_reader(lv_event_t* e)   { printf("MeckUI: Reader tile clicked (TODO)\n"); }
-static void cb_todo_notes(lv_event_t* e)    { printf("MeckUI: Notes tile clicked (TODO)\n"); }
+static void show_not_implemented(const char* feature_name) {
+    if (lbl_not_impl_title) lv_label_set_text(lbl_not_impl_title, feature_name);
+    if (scr_not_implemented) lv_screen_load(scr_not_implemented);
+}
+static void cb_todo_reader(lv_event_t* e)   { show_not_implemented("Reader"); }
+static void cb_todo_notes(lv_event_t* e)    { show_not_implemented("Notes"); }
 static void cb_todo_discover(lv_event_t* e) {
     // Wired to the Discover tile on the home grid. Mirrors Meck T-Deck
     // Pro's F-key Discover: shows nearby repeaters from the same heard-
@@ -1159,7 +1312,14 @@ static void goto_audio_browser(lv_event_t* e) {
     (void)e;
     meck_audio_ui_show_browser();
 }
-static void cb_todo_web(lv_event_t* e)      { printf("MeckUI: Web tile clicked (TODO)\n"); }
+static void cb_todo_web(lv_event_t* e)      { show_not_implemented("Web"); }
+static void cb_todo_voice(lv_event_t* e)    {
+    if (scr_voice_landing) {
+        voice_inbox_update_badge();
+        lv_screen_load(scr_voice_landing);
+    }
+}
+static void cb_todo_camera(lv_event_t* e)   { show_not_implemented("Camera"); }
 
 // ============================================================================
 // Home tile colour scheme: NVS persistence + style application.
@@ -1266,7 +1426,7 @@ static lv_obj_t* create_tile_button(lv_obj_t *parent, const char *label,
     // 2-column grid (was 3). With margins of 20 px each side and a 10 px
     // gap between cols, tile width is (SCREEN_WIDTH - 50) / 2.
     int tileW = (SCREEN_WIDTH - 50) / 2;
-    int tileH = 170;          // tall enough to feel tappable; icons + label fit
+    int tileH = 140;          // 6 rows fit with room for hint text at bottom
     int gapX  = 10;
     int gapY  = 10;
     int gridX = 20;
@@ -3321,6 +3481,319 @@ static void on_region_edit_kb_event(lv_event_t *e) {
 }
 
 // ============================================================================
+// Position settings sub-screen handlers
+// ============================================================================
+
+static const char* position_mode_label(uint8_t mode) {
+    switch (mode) {
+        case 1:  return "Manual";
+        case 2:  return "Auto-update (GPS)";
+        default: return "Off";
+    }
+}
+
+static void refresh_position_labels() {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    if (lbl_pos_lat_value) {
+        if (prefs->position_lat_e7 != 0 || prefs->position_lon_e7 != 0) {
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%.7f", (double)prefs->position_lat_e7 / 1e7);
+            lv_label_set_text(lbl_pos_lat_value, buf);
+        } else {
+            lv_label_set_text(lbl_pos_lat_value, "not set");
+        }
+    }
+    if (lbl_pos_lon_value) {
+        if (prefs->position_lat_e7 != 0 || prefs->position_lon_e7 != 0) {
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%.7f", (double)prefs->position_lon_e7 / 1e7);
+            lv_label_set_text(lbl_pos_lon_value, buf);
+        } else {
+            lv_label_set_text(lbl_pos_lon_value, "not set");
+        }
+    }
+    if (lbl_pos_mode_value) {
+        lv_label_set_text(lbl_pos_mode_value, position_mode_label(prefs->position_mode));
+    }
+}
+
+static void goto_settings_position(lv_event_t *e) {
+    refresh_position_labels();
+    if (scr_settings_position) lv_screen_load(scr_settings_position);
+}
+
+static void on_pos_edit_save(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!ta_pos_edit || !mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    const char* text = lv_textarea_get_text(ta_pos_edit);
+    if (!text || !text[0]) {
+        if (obj_pos_edit_panel) lv_obj_add_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if (g_pos_edit_field == 3) {
+        double lat = strtod(text, nullptr);
+        if (lat >= -90.0 && lat <= 90.0) {
+            prefs->position_lat_e7 = (int32_t)(lat * 1e7);
+            mesh->getDataStore()->savePrefs(*prefs);
+            printf("Settings: Lat = %.7f\n", lat);
+            refresh_position_labels();
+        }
+    } else if (g_pos_edit_field == 4) {
+        double lon = strtod(text, nullptr);
+        if (lon >= -180.0 && lon <= 180.0) {
+            prefs->position_lon_e7 = (int32_t)(lon * 1e7);
+            mesh->getDataStore()->savePrefs(*prefs);
+            printf("Settings: Lon = %.7f\n", lon);
+            refresh_position_labels();
+        }
+    }
+    if (obj_pos_edit_panel) lv_obj_add_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_pos_edit_cancel(lv_event_t *e) {
+    if (obj_pos_edit_panel) lv_obj_add_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_pos_edit_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)       on_pos_edit_save(NULL);
+    else if (code == LV_EVENT_CANCEL) on_pos_edit_cancel(NULL);
+}
+
+static void on_pos_lat_tap(lv_event_t *e) {
+    if (!obj_pos_edit_panel || !ta_pos_edit) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    // Don't allow manual edit in auto-GPS mode
+    if (prefs->position_mode == 2) return;
+    g_pos_edit_field = 3;
+    char buf[24];
+    if (prefs->position_lat_e7 != 0) {
+        snprintf(buf, sizeof(buf), "%.7f", (double)prefs->position_lat_e7 / 1e7);
+    } else {
+        buf[0] = '\0';
+    }
+    lv_textarea_set_text(ta_pos_edit, buf);
+    lv_obj_remove_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    if (kb_pos_edit) lv_keyboard_set_textarea(kb_pos_edit, ta_pos_edit);
+}
+
+static void on_pos_lon_tap(lv_event_t *e) {
+    if (!obj_pos_edit_panel || !ta_pos_edit) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    if (prefs->position_mode == 2) return;
+    g_pos_edit_field = 4;
+    char buf[24];
+    if (prefs->position_lon_e7 != 0) {
+        snprintf(buf, sizeof(buf), "%.7f", (double)prefs->position_lon_e7 / 1e7);
+    } else {
+        buf[0] = '\0';
+    }
+    lv_textarea_set_text(ta_pos_edit, buf);
+    lv_obj_remove_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    if (kb_pos_edit) lv_keyboard_set_textarea(kb_pos_edit, ta_pos_edit);
+}
+
+static void on_pos_mode_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    prefs->position_mode = (prefs->position_mode + 1) % 3;
+    mesh->getDataStore()->savePrefs(*prefs);
+    printf("Settings: position_mode = %d (%s)\n",
+           prefs->position_mode, position_mode_label(prefs->position_mode));
+    refresh_position_labels();
+}
+
+static void on_pos_copy_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    if (prefs->position_lat_e7 == 0 && prefs->position_lon_e7 == 0) return;
+
+    snprintf(g_position_paste_buffer, sizeof(g_position_paste_buffer),
+             "%.6f,%.6f",
+             (double)prefs->position_lat_e7 / 1e7,
+             (double)prefs->position_lon_e7 / 1e7);
+    printf("Position: copied '%s' to paste buffer\n", g_position_paste_buffer);
+
+    // Show a brief toast. Use a timed label on the position screen.
+    if (scr_settings_position) {
+        lv_obj_t *toast = lv_label_create(scr_settings_position);
+        lv_label_set_text(toast, "Copied!");
+        lv_obj_set_style_text_color(toast, lv_palette_main(LV_PALETTE_GREEN), 0);
+        meck_set_font(toast, &meck_montserrat_22, 0);
+        lv_obj_align(toast, LV_ALIGN_BOTTOM_MID, 0, -40);
+        // Auto-dismiss after 2s via a one-shot timer
+        lv_timer_t *tmr = lv_timer_create([](lv_timer_t *t) {
+            lv_obj_t *obj = (lv_obj_t *)lv_timer_get_user_data(t);
+            if (obj) lv_obj_del(obj);
+            lv_timer_del(t);
+        }, 2000, toast);
+        lv_timer_set_repeat_count(tmr, 1);
+    }
+}
+
+// ============================================================================
+// Paste Position handlers
+// ============================================================================
+
+static void on_paste_position_tap(lv_event_t *e) {
+    (void)e;
+    if (g_position_paste_buffer[0] == '\0') return;
+    if (ta_compose) {
+        lv_textarea_add_text(ta_compose, g_position_paste_buffer);
+    }
+    g_position_paste_buffer[0] = '\0';
+    if (btn_paste_position) lv_obj_add_flag(btn_paste_position, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_room_paste_position_tap(lv_event_t *e) {
+    (void)e;
+    if (g_position_paste_buffer[0] == '\0') return;
+    if (ta_room_compose) {
+        lv_textarea_add_text(ta_room_compose, g_position_paste_buffer);
+    }
+    g_position_paste_buffer[0] = '\0';
+    if (btn_room_paste_position) lv_obj_add_flag(btn_room_paste_position, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ============================================================================
+// Channel share picker handlers
+// ============================================================================
+
+static void on_ch_share_picker_cancel(lv_event_t *e) {
+    (void)e;
+    if (obj_ch_share_picker_panel) {
+        lv_obj_del(obj_ch_share_picker_panel);
+        obj_ch_share_picker_panel = NULL;
+        obj_ch_share_picker_scroll = NULL;
+    }
+}
+
+static void on_ch_share_picker_select(lv_event_t *e) {
+    int contact_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    Meck *mesh = meck_get_instance();
+    if (!mesh || g_share_channel_idx < 0) return;
+
+    if (mesh->shareChannelViaDM(g_share_channel_idx, contact_idx)) {
+        ContactInfo ci;
+        if (mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
+            printf("Channels: shared channel %d with %s\n",
+                   g_share_channel_idx, ci.name);
+        }
+    } else {
+        printf("Channels: share failed (channel %d, contact %d)\n",
+               g_share_channel_idx, contact_idx);
+    }
+
+    on_ch_share_picker_cancel(NULL);
+}
+
+static void on_ch_detail_share_tap(lv_event_t *e) {
+    (void)e;
+    Meck *mesh = meck_get_instance();
+    if (!mesh || g_detail_channel_idx < 0) return;
+    if (!scr_channel_detail) return;
+
+    g_share_channel_idx = g_detail_channel_idx;
+
+    // Clean up any existing picker
+    if (obj_ch_share_picker_panel) {
+        lv_obj_del(obj_ch_share_picker_panel);
+        obj_ch_share_picker_panel = NULL;
+    }
+
+    obj_ch_share_picker_panel = lv_obj_create(scr_channel_detail);
+    lv_obj_set_size(obj_ch_share_picker_panel, SCREEN_WIDTH - 40, SCREEN_HEIGHT - 80);
+    lv_obj_align(obj_ch_share_picker_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(obj_ch_share_picker_panel, lv_color_make(15, 15, 25), 0);
+    lv_obj_set_style_bg_opa(obj_ch_share_picker_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(obj_ch_share_picker_panel, 16, 0);
+    lv_obj_set_style_border_width(obj_ch_share_picker_panel, 1, 0);
+    lv_obj_set_style_border_color(obj_ch_share_picker_panel,
+        lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_pad_all(obj_ch_share_picker_panel, 10, 0);
+    lv_obj_clear_flag(obj_ch_share_picker_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Title
+    lv_obj_t *title = lv_label_create(obj_ch_share_picker_panel);
+    lv_label_set_text(title, "Share with contact:");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_18, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 5, 5);
+
+    // Cancel button
+    lv_obj_t *btn_cancel = lv_button_create(obj_ch_share_picker_panel);
+    lv_obj_set_size(btn_cancel, 80, 40);
+    lv_obj_align(btn_cancel, LV_ALIGN_TOP_RIGHT, -5, 0);
+    lv_obj_set_style_bg_color(btn_cancel, lv_color_make(80, 30, 30), 0);
+    lv_obj_set_style_radius(btn_cancel, 8, 0);
+    lv_obj_t *cancel_lbl = lv_label_create(btn_cancel);
+    lv_label_set_text(cancel_lbl, "Cancel");
+    lv_obj_set_style_text_color(cancel_lbl, lv_color_white(), 0);
+    meck_set_font(cancel_lbl, &meck_montserrat_14, 0);
+    lv_obj_center(cancel_lbl);
+    lv_obj_add_event_cb(btn_cancel, on_ch_share_picker_cancel, LV_EVENT_CLICKED, NULL);
+
+    // Scrollable contact list
+    obj_ch_share_picker_scroll = lv_obj_create(obj_ch_share_picker_panel);
+    lv_obj_set_size(obj_ch_share_picker_scroll,
+                    lv_obj_get_width(obj_ch_share_picker_panel) - 20,
+                    lv_obj_get_height(obj_ch_share_picker_panel) - 60);
+    lv_obj_align(obj_ch_share_picker_scroll, LV_ALIGN_BOTTOM_MID, 0, -5);
+    lv_obj_set_style_bg_opa(obj_ch_share_picker_scroll, 0, 0);
+    lv_obj_set_style_border_width(obj_ch_share_picker_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_ch_share_picker_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_ch_share_picker_scroll, LV_DIR_VER);
+
+    // Populate with ADV_TYPE_CHAT contacts
+    int num_contacts = mesh->getNumContacts();
+    int y = 0;
+    for (int ci = 0; ci < num_contacts; ci++) {
+        ContactInfo contact;
+        if (!mesh->getContactByIdx(ci, contact)) continue;
+        if (contact.type != 1) continue;  // ADV_TYPE_CHAT only
+
+        lv_obj_t *row = lv_button_create(obj_ch_share_picker_scroll);
+        lv_obj_set_size(row, lv_obj_get_width(obj_ch_share_picker_scroll) - 10, 50);
+        lv_obj_set_pos(row, 5, y);
+        lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_add_event_cb(row, on_ch_share_picker_select, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)ci);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_label_set_text(name, contact.name);
+        lv_obj_set_style_text_color(name, lv_color_white(), 0);
+        meck_set_font(name, &meck_montserrat_16, 0);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, 10, 0);
+
+        y += 55;
+    }
+    if (y == 0) {
+        lv_obj_t *empty = lv_label_create(obj_ch_share_picker_scroll);
+        lv_label_set_text(empty, "No chat contacts available");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(empty, &meck_montserrat_16, 0);
+        lv_obj_align(empty, LV_ALIGN_TOP_LEFT, 10, 10);
+    }
+}
+
+// ============================================================================
 // Channels settings sub-screen handlers
 // ============================================================================
 
@@ -3347,7 +3820,7 @@ static void on_ch_settings_row_tap(lv_event_t *e) {
 
 static void on_ch_settings_add_tap(lv_event_t *e) {
     if (obj_ch_settings_add_panel && ta_ch_settings_add) {
-        lv_textarea_set_text(ta_ch_settings_add, "#");
+        lv_textarea_set_text(ta_ch_settings_add, "");
         lv_obj_remove_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_ch_settings_add) lv_keyboard_set_textarea(kb_ch_settings_add, ta_ch_settings_add);
     }
@@ -3359,15 +3832,9 @@ static void on_ch_settings_add_save(lv_event_t *e) {
     const char* text = lv_textarea_get_text(ta_ch_settings_add);
     if (!text || !text[0]) return;
 
-    char name[32] = {};
-    if (text[0] == '#') {
-        strncpy(name, text, sizeof(name) - 1);
-    } else {
-        name[0] = '#';
-        strncpy(name + 1, text, sizeof(name) - 2);
-    }
-    mesh->addHashChannel(name);
-    printf("Channels (settings): added '%s'\n", name);
+    // '#' prefix = public (SHA-256 derived secret), no '#' = private (random secret)
+    mesh->createChannel(text);
+    printf("Channels (settings): added '%s'\n", text);
     if (obj_ch_settings_add_panel) lv_obj_add_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
     refresh_channels_settings_list();
     // Also refresh the channel picker if it exists
@@ -3642,10 +4109,69 @@ static void refresh_channels_settings_list() {
     lv_obj_add_event_cb(add_btn, on_ch_settings_add_tap, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *add_lbl = lv_label_create(add_btn);
-    lv_label_set_text(add_lbl, LV_SYMBOL_PLUS " Add Channel");
+    lv_label_set_text(add_lbl, LV_SYMBOL_PLUS " Add Channel (# = public)");
     lv_obj_set_style_text_color(add_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
     meck_set_font(add_lbl, &meck_montserrat_18, 0);
     lv_obj_center(add_lbl);
+    y += 65;
+
+    // Pending channel invites (received via DM)
+    int invite_count = mesh->getPendingInviteCount();
+    for (int pi = 0; pi < invite_count; pi++) {
+        const PendingChannelInvite* inv = mesh->getPendingInvite(pi);
+        if (!inv) continue;
+
+        lv_obj_t *inv_btn = lv_button_create(obj_ch_settings_scroll);
+        lv_obj_set_size(inv_btn, SCREEN_WIDTH - 40, 70);
+        lv_obj_set_pos(inv_btn, 10, y);
+        lv_obj_set_style_bg_color(inv_btn, lv_color_make(30, 30, 15), 0);
+        lv_obj_set_style_radius(inv_btn, 10, 0);
+        lv_obj_set_style_border_width(inv_btn, 1, 0);
+        lv_obj_set_style_border_color(inv_btn, lv_palette_main(LV_PALETTE_YELLOW), 0);
+
+        char inv_text[80];
+        snprintf(inv_text, sizeof(inv_text), "Pending: %s", inv->name);
+        lv_obj_t *inv_name_lbl = lv_label_create(inv_btn);
+        lv_label_set_text(inv_name_lbl, inv_text);
+        lv_obj_set_style_text_color(inv_name_lbl, lv_palette_main(LV_PALETTE_YELLOW), 0);
+        meck_set_font(inv_name_lbl, &meck_montserrat_18, 0);
+        lv_obj_align(inv_name_lbl, LV_ALIGN_LEFT_MID, 10, -10);
+
+        char from_text[64];
+        snprintf(from_text, sizeof(from_text), "from %s  (tap = accept)", inv->senderName);
+        lv_obj_t *from_lbl = lv_label_create(inv_btn);
+        lv_label_set_text(from_lbl, from_text);
+        lv_obj_set_style_text_color(from_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(from_lbl, &meck_montserrat_14, 0);
+        lv_obj_align(from_lbl, LV_ALIGN_LEFT_MID, 10, 12);
+
+        // Tap to accept the invite
+        lv_obj_add_event_cb(inv_btn, [](lv_event_t *ev) {
+            int invite_idx = (int)(intptr_t)lv_event_get_user_data(ev);
+            Meck *m = meck_get_instance();
+            if (!m) return;
+            const PendingChannelInvite* invitation = m->getPendingInvite(invite_idx);
+            if (invitation) {
+                m->createChannelFromInvite(invitation->name, invitation->secret);
+                printf("Channels: accepted invite '%s'\n", invitation->name);
+                m->removePendingInvite(invite_idx);
+            }
+            refresh_channels_settings_list();
+            refresh_channel_picker();
+        }, LV_EVENT_CLICKED, (void*)(intptr_t)pi);
+
+        // Long-press to dismiss
+        lv_obj_add_event_cb(inv_btn, [](lv_event_t *ev) {
+            int invite_idx = (int)(intptr_t)lv_event_get_user_data(ev);
+            Meck *m = meck_get_instance();
+            if (!m) return;
+            printf("Channels: dismissed pending invite %d\n", invite_idx);
+            m->removePendingInvite(invite_idx);
+            refresh_channels_settings_list();
+        }, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)pi);
+
+        y += 80;
+    }
 }
 
 static void on_settings_pathhash_tap(lv_event_t *e) {
@@ -3794,6 +4320,11 @@ static void on_compose_size_changed(lv_event_t *e) {
     // ta_compose is LV_SIZE_CONTENT — LVGL resizes it itself when the
     // text content changes, which fires this event. Forward to the
     // shared layout helper so the message list resizes in lockstep.
+    // Also match the send button height to the textarea height so they
+    // stay visually aligned as the textarea grows/shrinks.
+    if (btn_send && ta_compose) {
+        lv_obj_set_height(btn_send, lv_obj_get_height(ta_compose));
+    }
     meck_relayout_compose();
 }
 
@@ -3862,6 +4393,9 @@ static void meck_relayout_room_compose(void) {
 }
 
 static void on_room_compose_size_changed(lv_event_t *e) {
+    if (btn_room_send && ta_room_compose) {
+        lv_obj_set_height(btn_room_send, lv_obj_get_height(ta_room_compose));
+    }
     meck_relayout_room_compose();
 }
 
@@ -4011,6 +4545,12 @@ static void on_contact_tap(lv_event_t *e) {
         if (show_admin) lv_obj_clear_flag(btn_contact_admin, LV_OBJ_FLAG_HIDDEN);
         else            lv_obj_add_flag(btn_contact_admin, LV_OBJ_FLAG_HIDDEN);
     }
+    if (btn_contact_ping) {
+        if (show_admin) lv_obj_clear_flag(btn_contact_ping, LV_OBJ_FLAG_HIDDEN);
+        else            lv_obj_add_flag(btn_contact_ping, LV_OBJ_FLAG_HIDDEN);
+    }
+    // Clear any in-flight ping when switching contacts
+    g_ping_in_flight = false;
     // Button label: "Admin" for repeaters, "Login" for room servers. The
     // post-login dispatch branches on contact type so room login lands on
     // scr_room_messages while repeater login lands on scr_admin_home.
@@ -4130,15 +4670,9 @@ static void on_ch_add_save(lv_event_t *e) {
     const char* text = lv_textarea_get_text(ta_ch_add);
     if (!text || !text[0]) return;
 
-    char name[P4_CHANNEL_NAME_MAX] = {};
-    if (text[0] == '#') {
-        strncpy(name, text, sizeof(name) - 1);
-    } else {
-        name[0] = '#';
-        strncpy(name + 1, text, sizeof(name) - 2);
-    }
-    mesh->addHashChannel(name);
-    printf("Channels: added '%s'\n", name);
+    // '#' prefix = public, no '#' = private
+    mesh->createChannel(text);
+    printf("Channels: added '%s'\n", text);
     if (obj_ch_add_panel) lv_obj_add_flag(obj_ch_add_panel, LV_OBJ_FLAG_HIDDEN);
     refresh_channel_picker();
 }
@@ -4155,7 +4689,7 @@ static void on_ch_add_kb_event(lv_event_t *e) {
 
 static void on_ch_add_tap(lv_event_t *e) {
     if (obj_ch_add_panel && ta_ch_add) {
-        lv_textarea_set_text(ta_ch_add, "#");
+        lv_textarea_set_text(ta_ch_add, "");
         lv_obj_remove_flag(obj_ch_add_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_ch_add) lv_keyboard_set_textarea(kb_ch_add, ta_ch_add);
     }
@@ -4192,8 +4726,13 @@ static void home_attach_clock_battery(lv_obj_t *page, int tile_idx) {
     lv_label_set_text(clk, "");
     lv_obj_set_style_text_color(clk, lv_color_white(), 0);
     meck_set_font(clk, &meck_montserrat_24, 0);
+#if MECK_IS_AMOLED
+    lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(clk, LV_ALIGN_TOP_MID, 0, NOTCH_SAFE_Y);
+#else
     lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(clk, LV_ALIGN_TOP_RIGHT, -165, NOTCH_SAFE_Y);
+#endif
     lbl_home_clock[tile_idx] = clk;
 
     lv_obj_t *aud = lv_label_create(page);
@@ -4227,8 +4766,13 @@ static void screen_attach_clock_battery(lv_obj_t *parent, int slot,
     lv_label_set_text(clk, "");
     lv_obj_set_style_text_color(clk, lv_color_white(), 0);
     meck_set_font(clk, font, 0);
+#if MECK_IS_AMOLED
+    lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(clk, LV_ALIGN_TOP_MID, 0, y_offset);
+#else
     lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(clk, LV_ALIGN_TOP_RIGHT, -165, y_offset);
+#endif
     lbl_screen_clock[slot] = clk;
 
     lv_obj_t *aud = lv_label_create(parent);
@@ -4286,6 +4830,12 @@ static void create_page_home(lv_obj_t *page) {
     create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
     create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    goto_audio_browser,  0, 4);
     create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_todo_web,         1, 4);
+    create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    cb_todo_voice,       0, 5);
+    lv_obj_t *cam_btn = create_tile_button(page, LV_SYMBOL_IMAGE "\nCamera", cb_todo_camera, 1, 5);
+    // Match Reader's pink/magenta border
+    if (cam_btn && g_home_color_scheme == HOME_COLOR_MULTI) {
+        lv_obj_set_style_border_color(cam_btn, lv_palette_main(LV_PALETTE_PURPLE), 0);
+    }
 
     lv_obj_t *hint = lv_label_create(page);
     lv_label_set_text(hint, "Swipe left for more pages " LV_SYMBOL_RIGHT);
@@ -4350,10 +4900,24 @@ static void advert_toggle_cb(lv_event_t *e) {
     P4NodePrefs* prefs = mesh->getNodePrefs();
     if (!prefs) return;
 
-    mesh::Packet* adv = mesh->createSelfAdvert(prefs->node_name);
+    mesh::Packet* adv;
+    if (prefs->position_mode != 0 &&
+        (prefs->position_lat_e7 != 0 || prefs->position_lon_e7 != 0)) {
+        double lat = (double)prefs->position_lat_e7 / 1e7;
+        double lon = (double)prefs->position_lon_e7 / 1e7;
+        printf("Meck: advert WITH position lat=%.7f lon=%.7f (e7: %ld, %ld)\n",
+               lat, lon, (long)prefs->position_lat_e7, (long)prefs->position_lon_e7);
+        adv = mesh->createSelfAdvert(prefs->node_name, lat, lon);
+    } else {
+        printf("Meck: advert WITHOUT position (mode=%d lat_e7=%ld lon_e7=%ld)\n",
+               prefs->position_mode,
+               (long)prefs->position_lat_e7, (long)prefs->position_lon_e7);
+        adv = mesh->createSelfAdvert(prefs->node_name);
+    }
     if (adv) {
         mesh->sendFlood(adv);
-        printf("Meck: manual advert sent (name='%s')\n", prefs->node_name);
+        printf("Meck: manual advert sent (name='%s' pos_mode=%d payload=%d bytes)\n",
+               prefs->node_name, prefs->position_mode, adv->payload_len);
     } else {
         printf("Meck: createSelfAdvert returned null\n");
     }
@@ -5619,6 +6183,18 @@ static void create_settings_screen() {
     }
     y += 65;
 
+    // Position navigation row -> opens the Position sub-screen for
+    // lat/lon entry, position mode, and Copy Position.
+    lv_obj_t *position_value_lbl = NULL;
+    create_settings_row(scroll, "Position",
+        &position_value_lbl, goto_settings_position, y);
+    if (position_value_lbl) {
+        lv_label_set_text(position_value_lbl, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(position_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
     // Backup to SD — manual force-write of every NVS blob to the SD card.
     // Safety net in case an automatic SD write was missed (card unmounted,
     // write error, etc.). Tap shows a transient OK / FAIL count.
@@ -6115,7 +6691,7 @@ static void create_settings_channels_screen() {
     lv_obj_align(add_title, LV_ALIGN_TOP_MID, 0, 50);
 
     lv_obj_t *hint = lv_label_create(obj_ch_settings_add_panel);
-    lv_label_set_text(hint, "Enter channel name (e.g. #sydney)");
+    lv_label_set_text(hint, "# = public, no # = private (e.g. #sydney)");
     lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
     meck_set_font(hint, &meck_montserrat_14, 0);
     lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 90);
@@ -6205,7 +6781,26 @@ static void create_channel_detail_screen() {
         &lbl_ch_detail_tone, on_ch_detail_tone_tap, y);
     y += 75;
 
-    // Row 4: Delete Channel (not shown for primary channel; handled in tap)
+    // Row 4: Share Channel (sends [MECK:CH] DM with channel secret)
+    {
+        lv_obj_t *share_btn = lv_button_create(scr_channel_detail);
+        lv_obj_set_size(share_btn, SCREEN_WIDTH - 40, 55);
+        lv_obj_set_pos(share_btn, 20, y);
+        lv_obj_set_style_bg_color(share_btn, lv_color_make(20, 40, 60), 0);
+        lv_obj_set_style_radius(share_btn, 10, 0);
+        lv_obj_set_style_border_width(share_btn, 1, 0);
+        lv_obj_set_style_border_color(share_btn, lv_palette_main(LV_PALETTE_CYAN), 0);
+        lv_obj_add_event_cb(share_btn, on_ch_detail_share_tap, LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t *share_lbl = lv_label_create(share_btn);
+        lv_label_set_text(share_lbl, "Share Channel");
+        lv_obj_set_style_text_color(share_lbl, lv_palette_main(LV_PALETTE_CYAN), 0);
+        meck_set_font(share_lbl, &meck_montserrat_18, 0);
+        lv_obj_center(share_lbl);
+    }
+    y += 65;
+
+    // Row 5: Delete Channel (not shown for primary channel; handled in tap)
     {
         lv_obj_t *del_btn = lv_button_create(scr_channel_detail);
         lv_obj_set_size(del_btn, SCREEN_WIDTH - 40, 55);
@@ -6508,6 +7103,1029 @@ static void refresh_channel_picker() {
     lv_obj_center(add_lbl);
 }
 
+// ============================================================================
+// "Not yet implemented" placeholder screen
+// ============================================================================
+
+static void create_not_implemented_screen() {
+    scr_not_implemented = lv_obj_create(NULL);
+    lock_screen_scroll(scr_not_implemented);
+    lv_obj_set_style_bg_color(scr_not_implemented, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_not_implemented, 12, &meck_montserrat_24, 30);
+
+    // Back button
+    lv_obj_t *btn_back = lv_button_create(scr_not_implemented);
+    lv_obj_set_size(btn_back, 80, 50);
+    lv_obj_set_pos(btn_back, 10, 25);
+    lv_obj_set_style_bg_opa(btn_back, 0, 0);
+    lv_obj_t *back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(back_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        if (scr_home) lv_screen_load(scr_home);
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Feature name (updated by show_not_implemented before screen load)
+    lbl_not_impl_title = lv_label_create(scr_not_implemented);
+    lv_label_set_text(lbl_not_impl_title, "");
+    lv_obj_set_style_text_color(lbl_not_impl_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(lbl_not_impl_title, &meck_montserrat_28, 0);
+    lv_obj_align(lbl_not_impl_title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    lv_obj_t *msg = lv_label_create(scr_not_implemented);
+    lv_label_set_text(msg, "This feature has not yet\nbeen implemented.\n\nCheck back in a future\nfirmware update.");
+    lv_obj_set_style_text_color(msg, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(msg, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(msg, SCREEN_WIDTH - 60);
+    lv_obj_align(msg, LV_ALIGN_CENTER, 0, 0);
+}
+
+// ============================================================================
+// Position settings sub-screen (Settings > Position)
+// ============================================================================
+
+static void create_settings_position_screen() {
+    scr_settings_position = lv_obj_create(NULL);
+    lock_screen_scroll(scr_settings_position);
+    lv_obj_set_style_bg_color(scr_settings_position, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_settings_position, 12, &meck_montserrat_24, 30);
+
+    // Back button
+    lv_obj_t *btn_back = lv_button_create(scr_settings_position);
+    lv_obj_set_size(btn_back, 80, 50);
+    lv_obj_set_pos(btn_back, 10, 25);
+    lv_obj_set_style_bg_opa(btn_back, 0, 0);
+    lv_obj_t *back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(back_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        if (scr_settings) lv_screen_load(scr_settings);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_settings_position);
+    lv_label_set_text(title, "Position");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    int y = 100;
+
+    // Latitude row
+    create_settings_row(scr_settings_position, "Latitude (tap to edit)",
+        &lbl_pos_lat_value, on_pos_lat_tap, y);
+    y += 75;
+
+    // Longitude row
+    create_settings_row(scr_settings_position, "Longitude (tap to edit)",
+        &lbl_pos_lon_value, on_pos_lon_tap, y);
+    y += 75;
+
+    // Position mode cycle row
+    create_settings_row(scr_settings_position, "Share Position (tap to cycle)",
+        &lbl_pos_mode_value, on_pos_mode_tap, y);
+    y += 75;
+
+    // Copy Position button
+    lv_obj_t *copy_btn = lv_button_create(scr_settings_position);
+    lv_obj_set_size(copy_btn, SCREEN_WIDTH - 40, 55);
+    lv_obj_set_pos(copy_btn, 20, y);
+    lv_obj_set_style_bg_color(copy_btn, lv_color_make(20, 40, 60), 0);
+    lv_obj_set_style_radius(copy_btn, 10, 0);
+    lv_obj_set_style_border_width(copy_btn, 1, 0);
+    lv_obj_set_style_border_color(copy_btn, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_add_event_cb(copy_btn, on_pos_copy_tap, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *copy_lbl = lv_label_create(copy_btn);
+    lv_label_set_text(copy_lbl, "Copy Position");
+    lv_obj_set_style_text_color(copy_lbl, lv_palette_main(LV_PALETTE_CYAN), 0);
+    meck_set_font(copy_lbl, &meck_montserrat_18, 0);
+    lv_obj_center(copy_lbl);
+
+    // ---- Numeric edit overlay (for lat/lon entry) ----
+    obj_pos_edit_panel = lv_obj_create(scr_settings_position);
+    lv_obj_set_size(obj_pos_edit_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_pos_edit_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_pos_edit_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_pos_edit_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_pos_edit_panel, 0, 0);
+    lv_obj_add_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_pos_edit_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_pos_edit_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *edit_title = lv_label_create(obj_pos_edit_panel);
+    lv_label_set_text(edit_title, "Enter value");
+    lv_obj_set_style_text_color(edit_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(edit_title, &meck_montserrat_22, 0);
+    lv_obj_align(edit_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    ta_pos_edit = lv_textarea_create(obj_pos_edit_panel);
+    lv_obj_set_size(ta_pos_edit, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(ta_pos_edit, LV_ALIGN_TOP_MID, 0, 100);
+    lv_textarea_set_one_line(ta_pos_edit, true);
+    lv_textarea_set_max_length(ta_pos_edit, 20);
+    lv_obj_set_style_bg_color(ta_pos_edit, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_pos_edit, lv_color_white(), 0);
+    meck_set_font(ta_pos_edit, &meck_montserrat_18, 0);
+    lv_obj_set_style_border_color(ta_pos_edit, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_border_width(ta_pos_edit, 1, 0);
+    lv_obj_set_style_radius(ta_pos_edit, 8, 0);
+
+    kb_pos_edit = lv_keyboard_create(obj_pos_edit_panel);
+    lv_keyboard_set_mode(kb_pos_edit, LV_KEYBOARD_MODE_NUMBER);
+    lv_keyboard_set_textarea(kb_pos_edit, ta_pos_edit);
+    meck_style_keyboard(kb_pos_edit);
+    lv_obj_add_event_cb(kb_pos_edit, on_pos_edit_kb_event, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(kb_pos_edit, on_pos_edit_kb_event, LV_EVENT_CANCEL, NULL);
+
+    refresh_position_labels();
+}
+
+// ============================================================================
+// Voice screen — recording, review, send
+// ============================================================================
+
+// Forward: MeckVoice instance accessor from meck_app.cpp
+// (declared at file scope near includes)
+
+// Forward: voice send request
+// (declared at file scope near includes)
+
+static void voice_update_ui(void) {
+    MeckVoice* voice = meck_get_voice_instance();
+    if (!voice) return;
+
+    bool recording = voice->isRecording();
+    bool has_rec = g_voice_has_recording;
+
+    // Status label
+    if (lbl_voice_status) {
+        if (recording) {
+            lv_label_set_text(lbl_voice_status, "Recording...");
+            lv_obj_set_style_text_color(lbl_voice_status,
+                lv_palette_main(LV_PALETTE_RED), 0);
+        } else if (has_rec) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "Recorded %.1fs", voice->getRecDurationSec());
+            lv_label_set_text(lbl_voice_status, buf);
+            lv_obj_set_style_text_color(lbl_voice_status,
+                lv_palette_main(LV_PALETTE_GREEN), 0);
+        } else {
+            lv_label_set_text(lbl_voice_status, "Tap Record to start");
+            lv_obj_set_style_text_color(lbl_voice_status,
+                lv_palette_main(LV_PALETTE_GREY), 0);
+        }
+    }
+
+    // Timer label (during recording)
+    if (lbl_voice_timer) {
+        if (recording) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.1fs / %ds",
+                     voice->getRecDurationSec(), VOICE_MAX_SECONDS);
+            lv_label_set_text(lbl_voice_timer, buf);
+        } else {
+            lv_label_set_text(lbl_voice_timer, "");
+        }
+    }
+
+    // Record button label
+    if (lbl_voice_record_btn) {
+        if (recording)
+            lv_label_set_text(lbl_voice_record_btn, "Stop");
+        else if (has_rec)
+            lv_label_set_text(lbl_voice_record_btn, "Re-record");
+        else
+            lv_label_set_text(lbl_voice_record_btn, "Record");
+    }
+
+    // Record button color
+    if (btn_voice_record) {
+        lv_obj_set_style_bg_color(btn_voice_record,
+            recording ? lv_color_make(180, 30, 30)
+                      : lv_palette_main(LV_PALETTE_RED), 0);
+    }
+
+    // Play + Send + Discard buttons: visible only after a recording
+    if (btn_voice_play) {
+        if (has_rec && !recording)
+            lv_obj_clear_flag(btn_voice_play, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(btn_voice_play, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (btn_voice_send) {
+        if (has_rec && !recording && voice->isCodec2Valid())
+            lv_obj_clear_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (btn_voice_discard) {
+        if (has_rec && !recording)
+            lv_obj_clear_flag(btn_voice_discard, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(btn_voice_discard, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void on_voice_record_tap(lv_event_t *e) {
+    (void)e;
+    MeckVoice* voice = meck_get_voice_instance();
+    if (!voice) return;
+
+    if (voice->isRecording()) {
+        voice->stopRecording();
+        if (voice->getRecSamples() > 4000) {  // > 0.25s
+            g_voice_has_recording = true;
+            // Save to SD as WAV
+            uint32_t ts = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+            char filename[48];
+            snprintf(filename, sizeof(filename), "voice_%06lu.wav",
+                     (unsigned long)(ts % 1000000UL));
+            voice->saveToWav(filename);
+            snprintf(g_voice_last_wav_path, sizeof(g_voice_last_wav_path),
+                     "%s/%s", VOICE_FOLDER, filename);
+#ifdef HAVE_CODEC2
+            voice->encodeCodec2();
+#endif
+        } else {
+            g_voice_has_recording = false;
+        }
+    } else {
+        g_voice_has_recording = false;
+        voice->startRecording();
+    }
+    voice_update_ui();
+}
+
+static void on_voice_play_tap(lv_event_t *e) {
+    (void)e;
+    if (g_voice_last_wav_path[0] == '\0') {
+        printf("Voice: no WAV to play\n");
+        return;
+    }
+    printf("Voice: playing %s\n", g_voice_last_wav_path);
+    // Boost volume for voice playback (default 50% is too quiet)
+    meck_audio_set_volume_pct(85);
+    meck_audio_play_file(g_voice_last_wav_path, 0);
+    if (lbl_voice_status) {
+        lv_label_set_text(lbl_voice_status, "Playing...");
+        lv_obj_set_style_text_color(lbl_voice_status,
+            lv_palette_main(LV_PALETTE_TEAL), 0);
+    }
+}
+
+static void on_voice_discard_tap(lv_event_t *e) {
+    (void)e;
+    g_voice_has_recording = false;
+    g_voice_last_wav_path[0] = '\0';
+    if (lbl_voice_status) {
+        lv_label_set_text(lbl_voice_status, "Tap Record to start");
+        lv_obj_set_style_text_color(lbl_voice_status,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    voice_update_ui();
+    printf("Voice: recording discarded\n");
+}
+
+// Load a previous recording from the list
+static void on_voice_prev_row_tap(lv_event_t *e) {
+    const char *path = (const char *)lv_event_get_user_data(e);
+    if (!path || !path[0]) return;
+
+    strncpy(g_voice_last_wav_path, path, sizeof(g_voice_last_wav_path) - 1);
+    g_voice_last_wav_path[sizeof(g_voice_last_wav_path) - 1] = '\0';
+    g_voice_has_recording = true;
+
+    // Re-encode Codec2 from the loaded WAV is deferred until Send.
+    // For now, just let the user Play it. The Codec2 data from the
+    // original recording session may still be in MeckVoice if it
+    // was the most recent encode.
+
+    if (lbl_voice_status) {
+        const char *slash = strrchr(path, '/');
+        const char *base = slash ? slash + 1 : path;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Loaded: %s", base);
+        lv_label_set_text(lbl_voice_status, buf);
+        lv_obj_set_style_text_color(lbl_voice_status,
+            lv_palette_main(LV_PALETTE_TEAL), 0);
+    }
+    voice_update_ui();
+    printf("Voice: loaded previous recording %s\n", path);
+}
+
+// Refresh the previous recordings list on the record screen
+static void voice_prev_refresh(void) {
+    if (!obj_voice_prev_scroll) return;
+    lv_obj_clean(obj_voice_prev_scroll);
+
+    if (!p4_sdcard_is_mounted()) return;
+
+    // Scan /sdcard/voice/ for voice_*.wav files
+    DIR *dir = opendir(VOICE_FOLDER);
+    if (!dir) return;
+
+    // Collect filenames (max 16 most recent)
+    static char paths[16][96];
+    int count = 0;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL && count < 16) {
+        if (ent->d_type != DT_REG) continue;
+        if (strncmp(ent->d_name, "voice_", 6) != 0) continue;
+        const char *ext = strrchr(ent->d_name, '.');
+        if (!ext || strcmp(ext, ".wav") != 0) continue;
+
+        snprintf(paths[count], sizeof(paths[count]), "%s/%s",
+                 VOICE_FOLDER, ent->d_name);
+        count++;
+    }
+    closedir(dir);
+
+    if (count == 0) {
+        lv_obj_t *empty = lv_label_create(obj_voice_prev_scroll);
+        lv_label_set_text(empty, "No previous recordings");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(empty, &meck_montserrat_14, 0);
+        lv_obj_set_pos(empty, 10, 5);
+        return;
+    }
+
+    // Sort newest first (filenames contain timestamps, reverse alpha works)
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (strcmp(paths[i], paths[j]) < 0) {
+                char tmp[96];
+                memcpy(tmp, paths[i], 96);
+                memcpy(paths[i], paths[j], 96);
+                memcpy(paths[j], tmp, 96);
+            }
+        }
+    }
+
+    int y = 0;
+    for (int i = 0; i < count; i++) {
+        const char *slash = strrchr(paths[i], '/');
+        const char *base = slash ? slash + 1 : paths[i];
+
+        // Get file size for duration estimate
+        struct stat st;
+        int durSec = 0;
+        if (stat(paths[i], &st) == 0) {
+            // 44100Hz stereo 16-bit = 176400 bytes/sec
+            durSec = (int)((st.st_size - 44) / 176400);
+        }
+
+        lv_obj_t *row = lv_button_create(obj_voice_prev_scroll);
+        lv_obj_set_size(row, lv_obj_get_width(obj_voice_prev_scroll) - 10, 40);
+        lv_obj_set_pos(row, 5, y);
+        lv_obj_set_style_bg_color(row, lv_color_make(20, 20, 30), 0);
+        lv_obj_set_style_radius(row, 6, 0);
+        lv_obj_add_event_cb(row, on_voice_prev_row_tap, LV_EVENT_CLICKED,
+                            (void*)paths[i]);  // static lifetime
+
+        lv_obj_t *name = lv_label_create(row);
+        char label[64];
+        snprintf(label, sizeof(label), "%s  (%ds)", base, durSec);
+        lv_label_set_text(name, label);
+        lv_obj_set_style_text_color(name, lv_color_white(), 0);
+        meck_set_font(name, &meck_montserrat_14, 0);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, 5, 0);
+
+        y += 44;
+    }
+}
+
+static void on_voice_contact_cancel(lv_event_t *e) {
+    (void)e;
+    if (obj_voice_contact_panel) {
+        lv_obj_del(obj_voice_contact_panel);
+        obj_voice_contact_panel = NULL;
+        obj_voice_contact_scroll = NULL;
+    }
+}
+
+static void on_voice_contact_select(lv_event_t *e) {
+    int contact_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    meck_request_voice_send(contact_idx);
+
+    ContactInfo ci;
+    Meck *mesh = meck_get_instance();
+    if (mesh && mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
+        printf("Voice: sending to %s\n", ci.name);
+    }
+
+    on_voice_contact_cancel(NULL);
+
+    // Track send completion: first packet at 5s, subsequent at 3s intervals.
+    // Last packet delay = 5000 + (numPackets-1) * 3000.
+    MeckVoice* voice = meck_get_voice_instance();
+    int numPkts = voice ? voice->getPacketCount() : 1;
+    uint32_t lastPktDelay = 5000 + (uint32_t)(numPkts - 1) * 3000;
+    g_voice_send_complete_ms = (uint32_t)(esp_timer_get_time() / 1000ULL) + lastPktDelay + 2000;
+    g_voice_send_in_flight = true;
+
+    if (lbl_voice_status) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Sending to %s...", ci.name);
+        lv_label_set_text(lbl_voice_status, buf);
+        lv_obj_set_style_text_color(lbl_voice_status,
+            lv_palette_main(LV_PALETTE_ORANGE), 0);
+    }
+}
+
+static void on_voice_send_tap(lv_event_t *e) {
+    (void)e;
+    Meck *mesh = meck_get_instance();
+    if (!mesh || !scr_voice) return;
+
+    MeckVoice* voice = meck_get_voice_instance();
+    if (!voice || !voice->isCodec2Valid()) {
+        if (lbl_voice_status) {
+            lv_label_set_text(lbl_voice_status, "No encoded audio to send");
+            lv_obj_set_style_text_color(lbl_voice_status,
+                lv_palette_main(LV_PALETTE_RED), 0);
+        }
+        return;
+    }
+
+    // Clean up any existing picker
+    if (obj_voice_contact_panel) {
+        lv_obj_del(obj_voice_contact_panel);
+        obj_voice_contact_panel = NULL;
+    }
+
+    // Build contact picker overlay (same pattern as channel share)
+    obj_voice_contact_panel = lv_obj_create(scr_voice);
+    lv_obj_set_size(obj_voice_contact_panel, SCREEN_WIDTH - 40, SCREEN_HEIGHT - 80);
+    lv_obj_align(obj_voice_contact_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(obj_voice_contact_panel, lv_color_make(15, 15, 25), 0);
+    lv_obj_set_style_bg_opa(obj_voice_contact_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(obj_voice_contact_panel, 16, 0);
+    lv_obj_set_style_border_width(obj_voice_contact_panel, 1, 0);
+    lv_obj_set_style_border_color(obj_voice_contact_panel,
+        lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_pad_all(obj_voice_contact_panel, 10, 0);
+    lv_obj_clear_flag(obj_voice_contact_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(obj_voice_contact_panel);
+    lv_label_set_text(title, "Send voice to:");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_18, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 5, 5);
+
+    lv_obj_t *btn_cancel = lv_button_create(obj_voice_contact_panel);
+    lv_obj_set_size(btn_cancel, 80, 40);
+    lv_obj_align(btn_cancel, LV_ALIGN_TOP_RIGHT, -5, 0);
+    lv_obj_set_style_bg_color(btn_cancel, lv_color_make(80, 30, 30), 0);
+    lv_obj_set_style_radius(btn_cancel, 8, 0);
+    lv_obj_t *cancel_lbl = lv_label_create(btn_cancel);
+    lv_label_set_text(cancel_lbl, "Cancel");
+    lv_obj_set_style_text_color(cancel_lbl, lv_color_white(), 0);
+    meck_set_font(cancel_lbl, &meck_montserrat_14, 0);
+    lv_obj_center(cancel_lbl);
+    lv_obj_add_event_cb(btn_cancel, on_voice_contact_cancel, LV_EVENT_CLICKED, NULL);
+
+    obj_voice_contact_scroll = lv_obj_create(obj_voice_contact_panel);
+    lv_obj_update_layout(obj_voice_contact_panel);  // resolve size before query
+    lv_obj_set_size(obj_voice_contact_scroll,
+                    lv_obj_get_width(obj_voice_contact_panel) - 20,
+                    lv_obj_get_height(obj_voice_contact_panel) - 60);
+    lv_obj_align(obj_voice_contact_scroll, LV_ALIGN_BOTTOM_MID, 0, -5);
+    lv_obj_set_style_bg_opa(obj_voice_contact_scroll, 0, 0);
+    lv_obj_set_style_border_width(obj_voice_contact_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_voice_contact_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_voice_contact_scroll, LV_DIR_VER);
+
+    int num_contacts = mesh->getNumContacts();
+    // Type distribution diagnostic
+    int type_counts[8] = {};
+    for (int ci = 0; ci < num_contacts && ci < 500; ci++) {
+        ContactInfo tc;
+        if (mesh->getContactByIdx(ci, tc) && tc.type < 8) type_counts[tc.type]++;
+    }
+    printf("Voice send: %d contacts (types: 0=%d 1/chat=%d 2/rptr=%d 3/room=%d 4=%d 5=%d), scroll=%dx%d\n",
+           num_contacts,
+           type_counts[0], type_counts[1], type_counts[2], type_counts[3],
+           type_counts[4], type_counts[5],
+           (int)lv_obj_get_width(obj_voice_contact_scroll),
+           (int)lv_obj_get_height(obj_voice_contact_scroll));
+    int y = 0;
+
+    // Two passes: favourites first, then non-favourites
+    for (int pass = 0; pass < 2; pass++) {
+        for (int ci = 0; ci < num_contacts; ci++) {
+            ContactInfo contact;
+            if (!mesh->getContactByIdx(ci, contact)) continue;
+            if (contact.type != 1) continue;  // ADV_TYPE_CHAT only
+
+            bool isFav = (contact.flags & 0x01) != 0;
+            if (pass == 0 && !isFav) continue;  // pass 0: favs only
+            if (pass == 1 && isFav) continue;    // pass 1: non-favs only
+
+            lv_obj_t *row = lv_button_create(obj_voice_contact_scroll);
+            lv_obj_set_size(row, lv_obj_get_width(obj_voice_contact_scroll) - 10, 50);
+            lv_obj_set_pos(row, 5, y);
+            lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
+            lv_obj_set_style_radius(row, 8, 0);
+            lv_obj_add_event_cb(row, on_voice_contact_select, LV_EVENT_CLICKED,
+                                (void*)(intptr_t)ci);
+
+            lv_obj_t *name = lv_label_create(row);
+            char display[48];
+            if (isFav) {
+                snprintf(display, sizeof(display), "%s %s", LV_SYMBOL_OK, contact.name);
+            } else {
+                snprintf(display, sizeof(display), "%s", contact.name);
+            }
+            lv_label_set_text(name, display);
+            lv_obj_set_style_text_color(name,
+                isFav ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white(), 0);
+            meck_set_font(name, &meck_montserrat_16, 0);
+            lv_obj_align(name, LV_ALIGN_LEFT_MID, 10, 0);
+
+            y += 55;
+            printf("  [%d] %s (type=%d fav=%d)\n", ci, contact.name, contact.type, isFav);
+        }
+    }
+
+    if (y == 0) {
+        lv_obj_t *empty = lv_label_create(obj_voice_contact_scroll);
+        lv_label_set_text(empty, "No chat contacts");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(empty, &meck_montserrat_16, 0);
+        lv_obj_set_pos(empty, 20, 20);
+        printf("Voice send: no ADV_TYPE_CHAT contacts found\n");
+    }
+}
+
+// ============================================================================
+// Voice Inbox persistence — /sdcard/voice/inbox.cfg
+// ============================================================================
+
+static void voice_inbox_load(void) {
+    g_voice_inbox_count = 0;
+    g_voice_inbox_unread = 0;
+    memset(g_voice_inbox, 0, sizeof(g_voice_inbox));
+
+    if (!p4_sdcard_is_mounted()) return;
+
+    FILE *f = fopen(VOICE_INBOX_CFG, "rb");
+    if (!f) return;
+
+    // Simple binary format: count (uint8_t) then entries
+    uint8_t count = 0;
+    if (fread(&count, 1, 1, f) != 1) { fclose(f); return; }
+    if (count > VOICE_INBOX_MAX) count = VOICE_INBOX_MAX;
+
+    for (int i = 0; i < count; i++) {
+        VoiceInboxEntry& e = g_voice_inbox[i];
+        if (fread(e.senderName, 1, 32, f) != 32) break;
+        if (fread(e.filename, 1, 48, f) != 48) break;
+        if (fread(&e.timestamp, 4, 1, f) != 1) break;
+        if (fread(&e.durationSec, 1, 1, f) != 1) break;
+        uint8_t played = 0;
+        if (fread(&played, 1, 1, f) != 1) break;
+        e.played = (played != 0);
+        e.valid = true;
+        g_voice_inbox_count++;
+        if (!e.played) g_voice_inbox_unread++;
+    }
+    fclose(f);
+    printf("Voice inbox: loaded %d entries (%d unread)\n",
+           g_voice_inbox_count, g_voice_inbox_unread);
+}
+
+static void voice_inbox_save(void) {
+    if (!p4_sdcard_is_mounted()) return;
+
+    struct stat st;
+    if (stat("/sdcard/voice", &st) != 0) mkdir("/sdcard/voice", 0755);
+
+    FILE *f = fopen(VOICE_INBOX_CFG, "wb");
+    if (!f) return;
+
+    uint8_t count = (uint8_t)g_voice_inbox_count;
+    fwrite(&count, 1, 1, f);
+    for (int i = 0; i < count; i++) {
+        VoiceInboxEntry& e = g_voice_inbox[i];
+        fwrite(e.senderName, 1, 32, f);
+        fwrite(e.filename, 1, 48, f);
+        fwrite(&e.timestamp, 4, 1, f);
+        fwrite(&e.durationSec, 1, 1, f);
+        uint8_t played = e.played ? 1 : 0;
+        fwrite(&played, 1, 1, f);
+    }
+    fclose(f);
+}
+
+static void voice_inbox_add(const char *senderName, const char *wavPath,
+                            uint32_t timestamp, uint8_t durationSec) {
+    // If full, drop oldest
+    if (g_voice_inbox_count >= VOICE_INBOX_MAX) {
+        memmove(&g_voice_inbox[0], &g_voice_inbox[1],
+                sizeof(VoiceInboxEntry) * (VOICE_INBOX_MAX - 1));
+        g_voice_inbox_count = VOICE_INBOX_MAX - 1;
+    }
+
+    VoiceInboxEntry& e = g_voice_inbox[g_voice_inbox_count];
+    memset(&e, 0, sizeof(e));
+    strncpy(e.senderName, senderName, 31);
+    // Extract just the filename from the full path
+    const char *slash = strrchr(wavPath, '/');
+    const char *base = slash ? slash + 1 : wavPath;
+    strncpy(e.filename, base, 47);
+    e.timestamp = timestamp;
+    e.durationSec = durationSec;
+    e.played = false;
+    e.valid = true;
+    g_voice_inbox_count++;
+    g_voice_inbox_unread++;
+
+    voice_inbox_save();
+    printf("Voice inbox: added '%s' from %s (%ds), %d total, %d unread\n",
+           base, senderName, durationSec,
+           g_voice_inbox_count, g_voice_inbox_unread);
+}
+
+static void voice_inbox_update_badge(void) {
+    if (!lbl_voice_inbox_badge) return;
+    if (g_voice_inbox_unread > 0) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d", g_voice_inbox_unread);
+        lv_label_set_text(lbl_voice_inbox_badge, buf);
+        lv_obj_clear_flag(lbl_voice_inbox_badge, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(lbl_voice_inbox_badge, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// ============================================================================
+// Voice Inbox screen — list of received voice messages
+// ============================================================================
+
+static void on_voice_inbox_row_tap(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= g_voice_inbox_count) return;
+
+    VoiceInboxEntry& entry = g_voice_inbox[idx];
+    char path[128];
+    snprintf(path, sizeof(path), "%s/%s", VOICE_INBOX_FOLDER, entry.filename);
+
+    // Mark as played
+    if (!entry.played) {
+        entry.played = true;
+        g_voice_inbox_unread--;
+        if (g_voice_inbox_unread < 0) g_voice_inbox_unread = 0;
+        voice_inbox_save();
+        voice_inbox_update_badge();
+    }
+
+    // Play the message
+    printf("Voice inbox: playing [%d] %s from %s\n", idx, path, entry.senderName);
+    meck_audio_set_volume_pct(85);
+    meck_audio_play_file(path, 0);
+}
+
+static void voice_inbox_refresh(void) {
+    if (!obj_voice_inbox_scroll) return;
+
+    // Clear existing rows
+    lv_obj_clean(obj_voice_inbox_scroll);
+
+    if (g_voice_inbox_count == 0) {
+        lv_obj_t *empty = lv_label_create(obj_voice_inbox_scroll);
+        lv_label_set_text(empty, "No voice messages");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(empty, &meck_montserrat_18, 0);
+        lv_obj_set_pos(empty, 20, 20);
+        return;
+    }
+
+    // Build rows newest-first
+    int y = 0;
+    for (int i = g_voice_inbox_count - 1; i >= 0; i--) {
+        VoiceInboxEntry& e = g_voice_inbox[i];
+        if (!e.valid) continue;
+
+        lv_obj_t *row = lv_button_create(obj_voice_inbox_scroll);
+        lv_obj_set_size(row, lv_obj_get_width(obj_voice_inbox_scroll) - 10, 65);
+        lv_obj_set_pos(row, 5, y);
+        lv_obj_set_style_bg_color(row, lv_color_make(20, 20, 30), 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_add_event_cb(row, on_voice_inbox_row_tap, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)i);
+
+        // Unplayed indicator (green dot)
+        if (!e.played) {
+            lv_obj_t *dot = lv_obj_create(row);
+            lv_obj_set_size(dot, 10, 10);
+            lv_obj_align(dot, LV_ALIGN_LEFT_MID, 5, 0);
+            lv_obj_set_style_bg_color(dot, lv_palette_main(LV_PALETTE_GREEN), 0);
+            lv_obj_set_style_radius(dot, 5, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+        }
+
+        // Sender name
+        lv_obj_t *name = lv_label_create(row);
+        lv_label_set_text(name, e.senderName);
+        lv_obj_set_style_text_color(name, lv_color_white(), 0);
+        meck_set_font(name, &meck_montserrat_16, 0);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, e.played ? 10 : 22, -10);
+
+        // Duration
+        char meta[32];
+        snprintf(meta, sizeof(meta), "%ds", e.durationSec);
+        lv_obj_t *dur = lv_label_create(row);
+        lv_label_set_text(dur, meta);
+        lv_obj_set_style_text_color(dur, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(dur, &meck_montserrat_14, 0);
+        lv_obj_align(dur, LV_ALIGN_LEFT_MID, e.played ? 10 : 22, 12);
+
+        // Time
+        if (e.timestamp > 0) {
+            char timebuf[24];
+            format_local_time(e.timestamp, timebuf, sizeof(timebuf));
+            lv_obj_t *tlbl = lv_label_create(row);
+            lv_label_set_text(tlbl, timebuf);
+            lv_obj_set_style_text_color(tlbl, lv_palette_main(LV_PALETTE_GREY), 0);
+            meck_set_font(tlbl, &meck_montserrat_14, 0);
+            lv_obj_align(tlbl, LV_ALIGN_RIGHT_MID, -10, 0);
+        }
+
+        y += 70;
+    }
+}
+
+static void create_voice_inbox_screen(void) {
+    scr_voice_inbox = lv_obj_create(NULL);
+    lock_screen_scroll(scr_voice_inbox);
+    lv_obj_set_style_bg_color(scr_voice_inbox, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_voice_inbox, 12, &meck_montserrat_24, 30);
+
+    lv_obj_t *btn_back = lv_button_create(scr_voice_inbox);
+    lv_obj_set_size(btn_back, 80, 50);
+    lv_obj_set_pos(btn_back, 10, 25);
+    lv_obj_set_style_bg_opa(btn_back, 0, 0);
+    lv_obj_t *back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(back_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        if (scr_voice_landing) lv_screen_load(scr_voice_landing);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_voice_inbox);
+    lv_label_set_text(title, "Voice Inbox");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 30);
+
+    // Scrollable message list
+    obj_voice_inbox_scroll = lv_obj_create(scr_voice_inbox);
+    lv_obj_set_size(obj_voice_inbox_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 90);
+    lv_obj_set_pos(obj_voice_inbox_scroll, 10, 80);
+    lv_obj_set_style_bg_opa(obj_voice_inbox_scroll, 0, 0);
+    lv_obj_set_style_border_width(obj_voice_inbox_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_voice_inbox_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_voice_inbox_scroll, LV_DIR_VER);
+}
+
+// ============================================================================
+// Voice Landing screen — Inbox / Record picker
+// ============================================================================
+
+static void create_voice_landing_screen(void) {
+    scr_voice_landing = lv_obj_create(NULL);
+    lock_screen_scroll(scr_voice_landing);
+    lv_obj_set_style_bg_color(scr_voice_landing, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_voice_landing, 12, &meck_montserrat_24, 30);
+
+    lv_obj_t *btn_back = lv_button_create(scr_voice_landing);
+    lv_obj_set_size(btn_back, 80, 50);
+    lv_obj_set_pos(btn_back, 10, 25);
+    lv_obj_set_style_bg_opa(btn_back, 0, 0);
+    lv_obj_t *back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(back_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        if (scr_home) lv_screen_load(scr_home);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_voice_landing);
+    lv_label_set_text(title, "Voice");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Inbox button — large, left side
+    btn_voice_inbox = lv_button_create(scr_voice_landing);
+    lv_obj_set_size(btn_voice_inbox, 220, 200);
+    lv_obj_align(btn_voice_inbox, LV_ALIGN_CENTER, -120, 20);
+    lv_obj_set_style_bg_color(btn_voice_inbox,
+        lv_color_make(20, 40, 60), 0);
+    lv_obj_set_style_radius(btn_voice_inbox, 16, 0);
+    lv_obj_set_style_border_width(btn_voice_inbox, 2, 0);
+    lv_obj_set_style_border_color(btn_voice_inbox,
+        lv_palette_main(LV_PALETTE_TEAL), 0);
+
+    lv_obj_t *inbox_icon = lv_label_create(btn_voice_inbox);
+    lv_label_set_text(inbox_icon, LV_SYMBOL_ENVELOPE);
+    lv_obj_set_style_text_color(inbox_icon, lv_palette_main(LV_PALETTE_TEAL), 0);
+    meck_set_font(inbox_icon, &meck_montserrat_32, 0);
+    lv_obj_align(inbox_icon, LV_ALIGN_CENTER, 0, -20);
+
+    lv_obj_t *inbox_lbl = lv_label_create(btn_voice_inbox);
+    lv_label_set_text(inbox_lbl, "Inbox");
+    lv_obj_set_style_text_color(inbox_lbl, lv_color_white(), 0);
+    meck_set_font(inbox_lbl, &meck_montserrat_22, 0);
+    lv_obj_align(inbox_lbl, LV_ALIGN_CENTER, 0, 25);
+
+    // Unread badge (top-right of inbox button)
+    lbl_voice_inbox_badge = lv_label_create(btn_voice_inbox);
+    lv_label_set_text(lbl_voice_inbox_badge, "0");
+    lv_obj_set_style_text_color(lbl_voice_inbox_badge, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(lbl_voice_inbox_badge,
+        lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_bg_opa(lbl_voice_inbox_badge, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(lbl_voice_inbox_badge, 10, 0);
+    lv_obj_set_style_pad_hor(lbl_voice_inbox_badge, 8, 0);
+    lv_obj_set_style_pad_ver(lbl_voice_inbox_badge, 3, 0);
+    meck_set_font(lbl_voice_inbox_badge, &meck_montserrat_16, 0);
+    lv_obj_align(lbl_voice_inbox_badge, LV_ALIGN_TOP_RIGHT, 5, -5);
+    lv_obj_add_flag(lbl_voice_inbox_badge, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_event_cb(btn_voice_inbox, [](lv_event_t *e) {
+        voice_inbox_refresh();
+        if (scr_voice_inbox) lv_screen_load(scr_voice_inbox);
+    }, LV_EVENT_CLICKED, NULL);
+
+    // Record button — large, right side
+    btn_voice_record_nav = lv_button_create(scr_voice_landing);
+    lv_obj_set_size(btn_voice_record_nav, 220, 200);
+    lv_obj_align(btn_voice_record_nav, LV_ALIGN_CENTER, 120, 20);
+    lv_obj_set_style_bg_color(btn_voice_record_nav,
+        lv_color_make(50, 20, 20), 0);
+    lv_obj_set_style_radius(btn_voice_record_nav, 16, 0);
+    lv_obj_set_style_border_width(btn_voice_record_nav, 2, 0);
+    lv_obj_set_style_border_color(btn_voice_record_nav,
+        lv_palette_main(LV_PALETTE_RED), 0);
+
+    lv_obj_t *rec_icon = lv_label_create(btn_voice_record_nav);
+    lv_label_set_text(rec_icon, LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_color(rec_icon, lv_palette_main(LV_PALETTE_RED), 0);
+    meck_set_font(rec_icon, &meck_montserrat_32, 0);
+    lv_obj_align(rec_icon, LV_ALIGN_CENTER, 0, -20);
+
+    lv_obj_t *rec_lbl = lv_label_create(btn_voice_record_nav);
+    lv_label_set_text(rec_lbl, "Record");
+    lv_obj_set_style_text_color(rec_lbl, lv_color_white(), 0);
+    meck_set_font(rec_lbl, &meck_montserrat_22, 0);
+    lv_obj_align(rec_lbl, LV_ALIGN_CENTER, 0, 25);
+
+    lv_obj_add_event_cb(btn_voice_record_nav, [](lv_event_t *e) {
+        voice_update_ui();
+        voice_prev_refresh();
+        if (scr_voice) lv_screen_load(scr_voice);
+    }, LV_EVENT_CLICKED, NULL);
+}
+
+// ============================================================================
+// Voice Record screen — recording, review, send
+// ============================================================================
+
+static void create_voice_record_screen(void) {
+    scr_voice = lv_obj_create(NULL);
+    lock_screen_scroll(scr_voice);
+    lv_obj_set_style_bg_color(scr_voice, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_voice, 12, &meck_montserrat_24, 30);
+
+    // Back button (returns to voice landing, not home)
+    lv_obj_t *btn_back = lv_button_create(scr_voice);
+    lv_obj_set_size(btn_back, 80, 50);
+    lv_obj_set_pos(btn_back, 10, 25);
+    lv_obj_set_style_bg_opa(btn_back, 0, 0);
+    lv_obj_t *back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(back_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        // Stop recording if active
+        MeckVoice* v = meck_get_voice_instance();
+        if (v && v->isRecording()) v->stopRecording();
+        if (scr_voice_landing) lv_screen_load(scr_voice_landing);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_voice);
+    lv_label_set_text(title, "Voice");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Status label
+    lbl_voice_status = lv_label_create(scr_voice);
+    lv_label_set_text(lbl_voice_status, "Tap Record to start");
+    lv_obj_set_style_text_color(lbl_voice_status,
+        lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(lbl_voice_status, &meck_montserrat_22, 0);
+    lv_obj_align(lbl_voice_status, LV_ALIGN_TOP_MID, 0, 120);
+
+    // Timer label (shown during recording)
+    lbl_voice_timer = lv_label_create(scr_voice);
+    lv_label_set_text(lbl_voice_timer, "");
+    lv_obj_set_style_text_color(lbl_voice_timer,
+        lv_palette_main(LV_PALETTE_RED), 0);
+    meck_set_font(lbl_voice_timer, &meck_montserrat_28, 0);
+    lv_obj_align(lbl_voice_timer, LV_ALIGN_CENTER, 0, -60);
+
+    // Record button — large, centered
+    btn_voice_record = lv_button_create(scr_voice);
+    lv_obj_set_size(btn_voice_record, 200, 80);
+    lv_obj_align(btn_voice_record, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_set_style_bg_color(btn_voice_record,
+        lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_radius(btn_voice_record, 16, 0);
+    lbl_voice_record_btn = lv_label_create(btn_voice_record);
+    lv_label_set_text(lbl_voice_record_btn, "Record");
+    lv_obj_set_style_text_color(lbl_voice_record_btn, lv_color_white(), 0);
+    meck_set_font(lbl_voice_record_btn, &meck_montserrat_28, 0);
+    lv_obj_center(lbl_voice_record_btn);
+    lv_obj_add_event_cb(btn_voice_record, on_voice_record_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Play button (hidden until recording complete)
+    btn_voice_play = lv_button_create(scr_voice);
+    lv_obj_set_size(btn_voice_play, 120, 60);
+    lv_obj_align(btn_voice_play, LV_ALIGN_CENTER, -130, 150);
+    lv_obj_set_style_bg_color(btn_voice_play,
+        lv_palette_main(LV_PALETTE_TEAL), 0);
+    lv_obj_set_style_radius(btn_voice_play, 12, 0);
+    lv_obj_t *play_lbl = lv_label_create(btn_voice_play);
+    lv_label_set_text(play_lbl, "Play");
+    lv_obj_set_style_text_color(play_lbl, lv_color_white(), 0);
+    meck_set_font(play_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(play_lbl);
+    lv_obj_add_event_cb(btn_voice_play, on_voice_play_tap,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_voice_play, LV_OBJ_FLAG_HIDDEN);
+
+    // Discard button (hidden until recording complete)
+    btn_voice_discard = lv_button_create(scr_voice);
+    lv_obj_set_size(btn_voice_discard, 120, 60);
+    lv_obj_align(btn_voice_discard, LV_ALIGN_CENTER, 0, 150);
+    lv_obj_set_style_bg_color(btn_voice_discard,
+        lv_color_make(80, 30, 30), 0);
+    lv_obj_set_style_radius(btn_voice_discard, 12, 0);
+    lv_obj_t *discard_lbl = lv_label_create(btn_voice_discard);
+    lv_label_set_text(discard_lbl, "Discard");
+    lv_obj_set_style_text_color(discard_lbl, lv_color_white(), 0);
+    meck_set_font(discard_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(discard_lbl);
+    lv_obj_add_event_cb(btn_voice_discard, on_voice_discard_tap,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_voice_discard, LV_OBJ_FLAG_HIDDEN);
+
+    // Send button (hidden until recording + Codec2 encode complete)
+    btn_voice_send = lv_button_create(scr_voice);
+    lv_obj_set_size(btn_voice_send, 120, 60);
+    lv_obj_align(btn_voice_send, LV_ALIGN_CENTER, 130, 150);
+    lv_obj_set_style_bg_color(btn_voice_send,
+        lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_voice_send, 12, 0);
+    lv_obj_t *send_lbl = lv_label_create(btn_voice_send);
+    lv_label_set_text(send_lbl, "Send");
+    lv_obj_set_style_text_color(send_lbl, lv_color_black(), 0);
+    meck_set_font(send_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(send_lbl);
+    lv_obj_add_event_cb(btn_voice_send, on_voice_send_tap,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
+
+    // Previous recordings header
+    lv_obj_t *prev_hdr = lv_label_create(scr_voice);
+    lv_label_set_text(prev_hdr, "Previous recordings:");
+    lv_obj_set_style_text_color(prev_hdr, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(prev_hdr, &meck_montserrat_14, 0);
+    lv_obj_align(prev_hdr, LV_ALIGN_LEFT_MID, 20, 110);
+
+    // Scrollable list of previous recordings
+    obj_voice_prev_scroll = lv_obj_create(scr_voice);
+    lv_obj_set_size(obj_voice_prev_scroll, SCREEN_WIDTH - 40, SCREEN_HEIGHT - 420);
+    lv_obj_align(obj_voice_prev_scroll, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_opa(obj_voice_prev_scroll, 0, 0);
+    lv_obj_set_style_border_width(obj_voice_prev_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_voice_prev_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_voice_prev_scroll, LV_DIR_VER);
+}
+
 static void create_channel_picker_screen() {
     scr_channel_picker = lv_obj_create(NULL);
     lock_screen_scroll(scr_channel_picker);
@@ -6552,7 +8170,7 @@ static void create_channel_picker_screen() {
     lv_obj_align(add_title, LV_ALIGN_TOP_MID, 0, 50);
 
     lv_obj_t *hint = lv_label_create(obj_ch_add_panel);
-    lv_label_set_text(hint, "Enter channel name (e.g. #sydney)");
+    lv_label_set_text(hint, "# = public, no # = private (e.g. #sydney)");
     lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
     meck_set_font(hint, &meck_montserrat_14, 0);
     lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 90);
@@ -6562,7 +8180,7 @@ static void create_channel_picker_screen() {
     lv_obj_align(ta_ch_add, LV_ALIGN_TOP_MID, 0, 120);
     lv_textarea_set_one_line(ta_ch_add, true);
     lv_textarea_set_max_length(ta_ch_add, 30);
-    lv_textarea_set_text(ta_ch_add, "#");
+    lv_textarea_set_text(ta_ch_add, "");
     lv_obj_set_style_bg_color(ta_ch_add, lv_color_make(30, 30, 40), 0);
     lv_obj_set_style_text_color(ta_ch_add, lv_color_white(), 0);
     meck_set_font(ta_ch_add, &meck_montserrat_18, 0);
@@ -6856,6 +8474,21 @@ static void create_messages_screen() {
     meck_set_font(send_lbl, &meck_montserrat_22, 0);
     lv_obj_center(send_lbl);
     lv_obj_add_event_cb(btn_send, on_send_clicked, LV_EVENT_CLICKED, NULL);
+
+    // Paste Position — appears when g_position_paste_buffer is non-empty.
+    // Sits left of the send button at the bottom.
+    btn_paste_position = lv_button_create(scr_messages);
+    lv_obj_set_size(btn_paste_position, 140, 40);
+    lv_obj_align(btn_paste_position, LV_ALIGN_BOTTOM_LEFT, 90, -15);
+    lv_obj_set_style_bg_color(btn_paste_position, lv_palette_main(LV_PALETTE_ORANGE), 0);
+    lv_obj_set_style_radius(btn_paste_position, 8, 0);
+    lv_obj_t *paste_lbl = lv_label_create(btn_paste_position);
+    lv_label_set_text(paste_lbl, "Paste Pos");
+    lv_obj_set_style_text_color(paste_lbl, lv_color_black(), 0);
+    meck_set_font(paste_lbl, &meck_montserrat_14, 0);
+    lv_obj_center(paste_lbl);
+    lv_obj_add_event_cb(btn_paste_position, on_paste_position_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_paste_position, LV_OBJ_FLAG_HIDDEN);
 
     kb_compose = lv_keyboard_create(scr_messages);
     meck_style_keyboard(kb_compose);
@@ -7619,6 +9252,27 @@ static void create_contact_detail_screen() {
     meck_set_font(lbl_contact_detail_body, &meck_montserrat_16, 0);
     lv_label_set_long_mode(lbl_contact_detail_body, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_contact_detail_body, SCREEN_WIDTH - 50);
+
+    // Ping — sends a zero-hop trace to the repeater. Fuchsia, below Admin.
+    // Default 1-byte; long-press opens 1/2 byte chooser.
+    // MUST be created after the scroll container so it renders on top —
+    // the scroll starts at y=170 and the ping button sits at y=170 too.
+    btn_contact_ping = lv_button_create(scr_contact_detail);
+    lv_obj_set_size(btn_contact_ping, 100, 70);
+    lv_obj_align(btn_contact_ping, LV_ALIGN_TOP_RIGHT, -10, 170);
+    lv_obj_set_style_bg_color(btn_contact_ping,
+        lv_color_make(200, 50, 150), 0);  // fuchsia
+    lv_obj_set_style_radius(btn_contact_ping, 8, 0);
+    lv_obj_t *ping_lbl = lv_label_create(btn_contact_ping);
+    lv_label_set_text(ping_lbl, "Ping");
+    lv_obj_set_style_text_color(ping_lbl, lv_color_white(), 0);
+    meck_set_font(ping_lbl, &meck_montserrat_16, 0);
+    lv_obj_center(ping_lbl);
+    lv_obj_add_event_cb(btn_contact_ping, on_contact_ping_tap,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn_contact_ping, on_contact_ping_longpress,
+                        LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_flag(btn_contact_ping, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ============================================================================
@@ -8554,6 +10208,117 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // queued (early-return on empty rings).
     meck_drain_pending_admin_responses();
 
+    // Voice over LoRa: drain pending VE3 envelopes and voice data packets.
+    // When an incoming session is complete, auto-play via MeckVoice.
+    {
+        meck_drain_pending_voice();
+
+        MeckVoice* voice = meck_get_voice_instance();
+        if (voice && voice->isIncomingComplete()) {
+            const MeckVoice::InSession& in = voice->getInSession();
+            printf("MeckUI: voice session complete from %s (%lu bytes)\n",
+                   in.senderName, (unsigned long)in.dataBytes);
+
+#ifdef HAVE_CODEC2
+            // Reassemble packets in order
+            uint8_t ordered[VOICE_C2_MAX_BYTES];
+            uint32_t orderedLen = voice->reassembleIncoming(ordered, sizeof(ordered));
+
+            if (orderedLen > 0 && voice->decodeCodec2(ordered, orderedLen)) {
+                // Ensure inbox folder exists
+                struct stat st;
+                if (stat(VOICE_INBOX_FOLDER, &st) != 0) {
+                    mkdir("/sdcard/voice", 0755);
+                    mkdir(VOICE_INBOX_FOLDER, 0755);
+                }
+
+                // Save decoded audio as WAV to inbox folder
+                uint32_t ts = meck_clock_get_utc();
+                char filename[48];
+                snprintf(filename, sizeof(filename), "voice_rx_%06lu.wav",
+                         (unsigned long)(ts % 1000000UL));
+
+                // Save with inbox folder path
+                char fullpath[128];
+                snprintf(fullpath, sizeof(fullpath), "%s/%s",
+                         VOICE_INBOX_FOLDER, filename);
+
+                // Use saveToWav which writes to VOICE_FOLDER by default.
+                // For inbox, we need to write directly.
+                voice->saveToWav(filename);
+
+                // Move the file from VOICE_FOLDER to VOICE_INBOX_FOLDER
+                char srcPath[128];
+                snprintf(srcPath, sizeof(srcPath), "%s/%s", VOICE_FOLDER, filename);
+                rename(srcPath, fullpath);
+
+                // Calculate duration from Codec2 frame count
+                uint8_t durSec = (uint8_t)(in.dataBytes / VOICE_C2_FRAME_BYTES
+                                           * VOICE_C2_FRAME_MS / 1000);
+
+                // Add to inbox metadata
+                voice_inbox_add(in.senderName, fullpath, ts, durSec);
+                voice_inbox_update_badge();
+
+                printf("MeckUI: voice from %s saved to inbox (%s, %ds)\n",
+                       in.senderName, filename, durSec);
+            } else {
+                printf("MeckUI: Codec2 decode failed for incoming voice\n");
+            }
+#else
+            printf("MeckUI: voice received but HAVE_CODEC2 not enabled\n");
+#endif
+            voice->clearIncoming();
+        }
+
+        // Live UI update during recording: call recordTick to pull
+        // samples from the mic DMA, and refresh the voice screen.
+        if (voice->isRecording()) {
+            voice->recordTick();
+            if (scr_voice && lv_screen_active() == scr_voice) {
+                voice_update_ui();
+            }
+        }
+
+        // Detect playback completion: if we're on the voice screen and
+        // the status says "Playing..." but the audio backend has gone
+        // idle, update the label.
+        if (scr_voice && lv_screen_active() == scr_voice && lbl_voice_status) {
+            MeckAudioState st = meck_audio_get_state();
+            if (st == MECK_AUDIO_STATE_IDLE || st == MECK_AUDIO_STATE_EOF) {
+                const char *cur = lv_label_get_text(lbl_voice_status);
+                if (cur && strncmp(cur, "Playing", 7) == 0) {
+                    if (g_voice_has_recording) {
+                        char buf[48];
+                        snprintf(buf, sizeof(buf), "Recorded %.1fs",
+                                 voice->getRecDurationSec());
+                        lv_label_set_text(lbl_voice_status, buf);
+                        lv_obj_set_style_text_color(lbl_voice_status,
+                            lv_palette_main(LV_PALETTE_GREEN), 0);
+                    } else {
+                        lv_label_set_text(lbl_voice_status, "Playback finished");
+                        lv_obj_set_style_text_color(lbl_voice_status,
+                            lv_palette_main(LV_PALETTE_GREEN), 0);
+                    }
+                }
+            }
+        }
+
+        // Detect voice send completion by timeout
+        if (g_voice_send_in_flight && lbl_voice_status) {
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+            if (now_ms >= g_voice_send_complete_ms) {
+                g_voice_send_in_flight = false;
+                const char *cur = lv_label_get_text(lbl_voice_status);
+                if (cur && strncmp(cur, "Sending", 7) == 0) {
+                    lv_label_set_text(lbl_voice_status, "Sent");
+                    lv_obj_set_style_text_color(lbl_voice_status,
+                        lv_palette_main(LV_PALETTE_GREEN), 0);
+                }
+            }
+        }
+    }
+
     // Admin login screen: reveal-then-dot re-render. Causes the
     // most-recently-typed character to resolve to • once the reveal
     // window has elapsed. Cheap — admin_render_password_masked
@@ -8793,6 +10558,85 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                     }
                 }
             }
+        }
+    }
+
+    // ---- Ping result polling ----
+    // Same pattern as trace polling. Poll consumePingResult and show
+    // the result overlay on the contact detail screen.
+    if (g_ping_in_flight) {
+        Meck *mesh_p = meck_get_instance();
+        if (mesh_p) {
+            Meck::MeckPingResult pr;
+            if (mesh_p->consumePingResult(pr)) {
+                g_ping_in_flight = false;
+                char body[160];
+                snprintf(body, sizeof(body),
+                         "To: %s\nDuration: %lums\n"
+                         "SNR there: %.2fdB\nSNR back: %.2fdB",
+                         pr.target_name,
+                         (unsigned long)pr.duration_ms,
+                         (float)pr.snr_there / 4.0f,
+                         (float)pr.snr_back / 4.0f);
+                ping_show_result(true, body);
+            } else if (g_ping_timeout_ms != 0 &&
+                       (unsigned long)millis() >= g_ping_timeout_ms) {
+                g_ping_in_flight = false;
+                g_ping_timeout_ms = 0;
+                mesh_p->pingClearPending();
+                ping_show_result(false, "timeout");
+            }
+        }
+    }
+
+    // ---- GPS auto-update for position (every 15 minutes) ----
+    // When position_mode == 2 (auto-GPS), refresh lat/lon from GPS snapshot
+    // and save to prefs. 1800 ticks at 500ms = 15 minutes.
+    static int gps_position_ticks = 1800;
+    if (++gps_position_ticks >= 1800) {
+        gps_position_ticks = 0;
+        Meck *mesh_gps = meck_get_instance();
+        if (mesh_gps) {
+            P4NodePrefs* prefs = mesh_gps->getNodePrefs();
+            if (prefs && prefs->position_mode == 2 && meck_gps_is_enabled()) {
+                MeckGpsSnapshot snap;
+                meck_gps_get_snapshot(&snap);
+                if (snap.fix_valid && snap.lat_e7 != 0 && snap.lon_e7 != 0) {
+                    int32_t new_lat = snap.lat_e7;
+                    int32_t new_lon = snap.lon_e7;
+                    if (new_lat != prefs->position_lat_e7 ||
+                        new_lon != prefs->position_lon_e7) {
+                        prefs->position_lat_e7 = new_lat;
+                        prefs->position_lon_e7 = new_lon;
+                        mesh_gps->getDataStore()->savePrefs(*prefs);
+                        printf("Position: auto-updated from GPS %.6f,%.6f\n",
+                               snap.lat_e7 / 1e7, snap.lon_e7 / 1e7);
+                        // Refresh labels if the position screen is visible
+                        if (scr_settings_position &&
+                            lv_screen_active() == scr_settings_position) {
+                            refresh_position_labels();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Paste Position button visibility ----
+    // Show on compose screens when the buffer is non-empty, hide when empty.
+    {
+        bool has_paste = (g_position_paste_buffer[0] != '\0');
+        if (btn_paste_position) {
+            if (has_paste && scr_messages && lv_screen_active() == scr_messages)
+                lv_obj_clear_flag(btn_paste_position, LV_OBJ_FLAG_HIDDEN);
+            else
+                lv_obj_add_flag(btn_paste_position, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (btn_room_paste_position) {
+            if (has_paste && scr_room_messages && lv_screen_active() == scr_room_messages)
+                lv_obj_clear_flag(btn_room_paste_position, LV_OBJ_FLAG_HIDDEN);
+            else
+                lv_obj_add_flag(btn_room_paste_position, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
@@ -10553,6 +12397,338 @@ static void admin_login_screen_enter(int contact_idx) {
     if (scr_admin_login) lv_screen_load(scr_admin_login);
 }
 
+// ============================================================================
+// Ping UI — zero-hop trace to a repeater
+// ============================================================================
+
+// Dismiss the result overlay (success or failure).
+static void ping_dismiss_result(lv_event_t *e) {
+    (void)e;
+    if (obj_ping_result_panel) {
+        lv_obj_del(obj_ping_result_panel);
+        obj_ping_result_panel = NULL;
+        lbl_ping_result = NULL;
+    }
+}
+
+// Show a result overlay (green for success, red for failure).
+static void ping_show_result(bool success, const char *body) {
+    if (obj_ping_result_panel) {
+        lv_obj_del(obj_ping_result_panel);
+        obj_ping_result_panel = NULL;
+    }
+    if (!scr_contact_detail) return;
+
+    obj_ping_result_panel = lv_obj_create(scr_contact_detail);
+    lv_obj_set_size(obj_ping_result_panel, SCREEN_WIDTH - 60, LV_SIZE_CONTENT);
+    lv_obj_align(obj_ping_result_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(obj_ping_result_panel,
+        success ? lv_color_make(50, 180, 80) : lv_color_make(220, 80, 70), 0);
+    lv_obj_set_style_bg_opa(obj_ping_result_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(obj_ping_result_panel, 16, 0);
+    lv_obj_set_style_pad_all(obj_ping_result_panel, 20, 0);
+    lv_obj_set_style_border_width(obj_ping_result_panel, 0, 0);
+    lv_obj_clear_flag(obj_ping_result_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Icon
+    lv_obj_t *icon = lv_label_create(obj_ping_result_panel);
+    if (success) {
+        lv_label_set_text(icon, LV_SYMBOL_OK);
+    } else {
+        lv_label_set_text(icon, LV_SYMBOL_WARNING);
+    }
+    lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+    meck_set_font(icon, &meck_montserrat_28, 0);
+    lv_obj_align(icon, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    // Title
+    lv_obj_t *title = lv_label_create(obj_ping_result_panel);
+    lv_label_set_text(title, success ? "Ping Success" : "Ping Failed");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    meck_set_font(title, &meck_montserrat_22, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 40, 0);
+
+    // Body
+    lbl_ping_result = lv_label_create(obj_ping_result_panel);
+    lv_label_set_text(lbl_ping_result, body);
+    lv_obj_set_style_text_color(lbl_ping_result, lv_color_white(), 0);
+    meck_set_font(lbl_ping_result, &meck_montserrat_18, 0);
+    lv_obj_set_width(lbl_ping_result, SCREEN_WIDTH - 120);
+    lv_obj_align(lbl_ping_result, LV_ALIGN_TOP_LEFT, 10, 40);
+
+    // Tap anywhere on the panel to dismiss
+    lv_obj_add_event_cb(obj_ping_result_panel, ping_dismiss_result,
+                        LV_EVENT_CLICKED, NULL);
+}
+
+// Dismiss the prefix warning overlay without sending.
+static void ping_dismiss_warning(lv_event_t *e) {
+    (void)e;
+    if (obj_ping_warning_panel) {
+        lv_obj_del(obj_ping_warning_panel);
+        obj_ping_warning_panel = NULL;
+    }
+}
+
+// Confirm the prefix warning and send the ping.
+static void ping_confirm_warning(lv_event_t *e) {
+    (void)e;
+    if (obj_ping_warning_panel) {
+        lv_obj_del(obj_ping_warning_panel);
+        obj_ping_warning_panel = NULL;
+    }
+    ping_send_now(g_ping_byte_size);
+}
+
+// Show a prefix collision warning dialog.
+static void ping_show_warning(int dup_count, uint8_t prefix_byte) {
+    if (obj_ping_warning_panel) {
+        lv_obj_del(obj_ping_warning_panel);
+        obj_ping_warning_panel = NULL;
+    }
+    if (!scr_contact_detail) return;
+
+    obj_ping_warning_panel = lv_obj_create(scr_contact_detail);
+    lv_obj_set_size(obj_ping_warning_panel, SCREEN_WIDTH - 40, LV_SIZE_CONTENT);
+    lv_obj_align(obj_ping_warning_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(obj_ping_warning_panel,
+        lv_color_make(50, 50, 55), 0);
+    lv_obj_set_style_bg_opa(obj_ping_warning_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(obj_ping_warning_panel, 16, 0);
+    lv_obj_set_style_pad_all(obj_ping_warning_panel, 20, 0);
+    lv_obj_set_style_border_width(obj_ping_warning_panel, 0, 0);
+    lv_obj_clear_flag(obj_ping_warning_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(obj_ping_warning_panel);
+    lv_label_set_text(title, "Ping Warning");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    meck_set_font(title, &meck_montserrat_22, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "You know %d repeaters or room servers with prefix <%02X>. "
+             "Unfortunately we won't know which of them replies to this "
+             "ping request.",
+             dup_count, (unsigned)prefix_byte);
+    lv_obj_t *body = lv_label_create(obj_ping_warning_panel);
+    lv_label_set_text(body, msg);
+    lv_obj_set_style_text_color(body, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(body, &meck_montserrat_16, 0);
+    lv_obj_set_width(body, SCREEN_WIDTH - 100);
+    lv_obj_align(body, LV_ALIGN_TOP_LEFT, 0, 35);
+
+    // Dismiss button
+    lv_obj_t *btn_dismiss = lv_button_create(obj_ping_warning_panel);
+    lv_obj_set_size(btn_dismiss, 140, 50);
+    lv_obj_align(btn_dismiss, LV_ALIGN_BOTTOM_LEFT, 0, 10);
+    lv_obj_set_style_bg_color(btn_dismiss, lv_color_make(80, 80, 85), 0);
+    lv_obj_set_style_radius(btn_dismiss, 12, 0);
+    lv_obj_t *dl = lv_label_create(btn_dismiss);
+    lv_label_set_text(dl, "Dismiss");
+    lv_obj_set_style_text_color(dl, lv_color_white(), 0);
+    meck_set_font(dl, &meck_montserrat_16, 0);
+    lv_obj_center(dl);
+    lv_obj_add_event_cb(btn_dismiss, ping_dismiss_warning,
+                        LV_EVENT_CLICKED, NULL);
+
+    // Confirm button
+    lv_obj_t *btn_confirm = lv_button_create(obj_ping_warning_panel);
+    lv_obj_set_size(btn_confirm, 140, 50);
+    lv_obj_align(btn_confirm, LV_ALIGN_BOTTOM_RIGHT, 0, 10);
+    lv_obj_set_style_bg_color(btn_confirm, lv_color_make(80, 80, 85), 0);
+    lv_obj_set_style_radius(btn_confirm, 12, 0);
+    lv_obj_t *cl = lv_label_create(btn_confirm);
+    lv_label_set_text(cl, "Confirm");
+    lv_obj_set_style_text_color(cl, lv_palette_main(LV_PALETTE_RED), 0);
+    meck_set_font(cl, &meck_montserrat_16, 0);
+    lv_obj_center(cl);
+    lv_obj_add_event_cb(btn_confirm, ping_confirm_warning,
+                        LV_EVENT_CLICKED, NULL);
+}
+
+// Actually send the ping trace.
+static void ping_send_now(uint8_t byte_size) {
+    Meck *mesh = meck_get_instance();
+    if (!mesh || g_selected_contact_idx < 0) return;
+
+    if (!mesh->uiSendPing(g_selected_contact_idx, byte_size)) {
+        ping_show_result(false, "Send failed");
+        return;
+    }
+
+    g_ping_in_flight = true;
+    g_ping_byte_size = byte_size;
+    g_ping_timeout_ms = (unsigned long)millis() +
+                        (MECK_PING_TIMEOUT_SEC * 1000);
+}
+
+// Tap handler: 1-byte ping with duplicate prefix check.
+static void on_contact_ping_tap(lv_event_t *e) {
+    (void)e;
+    Meck *mesh = meck_get_instance();
+    if (!mesh || g_selected_contact_idx < 0) return;
+    if (g_ping_in_flight) return;  // one at a time
+
+    // Dismiss any lingering result
+    if (obj_ping_result_panel) ping_dismiss_result(NULL);
+
+    g_ping_byte_size = 1;
+
+    // Check for duplicate 1-byte prefixes
+    int dup_count = mesh->countMatchingPrefixes(g_selected_contact_idx, 1);
+    if (dup_count > 1) {
+        ContactInfo ci;
+        uint8_t prefix = 0;
+        if (mesh->getContactByIdx((uint32_t)g_selected_contact_idx, ci)) {
+            prefix = ci.id.pub_key[0];
+        }
+        ping_show_warning(dup_count, prefix);
+        return;
+    }
+
+    ping_send_now(1);
+}
+
+// Long-press handler: show 1/2 byte chooser.
+static void on_contact_ping_longpress(lv_event_t *e) {
+    (void)e;
+    Meck *mesh = meck_get_instance();
+    if (!mesh || g_selected_contact_idx < 0) return;
+    if (g_ping_in_flight) return;
+
+    // Dismiss any lingering overlays
+    if (obj_ping_result_panel) ping_dismiss_result(NULL);
+    if (obj_ping_warning_panel) ping_dismiss_warning(NULL);
+
+    if (obj_ping_chooser_panel) {
+        lv_obj_del(obj_ping_chooser_panel);
+        obj_ping_chooser_panel = NULL;
+    }
+    if (!scr_contact_detail) return;
+
+    // Get contact prefix info for display
+    ContactInfo ci;
+    char prefix_1[8] = "??";
+    char prefix_2[12] = "????";
+    if (mesh->getContactByIdx((uint32_t)g_selected_contact_idx, ci)) {
+        snprintf(prefix_1, sizeof(prefix_1), "%02X",
+                 (unsigned)ci.id.pub_key[0]);
+        snprintf(prefix_2, sizeof(prefix_2), "%02X%02X",
+                 (unsigned)ci.id.pub_key[0],
+                 (unsigned)ci.id.pub_key[1]);
+    }
+
+    obj_ping_chooser_panel = lv_obj_create(scr_contact_detail);
+    lv_obj_set_size(obj_ping_chooser_panel, SCREEN_WIDTH - 60, LV_SIZE_CONTENT);
+    lv_obj_align(obj_ping_chooser_panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(obj_ping_chooser_panel,
+        lv_color_make(50, 50, 55), 0);
+    lv_obj_set_style_bg_opa(obj_ping_chooser_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(obj_ping_chooser_panel, 16, 0);
+    lv_obj_set_style_pad_all(obj_ping_chooser_panel, 20, 0);
+    lv_obj_set_style_border_width(obj_ping_chooser_panel, 0, 0);
+    lv_obj_clear_flag(obj_ping_chooser_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(obj_ping_chooser_panel);
+    lv_label_set_text(title, "Ping (Zero Hop)");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    meck_set_font(title, &meck_montserrat_22, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    // 1-byte option
+    char lbl_1[48];
+    snprintf(lbl_1, sizeof(lbl_1), "Ping <%s>\n1-byte", prefix_1);
+    lv_obj_t *btn1 = lv_button_create(obj_ping_chooser_panel);
+    lv_obj_set_size(btn1, SCREEN_WIDTH - 120, 70);
+    lv_obj_align(btn1, LV_ALIGN_TOP_LEFT, 0, 45);
+    lv_obj_set_style_bg_color(btn1, lv_color_make(60, 60, 65), 0);
+    lv_obj_set_style_radius(btn1, 8, 0);
+    lv_obj_t *l1 = lv_label_create(btn1);
+    lv_label_set_text(l1, lbl_1);
+    lv_obj_set_style_text_color(l1, lv_color_white(), 0);
+    meck_set_font(l1, &meck_montserrat_18, 0);
+    lv_obj_align(l1, LV_ALIGN_LEFT_MID, 10, 0);
+    lv_obj_t *arrow1 = lv_label_create(btn1);
+    lv_label_set_text(arrow1, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(arrow1, lv_color_white(), 0);
+    meck_set_font(arrow1, &meck_montserrat_18, 0);
+    lv_obj_align(arrow1, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_add_event_cb(btn1, ping_chooser_select, LV_EVENT_CLICKED,
+                        (void*)(uintptr_t)1);
+
+    // 2-byte option
+    char lbl_2[48];
+    snprintf(lbl_2, sizeof(lbl_2), "Ping <%s>\n2-byte", prefix_2);
+    lv_obj_t *btn2 = lv_button_create(obj_ping_chooser_panel);
+    lv_obj_set_size(btn2, SCREEN_WIDTH - 120, 70);
+    lv_obj_align(btn2, LV_ALIGN_TOP_LEFT, 0, 125);
+    lv_obj_set_style_bg_color(btn2, lv_color_make(60, 60, 65), 0);
+    lv_obj_set_style_radius(btn2, 8, 0);
+    lv_obj_t *l2 = lv_label_create(btn2);
+    lv_label_set_text(l2, lbl_2);
+    lv_obj_set_style_text_color(l2, lv_color_white(), 0);
+    meck_set_font(l2, &meck_montserrat_18, 0);
+    lv_obj_align(l2, LV_ALIGN_LEFT_MID, 10, 0);
+    lv_obj_t *arrow2 = lv_label_create(btn2);
+    lv_label_set_text(arrow2, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(arrow2, lv_color_white(), 0);
+    meck_set_font(arrow2, &meck_montserrat_18, 0);
+    lv_obj_align(arrow2, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_add_event_cb(btn2, ping_chooser_select, LV_EVENT_CLICKED,
+                        (void*)(uintptr_t)2);
+
+    // Cancel button
+    lv_obj_t *btn_cancel = lv_button_create(obj_ping_chooser_panel);
+    lv_obj_set_size(btn_cancel, SCREEN_WIDTH - 120, 45);
+    lv_obj_align(btn_cancel, LV_ALIGN_TOP_LEFT, 0, 210);
+    lv_obj_set_style_bg_opa(btn_cancel, 0, 0);
+    lv_obj_t *lc = lv_label_create(btn_cancel);
+    lv_label_set_text(lc, "Cancel");
+    lv_obj_set_style_text_color(lc, lv_palette_main(LV_PALETTE_BLUE), 0);
+    meck_set_font(lc, &meck_montserrat_18, 0);
+    lv_obj_align(lc, LV_ALIGN_RIGHT_MID, -10, 0);
+    lv_obj_add_event_cb(btn_cancel, [](lv_event_t *ev) {
+        (void)ev;
+        if (obj_ping_chooser_panel) {
+            lv_obj_del(obj_ping_chooser_panel);
+            obj_ping_chooser_panel = NULL;
+        }
+    }, LV_EVENT_CLICKED, NULL);
+}
+
+// Chooser selection handler — user picked 1-byte or 2-byte.
+static void ping_chooser_select(lv_event_t *e) {
+    uint8_t byte_size = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    if (obj_ping_chooser_panel) {
+        lv_obj_del(obj_ping_chooser_panel);
+        obj_ping_chooser_panel = NULL;
+    }
+
+    Meck *mesh = meck_get_instance();
+    if (!mesh || g_selected_contact_idx < 0) return;
+
+    g_ping_byte_size = byte_size;
+
+    // For 1-byte, check duplicate prefixes
+    if (byte_size == 1) {
+        int dup_count = mesh->countMatchingPrefixes(g_selected_contact_idx, 1);
+        if (dup_count > 1) {
+            ContactInfo ci;
+            uint8_t prefix = 0;
+            if (mesh->getContactByIdx((uint32_t)g_selected_contact_idx, ci)) {
+                prefix = ci.id.pub_key[0];
+            }
+            ping_show_warning(dup_count, prefix);
+            return;
+        }
+    }
+
+    ping_send_now(byte_size);
+}
+
+// ============================================================================
+
 static void on_contact_admin_tap(lv_event_t *e) {
     if (g_selected_contact_idx < 0) return;
     admin_login_screen_enter(g_selected_contact_idx);
@@ -12123,6 +14299,20 @@ static void create_room_messages_screen() {
     lv_obj_center(send_lbl);
     lv_obj_add_event_cb(btn_room_send, on_room_send_clicked, LV_EVENT_CLICKED, NULL);
 
+    // Paste Position for room compose
+    btn_room_paste_position = lv_button_create(scr_room_messages);
+    lv_obj_set_size(btn_room_paste_position, 140, 40);
+    lv_obj_align(btn_room_paste_position, LV_ALIGN_BOTTOM_LEFT, 90, -15);
+    lv_obj_set_style_bg_color(btn_room_paste_position, lv_palette_main(LV_PALETTE_ORANGE), 0);
+    lv_obj_set_style_radius(btn_room_paste_position, 8, 0);
+    lv_obj_t *room_paste_lbl = lv_label_create(btn_room_paste_position);
+    lv_label_set_text(room_paste_lbl, "Paste Pos");
+    lv_obj_set_style_text_color(room_paste_lbl, lv_color_black(), 0);
+    meck_set_font(room_paste_lbl, &meck_montserrat_14, 0);
+    lv_obj_center(room_paste_lbl);
+    lv_obj_add_event_cb(btn_room_paste_position, on_room_paste_position_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_room_paste_position, LV_OBJ_FLAG_HIDDEN);
+
     kb_room_compose = lv_keyboard_create(scr_room_messages);
     meck_style_keyboard(kb_room_compose);
     lv_keyboard_set_textarea(kb_room_compose, ta_room_compose);
@@ -12173,6 +14363,12 @@ extern "C" void meck_ui_init() {
     create_settings_contacts_screen();
     create_settings_channels_screen();
     create_channel_detail_screen();
+    create_settings_position_screen();
+    create_not_implemented_screen();
+    create_voice_landing_screen();
+    create_voice_inbox_screen();
+    create_voice_record_screen();
+    voice_inbox_load();
     create_radio_picker_screen();
     create_channel_picker_screen();
     create_messages_screen();

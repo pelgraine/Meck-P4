@@ -430,14 +430,14 @@ static void create_browser_screen() {
 
     /* Back button → home */
     lv_obj_t* btn_back = lv_button_create(scr_audio_browser);
-    lv_obj_set_size(btn_back, 80, 40);
+    lv_obj_set_size(btn_back, 100, 70);
     lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
     lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_radius(btn_back, 8, 0);
     lv_obj_t* bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(bl, &lv_font_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, on_browser_back_clicked,
                         LV_EVENT_CLICKED, NULL);
@@ -447,7 +447,7 @@ static void create_browser_screen() {
     lv_label_set_text(title, "Audio");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_AMBER), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     /* Up-one-level button (top-right) */
     btn_browser_up = lv_button_create(scr_audio_browser);
@@ -972,14 +972,14 @@ static void create_player_screen() {
 
     /* Back button */
     lv_obj_t* btn_back = lv_button_create(scr_audio_player);
-    lv_obj_set_size(btn_back, 80, 40);
+    lv_obj_set_size(btn_back, 100, 70);
     lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
     lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_radius(btn_back, 8, 0);
     lv_obj_t* bl = lv_label_create(btn_back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(bl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(bl, &lv_font_montserrat_18, 0);
     lv_obj_center(bl);
     lv_obj_add_event_cb(btn_back, on_player_back_clicked,
                         LV_EVENT_CLICKED, NULL);
@@ -989,7 +989,7 @@ static void create_player_screen() {
     lv_label_set_text(hdr_title, "Now Playing");
     lv_obj_set_style_text_color(hdr_title, lv_palette_main(LV_PALETTE_AMBER), 0);
     lv_obj_set_style_text_font(hdr_title, &lv_font_montserrat_24, 0);
-    lv_obj_align(hdr_title, LV_ALIGN_TOP_LEFT, 100, 18);
+    lv_obj_align(hdr_title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     /* Cover slot — 280×280 placeholder until cover art lands.
      * Centered horizontally, near the top of content area. */

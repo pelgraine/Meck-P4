@@ -144,6 +144,17 @@ struct P4NodePrefs {
     // Appending here is safe — loadPrefs tolerates short reads.
     uint8_t channel_notif[21];       // 20 group channels + 1 DM slot
 
+    // Position sharing for adverts. position_mode controls whether the
+    // device includes lat/lon in self-adverts:
+    //   0 = Off (no position shared, regardless of lat/lon values)
+    //   1 = Manual (use the user-entered lat/lon values below)
+    //   2 = Auto-update (GPS must be on; lat/lon refreshed every 15 min)
+    // Appending here is safe — loadPrefs tolerates short reads. Existing
+    // NVS blobs come up with all zeros = Off + no position = safe default.
+    int32_t position_lat_e7;         // signed degrees × 1e7 (0 = not set)
+    int32_t position_lon_e7;
+    uint8_t position_mode;           // 0=off, 1=manual, 2=auto-GPS
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -172,6 +183,9 @@ struct P4NodePrefs {
         memset(default_scope_name, 0, sizeof(default_scope_name));
         memset(default_scope_key, 0, sizeof(default_scope_key));
         memset(channel_notif, 0, sizeof(channel_notif));  // 0 = NOTIF_ALL
+        position_lat_e7 = 0;    // not set
+        position_lon_e7 = 0;    // not set
+        position_mode = 0;      // off — no position shared
     }
 };
 

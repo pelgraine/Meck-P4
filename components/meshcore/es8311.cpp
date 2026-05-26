@@ -205,4 +205,106 @@ esp_err_t meck_audio_es8311_mute_cb(AUDIO_PLAYER_MUTE_SETTING setting)
     return ESP_OK;
 }
 
+/* ====================================================================
+ * ADC (microphone) capture — voice recording support
+ * ====================================================================
+ * The ES8311 has both DAC (speaker) and ADC (mic) paths on the same
+ * chip. The existing code only uses the DAC side. These functions
+ * enable mic capture through the ADC for voice message recording.
+ *
+ * Usage sequence:
+ *   1. Stop any active playback (optional — full-duplex is possible
+ *      but echo would be picked up by the mic)
+ *   2. meck_audio_mic_start(16000) — configures ADC at 16kHz
+ *   3. Loop: meck_audio_mic_read(buf, len) into PSRAM buffer
+ *   4. meck_audio_mic_stop() — powers down ADC, restores DAC clock
+ *
+ * The electret condenser mic on the P4 feeds MIC1P. PGA gain and
+ * ADC digital gain are set conservatively; normalizeRecording() in
+ * the voice layer compensates after capture.
+ * ==================================================================*/
+
+static bool     g_mic_active     = false;
+static uint32_t g_mic_rate       = 16000;
+static uint32_t g_dac_rate_saved = 44100;
+
+bool meck_audio_mic_start(uint32_t sample_rate)
+{
+    if (!ES8311) {
+        ESP_LOGE(TAG, "mic_start: ES8311 not initialized");
+        return false;
+    }
+    if (g_mic_active) {
+        ESP_LOGW(TAG, "mic_start: already active");
+        return true;
+    }
+
+    /* Don't change the I2S clock. The ESP32-P4 is the I2S master and
+     * its bus clock stays at the boot-configured rate (44100Hz).
+     * Changing the ES8311 codec registers doesn't change the master
+     * clock, causing a rate mismatch. We capture at 44100Hz and
+     * downsample in software for Codec2. */
+    (void)sample_rate;
+    g_mic_rate = g_current_rate;  /* use whatever I2S is running at */
+
+    /* Configure mic input: electret condenser on MIC1P/MIC1N */
+    ES8311->set_mic(Cpp_Bus_Driver::Es8311::Mic_Type::ANALOG_MIC,
+                    Cpp_Bus_Driver::Es8311::Mic_Input::MIC1P_1N);
+
+    /* ADC data format: 16-bit */
+    ES8311->set_sdp_data_bit_length(
+        Cpp_Bus_Driver::Es8311::Sdp::ADC,
+        Cpp_Bus_Driver::Es8311::Bits_Per_Sample::DATA_16BIT);
+
+    /* Power on the analog front-end: PGA + ADC */
+    ES8311->set_pga_power(true);
+    ES8311->set_adc_power(true);
+
+    /* Gain chain: PGA (analog pre-amp) + ADC (digital).
+     * Electret mics are typically low-output; start with moderate gain.
+     * The voice layer's normalizeRecording() adjusts post-capture. */
+    ES8311->set_adc_pga_gain(
+        Cpp_Bus_Driver::Es8311::Adc_Pga_Gain::GAIN_18DB);
+    ES8311->set_adc_gain(
+        Cpp_Bus_Driver::Es8311::Adc_Gain::GAIN_24DB);
+
+    /* ADC volume: 191 = 0dB in the ES8311 scale */
+    ES8311->set_adc_volume(191);
+
+    /* HPF to remove DC offset from the electret bias voltage */
+    ES8311->set_adc_offset_freeze(
+        Cpp_Bus_Driver::Es8311::Adc_Offset_Freeze::DYNAMIC_HPF);
+
+    g_mic_active = true;
+    ESP_LOGI(TAG, "mic_start: ADC active at %luHz (native I2S rate, PGA=18dB, ADC=24dB)",
+             (unsigned long)g_mic_rate);
+    return true;
+}
+
+size_t meck_audio_mic_read(void *buf, size_t len)
+{
+    if (!ES8311 || !g_mic_active || !buf) return 0;
+    return ES8311->read_data(buf, len);
+}
+
+void meck_audio_mic_stop(void)
+{
+    if (!ES8311 || !g_mic_active) return;
+
+    /* Power down ADC chain */
+    ES8311->set_adc_power(false);
+    ES8311->set_pga_power(false);
+
+    /* No clock restore needed — we don't change the I2S clock during
+     * capture. The bus stays at 44100Hz throughout. */
+
+    g_mic_active = false;
+    ESP_LOGI(TAG, "mic_stop: ADC powered down");
+}
+
+bool meck_audio_mic_is_active(void)
+{
+    return g_mic_active;
+}
+
 } /* extern "C" */

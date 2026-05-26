@@ -34,6 +34,9 @@ with a `meshcore` ESP-IDF component added on top.
 - [Discover](#discover)
 - [Audio Player](#audio-player)
 - [Maps](#maps)
+- [Config Export](#config-export)
+- [Config Import](#config-import)
+- [Debug Logs](#debug-logs)
 - [Settings](#settings)
 - [GPS](#gps)
 - [Battery](#battery)
@@ -543,6 +546,7 @@ For full setup instructions including the `mp3_clean.py` script usage, SD card l
 -----
 
 ## Maps
+<img width="250" height="500" alt="IMG_3025-EDIT" src="https://github.com/user-attachments/assets/de354952-763b-4279-8897-fd3f2825d6a2" />
 
 Tap the **Maps** tile on the home grid to open an offline slippy-tile map of your area. The map renders OSM PNG tiles from `/sdcard/tiles/{z}/{x}/{y}.png` via LVGL’s image widget plus LV_USE_LODEPNG. Pan and zoom by touch. A GPS dot follows your fix when GPS is enabled; markers overlay contact positions filtered by type (repeaters by default), with a filter modal for switching to other types.
 
@@ -563,7 +567,68 @@ Once you’ve downloaded them, copy the `tiles/` folder to the **root of your SD
 
 ### SD card sizing
 
-Meck-P4 works with SD cards up to 1 TB. Very large tile folders (tens of GB) can make the maps screen feel sluggish — tile lookup walks the FAT directory structure, and on huge cards the seek overhead becomes noticeable. If you only need tiles for your local area, downloading just the zoom levels and bounding box you actually care about keeps things snappier than dumping the whole continent on the card.
+Meck-P4 works with SD cards up to 1 TB. Very large tile folders (tens of GB) can make the maps screen feel sluggish -- tile lookup walks the FAT directory structure, and on huge cards the seek overhead becomes noticeable. If you only need tiles for your local area, downloading just the zoom levels and bounding box you actually care about keeps things snappier than dumping the whole continent on the card.
+
+-----
+
+## Config Export
+
+Tap **Export Config** in Settings to open a modal with four section checkboxes:
+
+|Section       |What it includes                                                                                   |
+|--------------|---------------------------------------------------------------------------------------------------|
+|**Identity**  |Your Ed25519 keypair (public + private key). Check this to back up or transfer your mesh identity. |
+|**Channels**  |All channel names, secrets, and scope settings.                                                    |
+|**Contacts**  |Your full contact list with public keys, types, names, and path data.                              |
+|**Radio**     |Frequency, bandwidth, spreading factor, coding rate, TX power, path hash mode.                    |
+
+All four are checked by default. A warning label appears when Identity is checked, since the exported file will contain your private key in plain text.
+
+Tap **Export** to write the file to the SD card root as a MeshCore-app-compatible JSON file (named `meck_config_<timestamp>.json`). The result appears as "OK: filename" in green or "Export failed" in red on the Backup to SD status line.
+
+The exported JSON follows the same format used by the MeshCore companion apps, so you can use it to transfer your identity and settings between devices or to back up your configuration before a factory reset.
+
+-----
+
+## Config Import
+
+Config import from JSON is supported via a boot-time file detection mechanism. To import a configuration:
+
+1. Export your config from the MeshCore companion app (iOS/Android) as a JSON file.
+2. Rename it to `import.json` and place it on the SD card at `/sdcard/meshcore/import.json`.
+3. Reboot the device. Meck detects the file during `meck_app_init()`, parses it via cJSON, and applies the identity, channels, contacts, and radio settings it contains.
+4. After a successful import, the file is moved to `/sdcard/meshcore/import.history/import-YYYYMMDD-HHMMSS.json` so it won't be imported again on subsequent boots.
+5. If the file is malformed (bad JSON, missing keys, wrong-length hex), Meck prints a warning to serial and leaves `import.json` in place for you to fix and try again.
+
+This is the primary way to transfer your mesh identity from another device or from the MeshCore companion app to Meck-P4.
+
+-----
+
+## Debug Logs
+
+The Debug Logs sub-screen (Settings > Debug Logs) captures all firmware `printf` output to an SD card log file for troubleshooting. This is useful when diagnosing radio issues, packet handling problems, or unexpected behaviour that's hard to reproduce while tethered to a serial console.
+
+### How it works
+
+When you tap **Start**, Meck opens a new log file at `/sdcard/meshcore/logs/log_<unix_timestamp>.txt` and redirects all `printf` output from the firmware to that file. Every Meck source file uses a macro layer (`meck_log.h`) that routes `printf` calls through `meck_debug_log_printf()`, which writes to the SD file under a mutex when logging is active, or falls through to the UART console when it's not.
+
+While logging is active, **no output goes to the USB serial console**. Serial output resumes the moment you tap **Stop**.
+
+### Controls
+
+|Button     |Action                                                                                                                                                                    |
+|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|**Start**  |Opens a new log file and begins capturing. Disabled while a session is already active.                                                                                    |
+|**Stop**   |Closes the current log file and restores serial output. Disabled when no session is active.                                                                               |
+|**Export** |Copies the most recent log file to the SD card root as `/sdcard/meck_debug_<unix_timestamp>.txt` for easy access when the card is mounted on a computer. Only available after Stop.|
+
+A status label shows the current state: "Idle" when no session exists, "Recording -> filename" while active, "Stopped -> filename" after stopping, or "Exported -> filename" after an export.
+
+### File locations
+
+Log sessions are stored in `/sdcard/meshcore/logs/` with filenames based on the device's UTC clock at the time Start is tapped (e.g. `log_1748230800.txt`). If the clock hasn't synced yet, the filename will be `log_0.txt`.
+
+The Export button copies the most recent session to the SD card root (e.g. `/sdcard/meck_debug_1748230800.txt`) so you don't have to navigate into the `meshcore/logs/` directory when pulling the file from the card. The original log file in `meshcore/logs/` is preserved.
 
 -----
 
@@ -587,7 +652,9 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Contacts >>**     |Opens the Contacts sub-screen (auto-add policies, type toggles)                                                                                                                                                                 |
 |**Channels >>**     |Opens the Channels sub-screen (per-channel region scope, notification preferences, notification tones, add/delete channels)                                                                                                     |
 |**Backup to SD**    |Force-write of every NVS blob to the SD card. Tap shows OK (count) or Failed                                                                                                                                                    |
-|**Brightness**      |Slider: 12% to 100% — applies live                                                                                                                                                                                              |
+|**Export Config**   |Opens a modal with four section checkboxes (Identity, Channels, Contacts, Radio). Tap Export to write a MeshCore-app-compatible JSON file to SD. See [Config Export](#config-export).                                               |
+|**Debug Logs >>**   |Opens the Debug Logs sub-screen. Captures all firmware printf output to an SD log file for troubleshooting. See [Debug Logs](#debug-logs).                                                                                          |
+|**Brightness**      |Slider: 12% to 100% -- applies live                                                                                                                                                                                              |
 |**Auto Off**        |Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — when idle, the screen tears down the MIPI-DSI bus and CPU usage drops from ~94% to ~57% CPU_MAX. Wake with the **boot button** (touch wake is not yet supported)            |
 |**KB Theme**        |Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details.                                                                                                  |
 |**KB Layout**       |Tap to cycle: QWERTY / AZERTY / QWERTZ. Layout switches apply live to every keyboard instance.                                                                                                                                  |
@@ -810,19 +877,19 @@ no particular timeframes attached.
 - [x] **Region scope** — device-wide default region in Settings, per-channel scope via Settings → Channels. Scope key derived via SHA-256, matching upstream Meck v1.7+ / MeshCore v1.15+ protocol. Repeater region management supported via CLI commands in the Repeater Admin screen.
 - [x] **Channels settings sub-screen** — Settings → Channels with per-channel region scope, notification preferences (All / Mentions / None), notification tone picker, add and delete channels
 - [x] **Notification sounds** — 7 bundled MP3 tones copied to SD on first boot, per-channel tone assignment via picker, automatic playback at 80% volume on new messages (skips if audio player is active), tone config persisted to SD
+- [x] AMOLED variant verification
 
 **Pending:**
 
 - [ ] Notes app
 - [ ] Audio cover-art rendering at >256x256 — pre-flight succeeds but the LVGL heap
   can’t allocate decoded framebuffers for larger sizes; needs decode-time
-  downscale or a streaming decoder. 256x256 works.
+  downscale or a streaming decoder. 256x256 size png file works.
 - [ ] Web browser & IRC client
 - [ ] PCF8563 hardware RTC integration — read on boot, write on shutdown
   so time survives power-off
 - [ ] ESP32-C6 BLE companion firmware — make the device usable as a
   Bluetooth companion to the iOS / Android MeshCore apps
-- [ ] AMOLED variant verification
 - [ ] Light sleep actually engaging — the screen-off path releases the
   dsi_phy NO_LIGHT_SLEEP PM lock, but other PM locks still prevent
   automatic light sleep entry. Power saving in v0.3.5 comes from
