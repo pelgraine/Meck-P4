@@ -240,7 +240,7 @@ static void meck_font_restyle_all() {
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3.9"
+#define MECK_FIRMWARE_VERSION "0.3.8"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -4990,6 +4990,27 @@ static void home_attach_clock_battery(lv_obj_t *page, int tile_idx) {
     lbl_home_audio[tile_idx] = aud;
 }
 
+// Reposition the home-page clock (tile 0 only) when the node name is long
+// enough to obscure it. If the name is 18+ characters, the clock moves
+// below the battery percentage; otherwise it stays in its normal position.
+static void home_reposition_clock_for_name(const char* name) {
+    lv_obj_t *clk = lbl_home_clock[0];
+    if (!clk) return;
+    size_t len = name ? strlen(name) : 0;
+    if (len >= 18) {
+        lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(clk, LV_ALIGN_TOP_RIGHT, -15, NOTCH_SAFE_Y + 28);
+    } else {
+#if MECK_IS_AMOLED
+        lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(clk, LV_ALIGN_TOP_MID, 0, NOTCH_SAFE_Y);
+#else
+        lv_obj_set_style_text_align(clk, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(clk, LV_ALIGN_TOP_RIGHT, -165, NOTCH_SAFE_Y);
+#endif
+    }
+}
+
 // Attach a clock + battery pair to any non-home screen or modal panel.
 // Mirrors home_attach_clock_battery but writes into the screen/modal
 // arrays. Each caller passes its own slot index (0..MECK_SCREEN_HOST_COUNT-1)
@@ -5054,6 +5075,7 @@ static void create_page_home(lv_obj_t *page) {
     lv_obj_align(lbl_home_title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
 
     home_attach_clock_battery(page, 0);
+    home_reposition_clock_for_name(initial_name);
 
     lbl_home_unread = lv_label_create(page);
     lv_label_set_text(lbl_home_unread, "MSG: 0");
@@ -10928,6 +10950,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         const char* show = (prefs && prefs->node_name[0]) ? prefs->node_name : "(no name)";
         lv_label_set_text(lbl_home_title, show);
         meck_update_font(lbl_home_title, meck_node_name_font(show), 0);
+        home_reposition_clock_for_name(show);
     }
 
     // Home tile: unread count
