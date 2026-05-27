@@ -192,7 +192,7 @@ needed.
 |--------------|--------------------------------------------------------------------------------------------------------------|
 |**Tap**       |Touch and release quickly. Opens tiles, selects items, advances pages.                                        |
 |**Swipe**     |Touch, drag, release. Direction determines action (scroll, page turn, switch tile/filter).                    |
-|**Long press**|Touch and hold. Context-dependent: send advert, toggle GPS, delete contacts, retry failed messages, power off.|
+|**Long press**|Touch and hold. Context-dependent: send advert, toggle GPS, delete contacts, retry failed messages, view incoming message path, power off.|
 
 -----
 
@@ -285,7 +285,7 @@ so messages survive reboots when an SD card is present.
   - **✓ Heard N Repeats** – one or more repeaters relayed the message back. The count shows how many echoes were received, confirming the message propagated through the mesh.
   - **✕ Failed** – 18 seconds elapsed with no repeater echo. The message was transmitted but no repeater confirmed receipt. This typically means no repeater is in range, or the channel’s radio parameters don’t match the repeater’s.
 
-**Retry send:** long-press any failed outgoing message (channel or DM) to open a retry prompt. Tap **Retry Send** to re-queue the message with a fresh timestamp. The recipient may see a duplicate if the original arrives late via a slow path.
+**Long-press outgoing messages:** long-press any outgoing message to see which repeaters acknowledged it. If the message failed, a **Retry Send** option re-queues it with a fresh timestamp. The recipient may see a duplicate if the original arrives late via a slow path.
 
 -----
 
@@ -488,7 +488,7 @@ Useful for diagnosing where in a chain a route is breaking down — if you get r
 
 ## Path View
 
-The **+** button on the channel messages or DM compose screen provides access to **Path View**. Path View displays the routing path that messages take through the mesh, showing each hop in the route.
+Long-pressing an incoming message opens **Path View**, which displays the routing path that message took through the mesh, showing each hop in the route.
 
 -----
 
@@ -524,7 +524,7 @@ Channels in Meck-P4 can be public or private:
 
 ### Sharing private channels
 
-On the channel messages screen, the **+** button includes a **Share Channel** option. Tap it to open a contact picker and send the channel name and secret as a DM to the selected contact. The recipient sees a pending invite notification that they can accept (tap) or dismiss (long-press).
+Open **Settings > Channels**, tap the channel you want to share, then tap **Share Channel**. This opens a contact picker and sends the channel name and secret as a DM to the selected contact. The recipient sees a pending invite notification that they can accept (tap) or dismiss (long-press).
 
 ### Creating channels
 
