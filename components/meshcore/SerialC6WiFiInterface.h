@@ -24,7 +24,7 @@ public:
     // Configure WiFi credentials. Call before enable().
     void setCredentials(const char* ssid, const char* password);
 
-    // Set TCP server port (default 5555). Call before enable().
+    // Set TCP server port (default 5000). Call before enable().
     void setPort(int port) { _port = port; }
 
     // BaseSerialInterface methods

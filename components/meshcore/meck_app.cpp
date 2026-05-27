@@ -347,7 +347,7 @@ extern "C" bool meck_app_init() {
 
         if (g_node_prefs.wifi_enabled != 0 && g_node_prefs.wifi_ssid[0] != '\0') {
             g_wifi_interface.enable();
-            printf("meck_app_init: WiFi companion enabled (IP: %s, port 5555)\n",
+            printf("meck_app_init: WiFi companion enabled (IP: %s, port 5000)\n",
                    g_wifi_interface.getIP());
         } else {
             printf("meck_app_init: WiFi companion OFF (pref)\n");

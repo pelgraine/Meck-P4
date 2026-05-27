@@ -6621,6 +6621,7 @@ static void create_settings_wifi_screen() {
     scr_settings_wifi = lv_obj_create(NULL);
     lock_screen_scroll(scr_settings_wifi);
     lv_obj_set_style_bg_color(scr_settings_wifi, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr_settings_wifi, LV_OPA_COVER, 0);
     screen_attach_clock_battery(scr_settings_wifi, 1, &meck_montserrat_24, 30);
     // Move clock to right side (under battery) so title doesn't overlap
     if (lbl_screen_clock[1]) {
@@ -6651,6 +6652,7 @@ static void create_settings_wifi_screen() {
     lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
     lv_obj_set_pos(scroll, 0, 90);
     lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
     lv_obj_set_style_pad_all(scroll, 10, 0);
     lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
@@ -6671,7 +6673,7 @@ static void create_settings_wifi_screen() {
 
     // Hint text
     lv_obj_t *hint = lv_label_create(scroll);
-    lv_label_set_text(hint, "Connect companion app to IP:5555\n"
+    lv_label_set_text(hint, "Connect companion app to IP:5000\n"
                             "BLE and WiFi are mutually exclusive");
     lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
     meck_set_font(hint, &meck_montserrat_14, 0);
@@ -11304,7 +11306,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         const char* wifi_ip = meck_wifi_get_ip();
         if (bp && bp->wifi_enabled && wifi_ip && wifi_ip[0]) {
             lv_label_set_text_fmt(lbl_home_ble_pin,
-                "WiFi: %s:5555", wifi_ip);
+                "WiFi: %s:5000", wifi_ip);
             lv_obj_clear_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
 #if MECK_BLE_ENABLED
         } else if (bp && bp->ble_enabled && bp->ble_pin != 0) {

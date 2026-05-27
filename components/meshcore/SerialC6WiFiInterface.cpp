@@ -30,7 +30,7 @@
 SerialC6WiFiInterface::SerialC6WiFiInterface()
     : _at(nullptr), _begun(false), _enabled(false),
       _wifi_connected(false), _client_connected(false),
-      _client_id(-1), _port(5555),
+      _client_id(-1), _port(5000),
       _got_ok(false), _got_error(false), _got_prompt(false),
       _rx_len(0), _parse_state(PS_LINE), _line_len(0),
       _ipd_remain(0), _stream_len(0),
