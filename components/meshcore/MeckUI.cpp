@@ -5140,6 +5140,14 @@ static void create_page_radio(lv_obj_t *page) {
 // Tile 3: Advert (long-press to send manual advert)
 // ============================================================================
 
+static void advert_revert_timer_cb(lv_timer_t *t) {
+    if (lbl_advert_status) {
+        lv_label_set_text(lbl_advert_status, "Advert\n\nLong press to send");
+        lv_obj_set_style_text_color(lbl_advert_status, lv_color_white(), 0);
+    }
+    lv_timer_delete(t);
+}
+
 static void advert_toggle_cb(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!mesh) return;
@@ -5164,8 +5172,12 @@ static void advert_toggle_cb(lv_event_t *e) {
         mesh->sendFlood(adv);
         printf("Meck: manual advert sent (name='%s' pos_mode=%d payload=%d bytes)\n",
                prefs->node_name, prefs->position_mode, adv->payload_len);
-    } else {
-        printf("Meck: createSelfAdvert returned null\n");
+        if (lbl_advert_status) {
+            lv_label_set_text(lbl_advert_status, "Advert sent!");
+            lv_obj_set_style_text_color(lbl_advert_status,
+                lv_palette_main(LV_PALETTE_GREEN), 0);
+            lv_timer_create(advert_revert_timer_cb, 3000, NULL);
+        }
     }
 }
 
