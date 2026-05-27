@@ -27,6 +27,8 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define CMD_SET_DEVICE_TIME           6
 #define CMD_SEND_SELF_ADVERT          7
 #define CMD_SET_ADVERT_NAME           8
+#define CMD_SET_ADVERT_LATLON         14
+#define CMD_SET_OTHER_PARAMS          38
 #define CMD_ADD_UPDATE_CONTACT        9
 #define CMD_SYNC_NEXT_MESSAGE         10
 #define CMD_SET_RADIO_PARAMS          11
@@ -419,6 +421,71 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         return;
     }
 
+    // ---- CMD_SET_ADVERT_LATLON (14) ----
+    if (cmd == CMD_SET_ADVERT_LATLON && len >= 9) {
+        int32_t lat, lon;
+        memcpy(&lat, &_cmd[1], 4);
+        memcpy(&lon, &_cmd[5], 4);
+        if (lat == 0 && lon == 0) {
+            // Clear position
+            prefs->position_lat_e7 = 0;
+            prefs->position_lon_e7 = 0;
+            prefs->position_mode = 0;  // off
+        } else if (lat <= 90000000 && lat >= -90000000 &&
+                   lon <= 180000000 && lon >= -180000000) {
+            // Upstream sends microdegrees (1e6); Meck stores 1e7
+            prefs->position_lat_e7 = lat * 10;
+            prefs->position_lon_e7 = lon * 10;
+            if (prefs->position_mode == 0) prefs->position_mode = 1;  // manual
+        } else {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+            return;
+        }
+        _mesh->savePrefs();
+        writeOKFrame();
+        return;
+    }
+
+    // ---- CMD_SET_RADIO_PARAMS (11) ---- change radio frequency/bw/sf/cr
+    if (cmd == CMD_SET_RADIO_PARAMS && len >= 11) {
+        int i = 1;
+        uint32_t freq_khz, bw_hz;
+        memcpy(&freq_khz, &_cmd[i], 4); i += 4;
+        memcpy(&bw_hz, &_cmd[i], 4); i += 4;
+        uint8_t sf = _cmd[i++];
+        uint8_t cr = _cmd[i++];
+
+        if (freq_khz >= 150000 && freq_khz <= 2500000 &&
+            sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 &&
+            bw_hz >= 7000 && bw_hz <= 500000) {
+            prefs->freq = (float)freq_khz / 1000.0f;
+            prefs->bw   = (float)bw_hz / 1000.0f;
+            prefs->sf    = sf;
+            prefs->cr    = cr;
+            _mesh->savePrefs();
+            printf("Companion: SET_RADIO_PARAMS freq=%.3f bw=%.1f sf=%d cr=%d (reboot to apply)\n",
+                   prefs->freq, prefs->bw, (int)sf, (int)cr);
+            writeOKFrame();
+        } else {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        }
+        return;
+    }
+
+    // ---- CMD_SET_RADIO_TX_POWER (12) ----
+    if (cmd == CMD_SET_RADIO_TX_POWER && len >= 2) {
+        int8_t power = (int8_t)_cmd[1];
+        if (power >= -9 && power <= 22) {
+            prefs->tx_power_dbm = power;
+            _mesh->savePrefs();
+            printf("Companion: SET_RADIO_TX_POWER %d dBm (reboot to apply)\n", (int)power);
+            writeOKFrame();
+        } else {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        }
+        return;
+    }
+
     // ---- CMD_ADD_UPDATE_CONTACT (9) ----
     if (cmd == CMD_ADD_UPDATE_CONTACT && len >= 1 + PUB_KEY_SIZE + 3) {
         uint8_t* pub_key = &_cmd[1];
@@ -511,6 +578,26 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         } else {
             writeErrFrame(ERR_CODE_NOT_FOUND);
         }
+        return;
+    }
+
+    // ---- CMD_SET_OTHER_PARAMS (38) ----
+    if (cmd == CMD_SET_OTHER_PARAMS && len >= 2) {
+        prefs->manual_add_contacts = _cmd[1];
+        if (len >= 4) {
+            // byte[3] = advert_loc_policy: 0=don't share, 1+=share
+            uint8_t loc_policy = _cmd[3];
+            if (loc_policy == 0) {
+                prefs->position_mode = 0;  // off
+            } else if (prefs->position_mode == 0) {
+                prefs->position_mode = 1;  // manual (enable sharing)
+            }
+        }
+        if (len >= 5) {
+            prefs->multi_acks = _cmd[4];
+        }
+        _mesh->savePrefs();
+        writeOKFrame();
         return;
     }
 
