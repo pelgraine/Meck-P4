@@ -52,6 +52,13 @@ public:
     size_t writeFrame(const uint8_t src[], size_t len) override;
     size_t checkRecvFrame(uint8_t dest[]) override;
 
+    // Set the static BLE pairing PIN (6-digit). Call before enable().
+    void setPin(uint32_t pin) { _ble_pin = pin; }
+
+    // Probe C6 for OTA and WiFi capability. Sends diagnostic AT commands
+    // and prints results to serial. Non-destructive, call after begin().
+    void probeOTA();
+
 private:
     // ---- AT command helpers ----
 
@@ -87,6 +94,8 @@ private:
     bool _begun;
     bool _enabled;
     bool _connected;
+    uint32_t _ble_pin;
+    bool _probe_mode;
     unsigned long _adv_restart_time;
     unsigned long _last_write_ms;
 

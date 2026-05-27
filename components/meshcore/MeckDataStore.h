@@ -154,6 +154,11 @@ struct P4NodePrefs {
     int32_t position_lat_e7;         // signed degrees × 1e7 (0 = not set)
     int32_t position_lon_e7;
     uint8_t position_mode;           // 0=off, 1=manual, 2=auto-GPS
+    uint8_t ble_enabled;             // 0=off, 1=on (BLE companion via C6)
+    uint32_t ble_pin;               // 6-digit BLE pairing PIN, 0 = not yet generated
+    uint8_t wifi_enabled;            // 0=off, 1=on (WiFi companion via C6)
+    char wifi_ssid[33];              // WiFi SSID
+    char wifi_password[65];          // WiFi password
 
     // Initialize with defaults from variant.h
     void setDefaults() {
@@ -186,6 +191,11 @@ struct P4NodePrefs {
         position_lat_e7 = 0;    // not set
         position_lon_e7 = 0;    // not set
         position_mode = 0;      // off — no position shared
+        ble_enabled = 0;        // off by default (BLE companion disabled)
+        ble_pin = 0;            // 0 = generate on first BLE enable
+        wifi_enabled = 0;       // off by default
+        memset(wifi_ssid, 0, sizeof(wifi_ssid));
+        memset(wifi_password, 0, sizeof(wifi_password));
     }
 };
 

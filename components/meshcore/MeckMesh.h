@@ -13,6 +13,7 @@
 #pragma once
 
 #include "arduino_compat.h"
+#include "meck.h"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wclass-memaccess"
 #include <helpers/BaseChatMesh.h>
@@ -2510,6 +2511,11 @@ protected:
         if (wrote_idx >= 0) {
             meck_request_save_message(ch_idx, wrote_idx, &saved_copy);
         }
+
+        // Push to companion app (both BLE and WiFi)
+        uint8_t pl = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
+        int8_t snr4 = (int8_t)(pkt->getSNR() * 4);
+        meck_companion_push_channel_msg(ch_idx, pl, timestamp, snr4, text);
     }
 
     void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt,
@@ -2618,6 +2624,11 @@ protected:
             printf("Meck: pending DM ring full, dropping oldest unread\n");
         }
         xSemaphoreGive(_mutex);
+
+        // Push to companion app
+        int8_t snr4 = (int8_t)(snr * 4.0f);
+        meck_companion_push_contact_msg(from.id.pub_key, path_len, 0 /*TXT_TYPE_PLAIN*/,
+                                         sender_timestamp, snr4, nullptr, 0, text);
     }
 
     // ---- onCommandDataRecv ----
@@ -2749,6 +2760,11 @@ protected:
             printf("Meck: pending post ring full, dropping oldest unread\n");
         }
         xSemaphoreGive(_mutex);
+
+        // Push to companion app
+        int8_t snr4 = (int8_t)(snr * 4.0f);
+        meck_companion_push_contact_msg(from.id.pub_key, path_len, 4 /*TXT_TYPE_SIGNED_PLAIN*/,
+                                         sender_timestamp, snr4, sender_prefix, 4, text);
     }
 
     uint32_t calcFloodTimeoutMillisFor(uint32_t pkt_airtime_millis) const override {

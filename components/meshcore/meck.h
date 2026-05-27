@@ -26,6 +26,12 @@
 
 #include <stdint.h>
 
+// BLE companion is disabled by default (saves C6 radio power).
+// Set to 1 in CMakeLists.txt or variant.h to re-enable.
+#ifndef MECK_BLE_ENABLED
+#define MECK_BLE_ENABLED 0
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -76,11 +82,47 @@ void meck_screen_set_brightness(uint8_t value);
 void meck_gps_set_enabled(bool enabled);
 bool meck_gps_is_enabled(void);
 
-// Hand the ESP32-C6 AT driver pointer to the Meck BLE subsystem.
+// Hand the ESP32-C6 AT driver pointer to the Meck subsystem.
 // Called from main.cpp after ESP32C6_AT->begin() succeeds, before
-// meck_app_start(). The pointer is stored internally and used by
-// SerialC6BLEInterface for BLE companion transport.
+// meck_app_start(). Used by both BLE and WiFi companion transports.
 void meck_ble_bind(void* esp_at_ptr);
+
+#if MECK_BLE_ENABLED
+// Enable or disable the BLE companion interface at runtime. When disabled,
+// the C6 stops advertising and drops any active connection (saves ~25 mA).
+// Persisted via P4NodePrefs.ble_enabled so the choice survives reboot.
+void meck_ble_set_enabled(bool enabled);
+bool meck_ble_is_enabled(void);
+#endif
+
+// WiFi companion interface.
+void meck_wifi_set_enabled(bool enabled);
+bool meck_wifi_is_enabled(void);
+bool meck_wifi_is_connected(void);
+const char* meck_wifi_get_ip(void);
+
+// Battery gauge -- main.cpp registers function pointers so the meshcore
+// component can read the BQ27220 without linking to the driver directly.
+typedef uint16_t (*meck_battery_fn)(void);
+void meck_battery_bind(meck_battery_fn get_mv, meck_battery_fn get_pct);
+uint16_t meck_battery_get_mv(void);
+uint16_t meck_battery_get_pct(void);
+
+// Companion push notifications -- called from MeckMesh callbacks to
+// notify the companion app (both BLE and WiFi) of incoming messages,
+// acks, and contact updates.
+void meck_companion_push_channel_msg(uint8_t ch_idx, uint8_t path_len,
+                                      uint32_t timestamp, int8_t snr_x4,
+                                      const char* text);
+void meck_companion_push_contact_msg(const uint8_t* pub_key_prefix,
+                                      uint8_t path_len, uint8_t txt_type,
+                                      uint32_t timestamp, int8_t snr_x4,
+                                      const uint8_t* extra, int extra_len,
+                                      const char* text);
+void meck_companion_push_send_confirmed(const uint8_t* ack_hash, uint32_t trip_time);
+void meck_companion_push_new_advert(const void* contact_info);
+void meck_companion_push_advert(const uint8_t* pub_key);
+void meck_companion_push_path_updated(const uint8_t* pub_key);
 
 #ifdef __cplusplus
 }

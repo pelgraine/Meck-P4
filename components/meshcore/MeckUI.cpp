@@ -240,7 +240,7 @@ static void meck_font_restyle_all() {
 // Firmware identity, surfaced on the Settings screen. The home screen now
 // shows the user's chosen node name instead.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3.8"
+#define MECK_FIRMWARE_VERSION "0.3.9"
 
 // Auto-add config bits in P4NodePrefs::autoadd_config. Same bit layout as
 // upstream Meck so a future prefs sync between firmwares stays sane. Bit 0
@@ -383,6 +383,7 @@ static lv_obj_t *lbl_screen_battery[MECK_SCREEN_HOST_COUNT] = {};
 static lv_obj_t *lbl_screen_audio[MECK_SCREEN_HOST_COUNT]   = {};
 
 static lv_obj_t *lbl_home_unread   = NULL;
+static lv_obj_t *lbl_home_ble_pin = NULL;
 
 // Detail tile labels
 static lv_obj_t *lbl_recent_list   = NULL;
@@ -439,6 +440,20 @@ static lv_obj_t *lbl_set_screen_off  = NULL;
 static lv_obj_t *lbl_set_kb_theme    = NULL;
 static lv_obj_t *lbl_set_kb_layout   = NULL;
 static lv_obj_t *lbl_set_font_scale  = NULL;
+#if MECK_BLE_ENABLED
+static lv_obj_t *lbl_set_ble         = NULL;
+#endif
+
+// WiFi settings sub-screen (Settings > WiFi Companion)
+static lv_obj_t *scr_settings_wifi        = NULL;
+static lv_obj_t *lbl_set_wifi_toggle      = NULL;
+static lv_obj_t *lbl_set_wifi_ssid        = NULL;
+static lv_obj_t *lbl_set_wifi_pass        = NULL;
+static lv_obj_t *lbl_set_wifi_ip          = NULL;
+static lv_obj_t *obj_wifi_edit_panel      = NULL;
+static lv_obj_t *ta_wifi_edit             = NULL;
+static lv_obj_t *kb_wifi_edit             = NULL;
+static int       g_wifi_edit_field        = 0;  // 0=ssid, 1=password
 static lv_obj_t *lbl_set_identity  = NULL;
 static lv_obj_t *obj_name_edit_panel = NULL;
 static lv_obj_t *ta_settings_name    = NULL;
@@ -1308,6 +1323,11 @@ static void on_settings_screen_off_tap(lv_event_t *e);
 static void on_settings_kb_theme_tap(lv_event_t *e);
 static void on_settings_kb_layout_tap(lv_event_t *e);
 static void on_settings_font_scale_tap(lv_event_t *e);
+#if MECK_BLE_ENABLED
+static void on_settings_ble_tap(lv_event_t *e);
+#endif
+static void goto_settings_wifi(lv_event_t *e);
+static void create_settings_wifi_screen();
 static void on_gps_tile_long_press(lv_event_t *e);
 
 static void on_ch_delete(lv_event_t *e);
@@ -1449,7 +1469,7 @@ static lv_obj_t* create_tile_button(lv_obj_t *parent, const char *label,
     // 2-column grid (was 3). With margins of 20 px each side and a 10 px
     // gap between cols, tile width is (SCREEN_WIDTH - 50) / 2.
     int tileW = (SCREEN_WIDTH - 50) / 2;
-    int tileH = 140;          // 6 rows fit with room for hint text at bottom
+    int tileH = 168;          // 5 rows fill the AMOLED height (gridY + 5*168 + 4*10 = 1020)
     int gapX  = 10;
     int gapY  = 10;
     int gridX = 20;
@@ -2206,6 +2226,12 @@ static void settings_update_labels() {
     if (lbl_set_font_scale) {
         lv_label_set_text(lbl_set_font_scale, meck_font_scale_name(prefs->font_scale));
     }
+#if MECK_BLE_ENABLED
+    if (lbl_set_ble) {
+        lv_label_set_text(lbl_set_ble,
+            prefs->ble_enabled != 0 ? "On" : "Off");
+    }
+#endif
 }
 
 // ============================================================================
@@ -5083,6 +5109,16 @@ static void create_page_home(lv_obj_t *page) {
     meck_set_font(lbl_home_unread, &meck_montserrat_18, 0);
     lv_obj_align(lbl_home_unread, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 60);
 
+    // BLE pairing PIN — shown only while BLE companion is enabled.
+    // Hidden by default; ui_update_timer_cb toggles visibility.
+    lbl_home_ble_pin = lv_label_create(page);
+    lv_label_set_text(lbl_home_ble_pin, "");
+    lv_obj_set_style_text_color(lbl_home_ble_pin,
+        lv_palette_main(LV_PALETTE_CYAN), 0);
+    meck_set_font(lbl_home_ble_pin, &meck_montserrat_14, 0);
+    lv_obj_align(lbl_home_ble_pin, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 95);
+    lv_obj_add_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
+
     // Navigation grid: 10 tiles in 2 columns × 5 rows. First two rows are
     // the high-traffic items; placeholder tiles for Trace, Maps, Audio, and
     // Web are at the bottom as visual markers for future work. Tap any
@@ -5098,12 +5134,12 @@ static void create_page_home(lv_obj_t *page) {
     create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
     create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    goto_audio_browser,  0, 4);
     create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_todo_web,         1, 4);
-    create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    cb_todo_voice,       0, 5);
-    lv_obj_t *cam_btn = create_tile_button(page, LV_SYMBOL_IMAGE "\nCamera", cb_todo_camera, 1, 5);
-    // Match Reader's pink/magenta border
-    if (cam_btn && g_home_color_scheme == HOME_COLOR_MULTI) {
-        lv_obj_set_style_border_color(cam_btn, lv_palette_main(LV_PALETTE_PURPLE), 0);
-    }
+    // Voice and Camera tiles hidden until implementation is ready
+    // create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    cb_todo_voice,       0, 5);
+    // lv_obj_t *cam_btn = create_tile_button(page, LV_SYMBOL_IMAGE "\nCamera", cb_todo_camera, 1, 5);
+    // if (cam_btn && g_home_color_scheme == HOME_COLOR_MULTI) {
+    //     lv_obj_set_style_border_color(cam_btn, lv_palette_main(LV_PALETTE_PURPLE), 0);
+    // }
 
     lv_obj_t *hint = lv_label_create(page);
     lv_label_set_text(hint, "Swipe left for more pages " LV_SYMBOL_RIGHT);
@@ -6438,6 +6474,264 @@ static void on_settings_font_scale_tap(lv_event_t *e) {
     printf("Settings: font scale = %s\n", meck_font_scale_name(prefs->font_scale));
 }
 
+#if MECK_BLE_ENABLED
+static void on_settings_ble_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->ble_enabled = (prefs->ble_enabled != 0) ? 0 : 1;
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    meck_ble_set_enabled(prefs->ble_enabled != 0);
+
+    if (lbl_set_ble) {
+        lv_label_set_text(lbl_set_ble,
+            prefs->ble_enabled != 0 ? "On" : "Off");
+    }
+    printf("Settings: BLE companion = %s\n",
+           prefs->ble_enabled != 0 ? "On" : "Off");
+}
+#endif
+
+// ============================================================================
+// WiFi Companion sub-screen (Settings > WiFi Companion)
+// ============================================================================
+
+static void settings_wifi_update_labels() {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    if (lbl_set_wifi_toggle)
+        lv_label_set_text(lbl_set_wifi_toggle, prefs->wifi_enabled ? "On" : "Off");
+    if (lbl_set_wifi_ssid)
+        lv_label_set_text(lbl_set_wifi_ssid, prefs->wifi_ssid[0] ? prefs->wifi_ssid : "(not set)");
+    if (lbl_set_wifi_pass)
+        lv_label_set_text(lbl_set_wifi_pass, prefs->wifi_password[0] ? "****" : "(not set)");
+    if (lbl_set_wifi_ip) {
+        const char* ip = meck_wifi_get_ip();
+        lv_label_set_text(lbl_set_wifi_ip, (ip && ip[0]) ? ip : "Not connected");
+    }
+}
+
+static void on_settings_wifi_toggle_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->wifi_enabled = (prefs->wifi_enabled != 0) ? 0 : 1;
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    meck_wifi_set_enabled(prefs->wifi_enabled != 0);
+
+#if MECK_BLE_ENABLED
+    // If enabling WiFi, disable BLE in prefs too (mutual exclusivity)
+    if (prefs->wifi_enabled && prefs->ble_enabled) {
+        prefs->ble_enabled = 0;
+        mesh->getDataStore()->savePrefs(*prefs);
+    }
+#endif
+
+    settings_wifi_update_labels();
+    printf("Settings: WiFi companion = %s\n",
+           prefs->wifi_enabled != 0 ? "On" : "Off");
+}
+
+static void on_wifi_edit_save(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    if (ta_wifi_edit) {
+        const char* text = lv_textarea_get_text(ta_wifi_edit);
+        if (text) {
+            if (g_wifi_edit_field == 0) {
+                strncpy(prefs->wifi_ssid, text, sizeof(prefs->wifi_ssid) - 1);
+                prefs->wifi_ssid[sizeof(prefs->wifi_ssid) - 1] = '\0';
+                printf("Settings: WiFi SSID = '%s'\n", prefs->wifi_ssid);
+            } else {
+                strncpy(prefs->wifi_password, text, sizeof(prefs->wifi_password) - 1);
+                prefs->wifi_password[sizeof(prefs->wifi_password) - 1] = '\0';
+                printf("Settings: WiFi password updated\n");
+            }
+            mesh->getDataStore()->savePrefs(*prefs);
+        }
+    }
+    if (obj_wifi_edit_panel) lv_obj_add_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    settings_wifi_update_labels();
+}
+
+static void on_wifi_edit_cancel(lv_event_t *e) {
+    if (obj_wifi_edit_panel) lv_obj_add_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_wifi_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)       on_wifi_edit_save(NULL);
+    else if (code == LV_EVENT_CANCEL) on_wifi_edit_cancel(NULL);
+}
+
+static void on_settings_wifi_ssid_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    g_wifi_edit_field = 0;
+    if (obj_wifi_edit_panel && ta_wifi_edit) {
+        lv_textarea_set_text(ta_wifi_edit, prefs->wifi_ssid);
+        lv_textarea_set_password_mode(ta_wifi_edit, false);
+        lv_obj_remove_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
+        if (kb_wifi_edit) lv_keyboard_set_textarea(kb_wifi_edit, ta_wifi_edit);
+    }
+}
+
+static void on_settings_wifi_pass_tap(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    g_wifi_edit_field = 1;
+    if (obj_wifi_edit_panel && ta_wifi_edit) {
+        lv_textarea_set_text(ta_wifi_edit, prefs->wifi_password);
+        lv_textarea_set_password_mode(ta_wifi_edit, false);
+        lv_obj_remove_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
+        if (kb_wifi_edit) lv_keyboard_set_textarea(kb_wifi_edit, ta_wifi_edit);
+    }
+}
+
+static void goto_settings_from_wifi(lv_event_t *e) {
+    // Update main settings labels (BLE may have changed via mutual exclusivity)
+    settings_update_labels();
+    if (scr_settings) lv_screen_load(scr_settings);
+}
+
+static void goto_settings_wifi(lv_event_t *e) {
+    settings_wifi_update_labels();
+    if (scr_settings_wifi) lv_screen_load(scr_settings_wifi);
+}
+
+static void create_settings_wifi_screen() {
+    scr_settings_wifi = lv_obj_create(NULL);
+    lock_screen_scroll(scr_settings_wifi);
+    lv_obj_set_style_bg_color(scr_settings_wifi, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_settings_wifi, 1, &meck_montserrat_24, 30);
+    // Move clock to right side (under battery) so title doesn't overlap
+    if (lbl_screen_clock[1]) {
+        lv_obj_set_style_text_align(lbl_screen_clock[1], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(lbl_screen_clock[1], LV_ALIGN_TOP_RIGHT, -15, 55);
+    }
+
+    // Back button
+    lv_obj_t *btn_back = lv_button_create(scr_settings_wifi);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, goto_settings_from_wifi, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_settings_wifi);
+    lv_label_set_text(title, "WiFi Companion");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    lv_obj_t *scroll = lv_obj_create(scr_settings_wifi);
+    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
+    lv_obj_set_pos(scroll, 0, 90);
+    lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 10, 0);
+    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+
+    int y = 5;
+    create_settings_row(scroll, "WiFi (tap to toggle)",
+        &lbl_set_wifi_toggle, on_settings_wifi_toggle_tap, y);
+    y += 65;
+    create_settings_row(scroll, "SSID (tap to edit)",
+        &lbl_set_wifi_ssid, on_settings_wifi_ssid_tap, y);
+    y += 65;
+    create_settings_row(scroll, "Password (tap to edit)",
+        &lbl_set_wifi_pass, on_settings_wifi_pass_tap, y);
+    y += 65;
+    create_settings_row(scroll, "IP Address",
+        &lbl_set_wifi_ip, NULL, y);
+    y += 65;
+
+    // Hint text
+    lv_obj_t *hint = lv_label_create(scroll);
+    lv_label_set_text(hint, "Connect companion app to IP:5555\n"
+                            "BLE and WiFi are mutually exclusive");
+    lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(hint, &meck_montserrat_14, 0);
+    lv_obj_set_pos(hint, 15, y);
+
+    // Edit overlay panel (shared for SSID and Password) — matches the
+    // Node Name edit pattern on scr_settings: dark overlay, styled
+    // textarea with dark bg + cyan border, single Confirm button, and
+    // the standard Meck keyboard.
+    obj_wifi_edit_panel = lv_obj_create(scr_settings_wifi);
+    lv_obj_set_size(obj_wifi_edit_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_wifi_edit_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_wifi_edit_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_wifi_edit_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_wifi_edit_panel, 0, 0);
+    lv_obj_add_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_wifi_edit_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *edit_title = lv_label_create(obj_wifi_edit_panel);
+    lv_label_set_text(edit_title, "Edit WiFi");
+    lv_obj_set_style_text_color(edit_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(edit_title, &meck_montserrat_22, 0);
+    lv_obj_align(edit_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    ta_wifi_edit = lv_textarea_create(obj_wifi_edit_panel);
+    lv_obj_set_size(ta_wifi_edit, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(ta_wifi_edit, LV_ALIGN_TOP_MID, 0, 100);
+    lv_textarea_set_one_line(ta_wifi_edit, true);
+    lv_textarea_set_max_length(ta_wifi_edit, 64);
+    lv_obj_set_style_bg_color(ta_wifi_edit, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_wifi_edit, lv_color_white(), 0);
+    meck_set_font(ta_wifi_edit, &meck_montserrat_18, 0);
+    lv_obj_set_style_border_color(ta_wifi_edit, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_border_color(ta_wifi_edit, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_wifi_edit, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_wifi_edit,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_wifi_edit,   LV_OPA_COVER,          LV_PART_CURSOR);
+
+    lv_obj_t *btn_confirm = lv_button_create(obj_wifi_edit_panel);
+    lv_obj_set_size(btn_confirm, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_confirm, LV_ALIGN_TOP_MID, 0, 165);
+    lv_obj_set_style_bg_color(btn_confirm, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_confirm, 8, 0);
+    lv_obj_t *confirm_lbl = lv_label_create(btn_confirm);
+    lv_label_set_text(confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(confirm_lbl, lv_color_black(), 0);
+    meck_set_font(confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(confirm_lbl);
+    lv_obj_add_event_cb(btn_confirm, on_wifi_edit_save, LV_EVENT_CLICKED, NULL);
+
+    kb_wifi_edit = lv_keyboard_create(obj_wifi_edit_panel);
+    meck_style_keyboard(kb_wifi_edit);
+    lv_keyboard_set_textarea(kb_wifi_edit, ta_wifi_edit);
+    lv_obj_add_event_cb(kb_wifi_edit, on_wifi_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_wifi_edit, on_wifi_kb_event, LV_EVENT_CANCEL, NULL);
+
+    settings_wifi_update_labels();
+}
+
 // Long-press anywhere on the GPS tile toggles the L76K module between
 // active and standby. Persisted via prefs->gps_enabled so the choice
 // survives reboot — useful for indoor / battery-saving scenarios.
@@ -6510,10 +6804,28 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
 
     if (!meck_screen_is_off()) {
         // Sleep path: inactivity-based.
+        static bool wifi_dimmed = false;
         if (inactive_ms >= threshold_ms) {
-            printf("Screen: entering off-state after %u min idle\n",
-                   (unsigned)prefs->screen_off_minutes);
-            meck_screen_off();
+            // When WiFi companion is active, entering light sleep kills
+            // the SDIO bus (and thus the TCP connection). Instead of full
+            // sleep, just blank the display by setting brightness to 0.
+            if (meck_wifi_is_enabled()) {
+                if (!wifi_dimmed) {
+                    meck_screen_set_brightness(0);
+                    wifi_dimmed = true;
+                    printf("Screen: WiFi active, dimming display (no sleep)\n");
+                }
+            } else {
+                printf("Screen: entering off-state after %u min idle\n",
+                       (unsigned)prefs->screen_off_minutes);
+                meck_screen_off();
+            }
+        } else {
+            if (wifi_dimmed) {
+                // User touched screen — restore brightness
+                meck_screen_set_brightness(prefs->screen_brightness);
+                wifi_dimmed = false;
+            }
         }
     } else {
         // Wake path (Stage 1): boot button only. lv_display_get_inactive_time
@@ -6633,6 +6945,23 @@ static void create_settings_screen() {
     lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
 
     int y = 5;
+#if MECK_BLE_ENABLED
+    create_settings_row(scroll, "BLE Companion (tap to toggle)",
+        &lbl_set_ble, on_settings_ble_tap, y);
+    y += 65;
+#endif
+
+    // WiFi Companion navigation row → opens sub-screen with SSID/password
+    lv_obj_t *wifi_value_lbl = NULL;
+    create_settings_row(scroll, "WiFi Companion",
+        &wifi_value_lbl, goto_settings_wifi, y);
+    if (wifi_value_lbl) {
+        lv_label_set_text(wifi_value_lbl, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(wifi_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
     create_settings_row(scroll, "Node Name",                 &lbl_set_name,    on_settings_name_tap,    y);
     y += 65;
     create_settings_row(scroll, "Frequency (tap to edit)",   &lbl_set_freq,    on_settings_freq_tap,    y);
@@ -8906,6 +9235,11 @@ static void create_messages_screen() {
     lock_screen_scroll(scr_messages);
     lv_obj_set_style_bg_color(scr_messages, lv_color_black(), 0);
     screen_attach_clock_battery(scr_messages, 4, &meck_montserrat_22, 30);
+    // Move clock to right side (under battery) so long channel names don't overlap
+    if (lbl_screen_clock[4]) {
+        lv_obj_set_style_text_align(lbl_screen_clock[4], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(lbl_screen_clock[4], LV_ALIGN_TOP_RIGHT, -15, 55);
+    }
 
     // Back -> channel picker (NOT home)
     lv_obj_t *btn_back = lv_button_create(scr_messages);
@@ -10962,6 +11296,26 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         lv_obj_set_style_text_color(lbl_home_unread,
             unread > 0 ? lv_color_make(0, 255, 100)
                        : lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+
+    // WiFi IP / BLE PIN display — show whichever is active
+    if (lbl_home_ble_pin && mesh) {
+        P4NodePrefs* bp = mesh->getNodePrefs();
+        const char* wifi_ip = meck_wifi_get_ip();
+        if (bp && bp->wifi_enabled && wifi_ip && wifi_ip[0]) {
+            lv_label_set_text_fmt(lbl_home_ble_pin,
+                "WiFi: %s:5555", wifi_ip);
+            lv_obj_clear_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
+#if MECK_BLE_ENABLED
+        } else if (bp && bp->ble_enabled && bp->ble_pin != 0) {
+            lv_label_set_text_fmt(lbl_home_ble_pin,
+                "BLE PIN: %06lu",
+                (unsigned long)bp->ble_pin);
+            lv_obj_clear_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
+#endif
+        } else {
+            lv_obj_add_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     // DM inbox live refresh. If the user is sitting on the inbox screen
@@ -14731,6 +15085,11 @@ static void create_room_messages_screen() {
     lv_obj_set_style_bg_color(scr_room_messages, lv_color_black(), 0);
     // Slot 10 — same header slot as scr_admin_home.
     screen_attach_clock_battery(scr_room_messages, 10, &meck_montserrat_22, 30);
+    // Move clock to right side (under battery) so long room names don't overlap
+    if (lbl_screen_clock[10]) {
+        lv_obj_set_style_text_align(lbl_screen_clock[10], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(lbl_screen_clock[10], LV_ALIGN_TOP_RIGHT, -15, 55);
+    }
 
     // Back button — top-left, mirroring the messages screen so the
     // composer can claim the bottom edge.
@@ -14874,6 +15233,7 @@ extern "C" void meck_ui_init() {
     create_settings_screen();
     create_debug_logs_screen();
     create_settings_contacts_screen();
+    create_settings_wifi_screen();
     create_settings_channels_screen();
     create_channel_detail_screen();
     create_settings_position_screen();

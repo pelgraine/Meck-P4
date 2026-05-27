@@ -34,6 +34,8 @@
 // #include "BundledPictures.h"  // disabled for v0.3.8
 #include "NotifSounds.h"
 #include "SerialC6BLEInterface.h"
+#include "MeckCompanion.h"
+#include "esp_random.h"
 
 // ---- Static instances ----
 static P4DataStore g_dataStore;
@@ -51,13 +53,175 @@ static P4MeshTables g_mesh_tables;
 static Meck* g_the_mesh = nullptr;
 NotifSounds g_notif_sounds;
 
+// ---- C6 AT pointer (shared by BLE and WiFi) ----
+static Cpp_Bus_Driver::Esp_At* g_c6_at = nullptr;
+
+#if MECK_BLE_ENABLED
 // ---- BLE companion transport via ESP32-C6 AT over SDIO ----
 static SerialC6BLEInterface g_ble_interface;
-static Cpp_Bus_Driver::Esp_At* g_c6_at = nullptr;
+static MeckCompanion g_companion;
+#endif
+
+// ---- WiFi companion transport via ESP32-C6 AT over SDIO ----
+#include "SerialC6WiFiInterface.h"
+static SerialC6WiFiInterface g_wifi_interface;
+static MeckCompanion g_wifi_companion;
+
+#if MECK_BLE_ENABLED
+// Deferred BLE enable/disable
+static volatile int g_ble_pending_action = 0;
+#endif
 
 extern "C" void meck_ble_bind(void* esp_at_ptr) {
     g_c6_at = (Cpp_Bus_Driver::Esp_At*)esp_at_ptr;
     printf("meck_ble_bind: C6 AT pointer bound\n");
+}
+
+// ---- Battery gauge ----
+static meck_battery_fn g_battery_get_mv  = nullptr;
+static meck_battery_fn g_battery_get_pct = nullptr;
+
+extern "C" void meck_battery_bind(meck_battery_fn get_mv, meck_battery_fn get_pct) {
+    g_battery_get_mv  = get_mv;
+    g_battery_get_pct = get_pct;
+    printf("meck_battery_bind: gauge bound\n");
+}
+
+extern "C" uint16_t meck_battery_get_mv() {
+    return g_battery_get_mv ? g_battery_get_mv() : 0;
+}
+
+extern "C" uint16_t meck_battery_get_pct() {
+    return g_battery_get_pct ? g_battery_get_pct() : 0;
+}
+
+// ---- Companion push wrappers (forward to active companions) ----
+
+extern "C" void meck_companion_push_channel_msg(uint8_t ch_idx, uint8_t path_len,
+                                                  uint32_t timestamp, int8_t snr_x4,
+                                                  const char* text) {
+#if MECK_BLE_ENABLED
+    g_companion.pushChannelMessage(ch_idx, path_len, timestamp, snr_x4, text);
+#endif
+    g_wifi_companion.pushChannelMessage(ch_idx, path_len, timestamp, snr_x4, text);
+}
+
+extern "C" void meck_companion_push_contact_msg(const uint8_t* pub_key_prefix,
+                                                  uint8_t path_len, uint8_t txt_type,
+                                                  uint32_t timestamp, int8_t snr_x4,
+                                                  const uint8_t* extra, int extra_len,
+                                                  const char* text) {
+#if MECK_BLE_ENABLED
+    g_companion.pushContactMessage(pub_key_prefix, path_len, txt_type, timestamp, snr_x4, extra, extra_len, text);
+#endif
+    g_wifi_companion.pushContactMessage(pub_key_prefix, path_len, txt_type, timestamp, snr_x4, extra, extra_len, text);
+}
+
+extern "C" void meck_companion_push_send_confirmed(const uint8_t* ack_hash, uint32_t trip_time) {
+#if MECK_BLE_ENABLED
+    g_companion.pushSendConfirmed(ack_hash, trip_time);
+#endif
+    g_wifi_companion.pushSendConfirmed(ack_hash, trip_time);
+}
+
+extern "C" void meck_companion_push_new_advert(const void* contact_info) {
+    const ContactInfo* ci = (const ContactInfo*)contact_info;
+#if MECK_BLE_ENABLED
+    g_companion.pushNewAdvert(*ci);
+#endif
+    g_wifi_companion.pushNewAdvert(*ci);
+}
+
+extern "C" void meck_companion_push_advert(const uint8_t* pub_key) {
+#if MECK_BLE_ENABLED
+    g_companion.pushAdvert(pub_key);
+#endif
+    g_wifi_companion.pushAdvert(pub_key);
+}
+
+extern "C" void meck_companion_push_path_updated(const uint8_t* pub_key) {
+#if MECK_BLE_ENABLED
+    g_companion.pushPathUpdated(pub_key);
+#endif
+    g_wifi_companion.pushPathUpdated(pub_key);
+}
+
+#if MECK_BLE_ENABLED
+extern "C" void meck_ble_set_enabled(bool enabled) {
+    g_ble_pending_action = enabled ? 1 : -1;
+    printf("meck_ble_set_enabled: queued %s\n", enabled ? "ON" : "OFF");
+}
+
+extern "C" bool meck_ble_is_enabled() {
+    return g_ble_interface.isEnabled();
+}
+
+// Process deferred BLE enable/disable — called from meck_task only.
+static void meck_apply_pending_ble() {
+    int action = g_ble_pending_action;
+    if (action == 0) return;
+    g_ble_pending_action = 0;
+
+    if (action > 0 && !g_ble_interface.isEnabled() && g_c6_at) {
+        // Disable WiFi first (mutual exclusivity — shared SDIO bus)
+        if (g_wifi_interface.isEnabled()) {
+            g_wifi_interface.disable();
+            printf("meck_apply_pending_ble: disabled WiFi (mutual excl)\n");
+        }
+        Meck* mesh = meck_get_instance();
+        const char* name = mesh ? mesh->getNodeName() : "Meck-P4";
+        g_ble_interface.begin(g_c6_at, name);
+        g_ble_interface.setPin(g_node_prefs.ble_pin);
+        g_ble_interface.enable();
+        printf("meck_apply_pending_ble: enabled\n");
+    } else if (action < 0 && g_ble_interface.isEnabled()) {
+        g_ble_interface.disable();
+        printf("meck_apply_pending_ble: disabled\n");
+    }
+}
+#endif
+
+// ---- Deferred WiFi enable/disable (same SDIO contention pattern) ----
+static volatile int g_wifi_pending_action = 0;
+
+extern "C" void meck_wifi_set_enabled(bool enabled) {
+    g_wifi_pending_action = enabled ? 1 : -1;
+    printf("meck_wifi_set_enabled: queued %s\n", enabled ? "ON" : "OFF");
+}
+
+extern "C" bool meck_wifi_is_enabled() {
+    return g_wifi_interface.isEnabled();
+}
+
+extern "C" bool meck_wifi_is_connected() {
+    return g_wifi_interface.isWiFiConnected();
+}
+
+extern "C" const char* meck_wifi_get_ip() {
+    return g_wifi_interface.getIP();
+}
+
+static void meck_apply_pending_wifi() {
+    int action = g_wifi_pending_action;
+    if (action == 0) return;
+    g_wifi_pending_action = 0;
+
+    if (action > 0 && !g_wifi_interface.isEnabled() && g_c6_at) {
+#if MECK_BLE_ENABLED
+        // Disable BLE first (mutual exclusivity — shared SDIO bus)
+        if (g_ble_interface.isEnabled()) {
+            g_ble_interface.disable();
+            printf("meck_apply_pending_wifi: disabled BLE (mutual excl)\n");
+        }
+#endif
+        g_wifi_interface.begin(g_c6_at);
+        g_wifi_interface.setCredentials(g_node_prefs.wifi_ssid, g_node_prefs.wifi_password);
+        g_wifi_interface.enable();
+        printf("meck_apply_pending_wifi: enabled (IP: %s)\n", g_wifi_interface.getIP());
+    } else if (action < 0 && g_wifi_interface.isEnabled()) {
+        g_wifi_interface.disable();
+        printf("meck_apply_pending_wifi: disabled\n");
+    }
 }
 
 // ---- Internal accessor (declared in target.h) ----
@@ -148,11 +312,46 @@ extern "C" bool meck_app_init() {
     // copyBundledPicturesToSD();  // disabled for v0.3.8
     g_notif_sounds.begin();
 
-    // 7. Initialize BLE companion transport via C6
+    // 7. Initialize companion transports via C6
     if (g_c6_at) {
+#if MECK_BLE_ENABLED
         g_ble_interface.begin(g_c6_at, g_node_prefs.node_name);
-        g_ble_interface.enable();
-        printf("meck_app_init: BLE companion interface enabled\n");
+
+        // Probe C6 for OTA and WiFi capability (diagnostic, runs once at boot)
+        g_ble_interface.probeOTA();
+
+        // Generate a 6-digit BLE pairing PIN on first use
+        if (g_node_prefs.ble_pin == 0) {
+            g_node_prefs.ble_pin = 100000 + (esp_random() % 900000);
+            if (g_the_mesh) g_the_mesh->getDataStore()->savePrefs(g_node_prefs);
+            printf("meck_app_init: generated BLE PIN %06lu\n",
+                   (unsigned long)g_node_prefs.ble_pin);
+        }
+        g_ble_interface.setPin(g_node_prefs.ble_pin);
+
+        if (g_node_prefs.ble_enabled != 0) {
+            g_ble_interface.enable();
+            printf("meck_app_init: BLE companion enabled (PIN %06lu)\n",
+                   (unsigned long)g_node_prefs.ble_pin);
+        } else {
+            printf("meck_app_init: BLE companion interface OFF (pref)\n");
+        }
+        g_companion.begin(g_the_mesh, &g_ble_interface);
+        printf("meck_app_init: BLE companion protocol handler ready\n");
+#endif
+
+        // 8. Initialize WiFi companion transport via C6
+        g_wifi_interface.begin(g_c6_at);
+        g_wifi_interface.setCredentials(g_node_prefs.wifi_ssid, g_node_prefs.wifi_password);
+        g_wifi_companion.begin(g_the_mesh, &g_wifi_interface);
+
+        if (g_node_prefs.wifi_enabled != 0 && g_node_prefs.wifi_ssid[0] != '\0') {
+            g_wifi_interface.enable();
+            printf("meck_app_init: WiFi companion enabled (IP: %s, port 5555)\n",
+                   g_wifi_interface.getIP());
+        } else {
+            printf("meck_app_init: WiFi companion OFF (pref)\n");
+        }
     } else {
         printf("meck_app_init: WARNING — meck_ble_bind not called, BLE disabled\n");
     }
@@ -181,11 +380,16 @@ static void meck_task(void* arg) {
         // meck_apply_pending_voice_send();
         // meck_apply_pending_picture_send();
         meck_apply_pending_save();
-        // Drain C6 SDIO so BLE connections stay alive
-        {
-            static uint8_t _ble_rx_buf[MAX_FRAME_SIZE];
-            g_ble_interface.checkRecvFrame(_ble_rx_buf);
-        }
+#if MECK_BLE_ENABLED
+        meck_apply_pending_ble();
+#endif
+        meck_apply_pending_wifi();
+#if MECK_BLE_ENABLED
+        // BLE companion protocol: drain SDIO, handle app commands
+        g_companion.check();
+#endif
+        // WiFi companion protocol: same, via TCP
+        g_wifi_companion.check();
         if (g_the_mesh) {
             g_the_mesh->loop();
         }

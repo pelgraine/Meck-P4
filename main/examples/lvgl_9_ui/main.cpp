@@ -2868,7 +2868,7 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
         }
         else
         {
-            if ((tp.finger_count == 1) && (tp.info[0].x != static_cast<uint16_t>(-1)) && (tp.info[0].y != static_cast<uint16_t>(-1)) && (tp.info[0].pressure_value != 0))
+            if ((tp.finger_count == 1) && (tp.info[0].x != static_cast<uint16_t>(-1)) && (tp.info[0].y != static_cast<uint16_t>(-1)))
             {
                 /*Set the coordinates*/
                 data->point.x = tp.info[0].x;
@@ -2915,7 +2915,7 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
         }
         else
         {
-            if ((tp.finger_count == 1) && (tp.info[0].x != static_cast<uint16_t>(-1)) && (tp.info[0].y != static_cast<uint16_t>(-1)) && (tp.info[0].pressure_value != 0))
+            if ((tp.finger_count == 1) && (tp.info[0].x != static_cast<uint16_t>(-1)) && (tp.info[0].y != static_cast<uint16_t>(-1)))
             {
                 /*Set the coordinates*/
                 data->point.x = tp.info[0].x;

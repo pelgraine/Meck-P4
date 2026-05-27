@@ -40,6 +40,8 @@ idf_component_register(
         "MeckAudioUI.cpp"
         "MeckMapScreen.cpp"
         "SerialC6BLEInterface.cpp"
+        "SerialC6WiFiInterface.cpp"
+        "MeckCompanion.cpp"
         "es8311.cpp" 
         "meck_montserrat_14.c"
         "meck_montserrat_16.c"

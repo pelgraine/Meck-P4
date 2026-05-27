@@ -10,8 +10,6 @@
 #include <cstring>
 #include <cstdlib>
 
-// millis() is provided by arduino_compat.h on the P4 build.
-
 #define C6BLE_DEBUG 1
 #if C6BLE_DEBUG
   #define C6BLE_LOG(fmt, ...) printf("C6BLE: " fmt "\n", ##__VA_ARGS__)
@@ -27,7 +25,8 @@ SerialC6BLEInterface::SerialC6BLEInterface()
     : _at(nullptr), _begun(false), _enabled(false), _connected(false),
       _adv_restart_time(0), _last_write_ms(0),
       _rx_len(0), _recv_queue_len(0), _send_queue_len(0),
-      _got_ok(false), _got_error(false), _got_prompt(false)
+      _got_ok(false), _got_error(false), _got_prompt(false),
+      _ble_pin(0), _probe_mode(false)
 {
     memset(_dev_name, 0, sizeof(_dev_name));
     memset(_rx_buf, 0, sizeof(_rx_buf));
@@ -118,10 +117,12 @@ void SerialC6BLEInterface::drainLines() {
 void SerialC6BLEInterface::processLine(const char* line, int len) {
     // AT response codes
     if (strcmp(line, "OK") == 0) {
+        if (_probe_mode) printf("C6_PROBE: << OK\n");
         _got_ok = true;
         return;
     }
     if (strcmp(line, "ERROR") == 0 || strncmp(line, "ERR CODE:", 9) == 0) {
+        if (_probe_mode) printf("C6_PROBE: << %s\n", line);
         _got_error = true;
         C6BLE_LOG("AT error: %s", line);
         return;
@@ -185,6 +186,9 @@ void SerialC6BLEInterface::processLine(const char* line, int len) {
 
     // Log anything else for debugging
     if (len > 0 && line[0] != '\0') {
+        if (_probe_mode) {
+            printf("C6_PROBE: << %s\n", line);
+        }
         C6BLE_LOG("[C6] %s", line);
     }
 }
@@ -288,6 +292,19 @@ bool SerialC6BLEInterface::startAdvertising() {
     // Init BLE as server (peripheral)
     if (!atCmd("AT+BLEINIT=2")) return false;
 
+    // BLE security: static 6-digit PIN pairing.
+    // auth_req=1 (bonding), iocap=1 (display only), key_size=16,
+    // init_key=3 (LTK+IRK), resp_key=3 (LTK+IRK), auth_option=0.
+    // The phone app reads the PIN from CMD_DEVICE_QEURY and initiates
+    // pairing with it.
+    if (_ble_pin != 0) {
+        atCmd("AT+BLESECPARAM=1,1,16,3,3");
+        char pin_cmd[32];
+        snprintf(pin_cmd, sizeof(pin_cmd), "AT+BLESETKEY=%lu",
+                 (unsigned long)_ble_pin);
+        atCmd(pin_cmd);
+    }
+
     // Set device name
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "AT+BLENAME=\"%s\"", _dev_name);
@@ -353,6 +370,95 @@ void SerialC6BLEInterface::disable() {
     _adv_restart_time = 0;
     clearBuffers();
     C6BLE_LOG("disabled");
+}
+
+// ---------------------------------------------------------------------------
+// probeOTA -- diagnostic: check C6 firmware version and OTA capability
+// ---------------------------------------------------------------------------
+
+void SerialC6BLEInterface::probeOTA() {
+    if (!_begun || !_at) {
+        printf("C6_PROBE: not ready (begun=%d, at=%p)\n", _begun, _at);
+        return;
+    }
+
+    _probe_mode = true;
+    _rx_len = 0;  // clear any stale data
+
+    printf("\n========== C6 OTA PROBE ==========\n");
+
+    // 1. Basic connectivity
+    printf("C6_PROBE: >> AT\n");
+    bool ok = atCmd("AT", 2000);
+    printf("C6_PROBE: AT -> %s\n\n", ok ? "OK" : "FAIL");
+
+    // 2. Firmware version
+    printf("C6_PROBE: >> AT+GMR\n");
+    ok = atCmd("AT+GMR", 3000);
+    printf("C6_PROBE: AT+GMR -> %s\n\n", ok ? "OK" : "FAIL");
+
+    // 3. WiFi mode support
+    printf("C6_PROBE: >> AT+CWMODE?\n");
+    ok = atCmd("AT+CWMODE?", 2000);
+    printf("C6_PROBE: AT+CWMODE? -> %s\n\n", ok ? "OK" : "FAIL");
+
+    // 4. Check USEROTA (custom URL OTA)
+    printf("C6_PROBE: >> AT+USEROTA?\n");
+    ok = atCmd("AT+USEROTA?", 2000);
+    printf("C6_PROBE: AT+USEROTA? -> %s\n\n", ok ? "OK (supported)" : "FAIL (not supported)");
+
+    // 5. Check CIUPDATE (Espressif cloud OTA)
+    printf("C6_PROBE: >> AT+CIUPDATE?\n");
+    ok = atCmd("AT+CIUPDATE?", 2000);
+    printf("C6_PROBE: AT+CIUPDATE? -> %s\n\n", ok ? "OK (supported)" : "FAIL (not supported)");
+
+    // 6. Check flash partitions
+    printf("C6_PROBE: >> AT+SYSFLASH?\n");
+    ok = atCmd("AT+SYSFLASH?", 2000);
+    printf("C6_PROBE: AT+SYSFLASH? -> %s\n\n", ok ? "OK" : "FAIL");
+
+    // 7. Check available heap (useful for OTA feasibility)
+    printf("C6_PROBE: >> AT+SYSRAM?\n");
+    ok = atCmd("AT+SYSRAM?", 2000);
+    printf("C6_PROBE: AT+SYSRAM? -> %s\n\n", ok ? "OK" : "FAIL");
+
+    // 8. Check web server (local firmware upload via browser)
+    printf("C6_PROBE: >> AT+WEBSERVER=?\n");
+    ok = atCmd("AT+WEBSERVER=?", 2000);
+    printf("C6_PROBE: AT+WEBSERVER=? -> %s\n\n", ok ? "OK (supported)" : "FAIL (not supported)");
+
+    // 9. Check HTTP client (fetch firmware from local network)
+    printf("C6_PROBE: >> AT+HTTPCLIENT=?\n");
+    ok = atCmd("AT+HTTPCLIENT=?", 2000);
+    printf("C6_PROBE: AT+HTTPCLIENT=? -> %s\n\n", ok ? "OK (supported)" : "FAIL (not supported)");
+
+    // 10. Check if OTA partitions are accessible via SYSFLASH
+    printf("C6_PROBE: >> AT+SYSFLASH=0,\"ota_0\",0,16\n");
+    ok = atCmd("AT+SYSFLASH=0,\"ota_0\",0,16", 3000);
+    printf("C6_PROBE: read ota_0 -> %s\n\n", ok ? "OK (accessible!)" : "FAIL");
+
+    printf("C6_PROBE: >> AT+SYSFLASH=0,\"ota_1\",0,16\n");
+    ok = atCmd("AT+SYSFLASH=0,\"ota_1\",0,16", 3000);
+    printf("C6_PROBE: read ota_1 -> %s\n\n", ok ? "OK (accessible!)" : "FAIL");
+
+    // 11. Check otadata partition (OTA boot selector)
+    printf("C6_PROBE: >> AT+SYSFLASH=0,\"otadata\",0,16\n");
+    ok = atCmd("AT+SYSFLASH=0,\"otadata\",0,16", 3000);
+    printf("C6_PROBE: read otadata -> %s\n\n", ok ? "OK (accessible!)" : "FAIL");
+
+    // 12. Check CIUPDATE parameter format (can we pass a URL?)
+    printf("C6_PROBE: >> AT+CIUPDATE=?\n");
+    ok = atCmd("AT+CIUPDATE=?", 2000);
+    printf("C6_PROBE: AT+CIUPDATE=? -> %s\n\n", ok ? "OK" : "FAIL");
+
+    // 13. List all available AT commands
+    printf("C6_PROBE: >> AT+CMD?\n");
+    ok = atCmd("AT+CMD?", 5000);
+    printf("C6_PROBE: AT+CMD? -> %s\n\n", ok ? "OK" : "FAIL");
+
+    printf("========== END C6 OTA PROBE ==========\n\n");
+
+    _probe_mode = false;
 }
 
 // ---------------------------------------------------------------------------
