@@ -43,8 +43,16 @@
 
 // Voice bridge functions (defined in meck_app.cpp)
 extern "C" void meck_drain_pending_voice(void);
+extern "C" void meck_drain_pending_pictures(void);
 extern "C" void meck_request_voice_send(int contact_idx);
+extern "C" void meck_request_picture_send(uint8_t ch_idx, const char *filepath);
 extern MeckVoice* meck_get_voice_instance(void);
+extern "C" int meck_voice_send_get_status(void);
+#define VOICE_SEND_IDLE           0
+#define VOICE_SEND_WAITING_ACK    1
+#define VOICE_SEND_PACKETS_QUEUED 2
+#define VOICE_SEND_ACK_TIMEOUT    3
+#define VOICE_SEND_NO_PATH        4
 #include "NotifSounds.h"
 #include "MeckMapScreen.h"
 
@@ -61,6 +69,10 @@ extern MeckVoice* meck_get_voice_instance(void);
 #include <cstdint>
 #include <dirent.h>
 #include <sys/stat.h>
+
+#ifndef PICTURES_FOLDER
+#define PICTURES_FOLDER "/sdcard/pictures"
+#endif
 #include <cstdlib>
 #include <ctime>
 #include <climits>
@@ -484,11 +496,9 @@ static lv_obj_t *ta_pos_edit             = NULL;
 static lv_obj_t *kb_pos_edit             = NULL;
 static int       g_pos_edit_field        = 0;  // 3 = lat, 4 = lon
 
-// Paste position buffer — filled by Copy Position on the position
-// subscreen, consumed by compose textareas on channel/DM/room screens.
-static char g_position_paste_buffer[32]  = {};
-static lv_obj_t *btn_paste_position      = NULL;  // on scr_messages
-static lv_obj_t *btn_room_paste_position = NULL;  // on scr_room_messages
+static lv_obj_t *btn_attach              = NULL;  // + button left of compose
+static lv_obj_t *obj_attach_menu         = NULL;  // long-press popup menu
+static lv_obj_t *obj_attach_picker       = NULL;  // file picker overlay
 
 // Share channel — contact picker overlay on scr_channel_detail
 static lv_obj_t *obj_ch_share_picker_panel  = NULL;
@@ -781,6 +791,7 @@ static const uint32_t MECK_RETRY_CHANNEL_THRESHOLD_SEC = 18;
 // (next rebuild or screen unload).
 struct BubbleRetryCtx {
     bool     is_dm;             // false = channel send, true = DM send
+    bool     is_outgoing;       // true = we sent this, false = received
     int      target_idx;        // channel_idx (channel) or contact_idx (DM)
     uint32_t timestamp;         // message timestamp — matching key for current
                                 // state lookup at long-press time
@@ -788,6 +799,15 @@ struct BubbleRetryCtx {
                                 // lookupDMAckStatus for the Failed check.
     char     body[200];         // text to resend. For channel, the
                                 // "sender: " prefix has been stripped.
+    // Path view data — populated from P4ChannelMessage at bubble creation
+    uint8_t  path_len;          // encoded path_len from message
+    uint8_t  msg_path_hash_size;
+    uint8_t  msg_path_hash_count;
+    uint8_t  msg_path_hashes[16];
+    uint8_t  echo_hash_size;
+    uint8_t  echo_hash_count;
+    uint8_t  echo_hashes[16];
+    uint8_t  heard_count;
 };
 
 // Modal widgets — created once and attached to scr_messages so they
@@ -802,6 +822,11 @@ static lv_obj_t *lbl_retry_prompt = NULL;
 static bool g_retry_pending_is_dm    = false;
 static int  g_retry_pending_idx      = -1;
 static char g_retry_pending_body[200] = "";
+
+// Path info popup — shown on long-press of any bubble
+static lv_obj_t *obj_path_panel     = NULL;
+static lv_obj_t *lbl_path_info      = NULL;
+static char g_path_copy_text[256]   = "";  // text to paste on "Copy Path"
 
 // Discover (repeaters-only, mirrors Meck T-Deck Pro's F-key Discover)
 static lv_obj_t *scr_discover         = NULL;
@@ -1102,13 +1127,14 @@ static void goto_settings_position(lv_event_t *e);
 static void on_pos_lat_tap(lv_event_t *e);
 static void on_pos_lon_tap(lv_event_t *e);
 static void on_pos_mode_tap(lv_event_t *e);
-static void on_pos_copy_tap(lv_event_t *e);
 static void create_settings_position_screen();
 static void refresh_position_labels();
 
-// Paste position
-static void on_paste_position_tap(lv_event_t *e);
-static void on_room_paste_position_tap(lv_event_t *e);
+// Attachment menu
+static void on_attach_long_press(lv_event_t *e);
+static void on_attach_pick_file(lv_event_t *e);
+static void on_attach_share_pos(lv_event_t *e);
+static void on_attach_cancel(lv_event_t *e);
 
 // Channel share picker
 static void on_ch_detail_share_tap(lv_event_t *e);
@@ -1132,6 +1158,7 @@ static void voice_inbox_add(const char *senderName, const char *wavPath,
                             uint32_t timestamp, uint8_t durationSec);
 static void voice_inbox_refresh(void);
 static void voice_inbox_update_badge(void);
+static void voice_prev_refresh(void);
 
 static void on_send_clicked(lv_event_t *e);
 static void on_compose_focused(lv_event_t *e);
@@ -1275,6 +1302,7 @@ static void on_bubble_retry_ctx_delete(lv_event_t *e);
 static void on_retry_modal_send(lv_event_t *e);
 static void on_retry_modal_cancel(lv_event_t *e);
 static void create_retry_modal();
+static void create_path_modal();
 static void on_settings_brightness_slider_event(lv_event_t *e);
 static void on_settings_screen_off_tap(lv_event_t *e);
 static void on_settings_kb_theme_tap(lv_event_t *e);
@@ -1313,12 +1341,7 @@ static void goto_audio_browser(lv_event_t* e) {
     meck_audio_ui_show_browser();
 }
 static void cb_todo_web(lv_event_t* e)      { show_not_implemented("Web"); }
-static void cb_todo_voice(lv_event_t* e)    {
-    if (scr_voice_landing) {
-        voice_inbox_update_badge();
-        lv_screen_load(scr_voice_landing);
-    }
-}
+static void cb_todo_voice(lv_event_t* e)    { show_not_implemented("Voice"); }
 static void cb_todo_camera(lv_event_t* e)   { show_not_implemented("Camera"); }
 
 // ============================================================================
@@ -2605,6 +2628,71 @@ static bool post_is_outgoing(const uint8_t* sender_prefix) {
 }
 
 // ============================================================================
+// Inline picture rendering
+// ----------------------------------------------------------------------------
+// Messages with body starting with "[PIC:" are treated as picture messages.
+// Format: "[PIC:/sdcard/pictures/filename.jpg]" optionally followed by text.
+// The image is rendered inside the bubble with the text (if any) below it.
+//
+// Requires in lv_conf.h:
+//   #define LV_USE_FS_POSIX   1
+//   #define LV_FS_POSIX_LETTER 'A'
+//   #define LV_USE_TJPGD      1      (for JPEG decoding)
+//   #define LV_USE_LIBPNG     1      (for PNG decoding, optional)
+// ============================================================================
+
+#define PIC_MARKER     "[PIC:"
+#define PIC_MARKER_LEN 5
+#define PIC_MAX_W      400   // max rendered width inside bubble
+#define PIC_MAX_H      300   // max rendered height inside bubble
+
+// Check if a message body is a picture message. Returns the file path
+// (inside the marker) or NULL if not a picture message.
+static const char* parse_picture_path(const char *body, char *path_out, size_t path_out_len) {
+    if (!body || strncmp(body, PIC_MARKER, PIC_MARKER_LEN) != 0) return NULL;
+    const char *start = body + PIC_MARKER_LEN;
+    const char *end = strchr(start, ']');
+    if (!end || end == start) return NULL;
+    size_t len = (size_t)(end - start);
+    if (len >= path_out_len) len = path_out_len - 1;
+    memcpy(path_out, start, len);
+    path_out[len] = '\0';
+    return end + 1;  // points to any text after the "]"
+}
+
+// Create an image object inside a bubble for a picture message.
+// Uses LVGL's file system driver (LV_FS_POSIX) to load from SD card.
+// Returns true if the image was created, false if the file doesn't exist
+// or the decoder can't handle it.
+static bool render_picture_in_bubble(lv_obj_t *bubble, const char *sd_path,
+                                     int max_w) {
+    // Check file exists
+    struct stat st;
+    if (stat(sd_path, &st) != 0) {
+        printf("PIC: file not found: %s\n", sd_path);
+        return false;
+    }
+
+    // Build LVGL file path: "A:" prefix + SD path for LV_FS_POSIX driver.
+    // If the FS driver uses a different letter, change PIC_FS_LETTER.
+    char lv_path[128];
+    snprintf(lv_path, sizeof(lv_path), "A:%s", sd_path);
+
+    lv_obj_t *img = lv_image_create(bubble);
+    lv_image_set_src(img, lv_path);
+
+    // Scale to fit bubble width while preserving aspect ratio.
+    // LVGL 9: set_inner_align + scale, or just set max size.
+    if (max_w > PIC_MAX_W) max_w = PIC_MAX_W;
+    lv_obj_set_width(img, max_w - 22);
+    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CENTER);
+
+    printf("PIC: rendered %s (%ld bytes) in bubble\n",
+           sd_path, (long)st.st_size);
+    return true;
+}
+
+// ============================================================================
 // rebuild_message_bubbles
 // ----------------------------------------------------------------------------
 // Tear down and rebuild the message list inside obj_msg_scroll. Each message
@@ -2744,13 +2832,30 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
             meck_set_font(lbl_sender, &meck_montserrat_22, 0);
         }
 
-        // Message body. Width-bounded so wrapping kicks in inside the bubble.
-        lv_obj_t *lbl_body = lv_label_create(bubble);
-        lv_label_set_text(lbl_body, body);
-        lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
-        meck_set_font(lbl_body, &meck_montserrat_22, 0);
-        lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(lbl_body, bubble_max_w - 22);
+        // Message body: check for inline picture marker [PIC:path]
+        char pic_path[128];
+        const char *pic_caption = parse_picture_path(body, pic_path, sizeof(pic_path));
+        if (pic_caption) {
+            // Render the image inside the bubble
+            render_picture_in_bubble(bubble, pic_path, bubble_max_w);
+            // If there's caption text after the "]", show it below the image
+            if (pic_caption[0] != '\0') {
+                lv_obj_t *lbl_cap = lv_label_create(bubble);
+                lv_label_set_text(lbl_cap, pic_caption);
+                lv_obj_set_style_text_color(lbl_cap, lv_color_white(), 0);
+                meck_set_font(lbl_cap, &meck_montserrat_18, 0);
+                lv_label_set_long_mode(lbl_cap, LV_LABEL_LONG_WRAP);
+                lv_obj_set_width(lbl_cap, bubble_max_w - 22);
+            }
+        } else {
+            // Normal text message
+            lv_obj_t *lbl_body = lv_label_create(bubble);
+            lv_label_set_text(lbl_body, body);
+            lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
+            meck_set_font(lbl_body, &meck_montserrat_22, 0);
+            lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
+            lv_obj_set_width(lbl_body, bubble_max_w - 22);
+        }
 
         // Timestamp footer in muted grey, optionally suffixed with hop /
         // heard-by metadata so the user can see at a glance how their
@@ -2814,19 +2919,34 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
                 is_sent ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
         }
 
-        // Retry-send: attach a long-press handler + per-bubble retry
-        // context on every sent channel bubble. Eligibility is checked
-        // at press time (not here) so the 18-second elapsed transition
-        // doesn't depend on a rebuild firing first. ctx is freed via
-        // LV_EVENT_DELETE when the bubble is destroyed on next rebuild.
-        if (is_sent) {
+        // Long-press context: attach to ALL bubbles (sent and received).
+        // For sent bubbles, enables retry on failure. For all bubbles,
+        // enables path view showing repeater chain / echo sources.
+        {
             BubbleRetryCtx *ctx = new BubbleRetryCtx();
             ctx->is_dm        = false;
+            ctx->is_outgoing  = is_sent;
             ctx->target_idx   = (int)ch_idx;
             ctx->timestamp    = msgs[i].timestamp;
             ctx->expected_ack = 0;
-            strncpy(ctx->body, body, sizeof(ctx->body) - 1);
-            ctx->body[sizeof(ctx->body) - 1] = '\0';
+            ctx->path_len     = msgs[i].path_len;
+            ctx->heard_count  = msgs[i].heard_count;
+            // Path hashes (incoming)
+            ctx->msg_path_hash_size  = msgs[i].msg_path_hash_size;
+            ctx->msg_path_hash_count = msgs[i].msg_path_hash_count;
+            memcpy(ctx->msg_path_hashes, msgs[i].msg_path_hashes,
+                   sizeof(ctx->msg_path_hashes));
+            // Echo hashes (outgoing)
+            ctx->echo_hash_size  = msgs[i].echo_hash_size;
+            ctx->echo_hash_count = msgs[i].echo_hash_count;
+            memcpy(ctx->echo_hashes, msgs[i].echo_hashes,
+                   sizeof(ctx->echo_hashes));
+            if (is_sent) {
+                strncpy(ctx->body, body, sizeof(ctx->body) - 1);
+                ctx->body[sizeof(ctx->body) - 1] = '\0';
+            } else {
+                ctx->body[0] = '\0';
+            }
             lv_obj_set_user_data(bubble, ctx);
             lv_obj_add_event_cb(bubble, on_bubble_long_pressed,
                                 LV_EVENT_LONG_PRESSED, NULL);
@@ -2925,13 +3045,27 @@ static void rebuild_dm_bubbles(int contact_idx) {
         lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_pad_row(bubble, 2, 0);
 
-        // Body.
-        lv_obj_t *lbl_body = lv_label_create(bubble);
-        lv_label_set_text(lbl_body, clean_text);
-        lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
-        meck_set_font(lbl_body, &meck_montserrat_22, 0);
-        lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(lbl_body, bubble_max_w - 22);
+        // Body: check for inline picture marker [PIC:path]
+        char pic_path[128];
+        const char *pic_caption = parse_picture_path(clean_text, pic_path, sizeof(pic_path));
+        if (pic_caption) {
+            render_picture_in_bubble(bubble, pic_path, bubble_max_w);
+            if (pic_caption[0] != '\0') {
+                lv_obj_t *lbl_cap = lv_label_create(bubble);
+                lv_label_set_text(lbl_cap, pic_caption);
+                lv_obj_set_style_text_color(lbl_cap, lv_color_white(), 0);
+                meck_set_font(lbl_cap, &meck_montserrat_18, 0);
+                lv_label_set_long_mode(lbl_cap, LV_LABEL_LONG_WRAP);
+                lv_obj_set_width(lbl_cap, bubble_max_w - 22);
+            }
+        } else {
+            lv_obj_t *lbl_body = lv_label_create(bubble);
+            lv_label_set_text(lbl_body, clean_text);
+            lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
+            meck_set_font(lbl_body, &meck_montserrat_22, 0);
+            lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
+            lv_obj_set_width(lbl_body, bubble_max_w - 22);
+        }
 
         // Footer: timestamp + hop info (received) or status (sent).
         char timebuf[32];
@@ -3141,13 +3275,27 @@ static void rebuild_room_bubbles(int contact_idx) {
         lv_obj_set_flex_flow(bubble, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_pad_row(bubble, 2, 0);
 
-        // Body.
-        lv_obj_t *lbl_body = lv_label_create(bubble);
-        lv_label_set_text(lbl_body, clean_text);
-        lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
-        meck_set_font(lbl_body, &meck_montserrat_22, 0);
-        lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(lbl_body, bubble_max_w - 22);
+        // Body: check for inline picture marker [PIC:path]
+        char pic_path_r[128];
+        const char *pic_caption_r = parse_picture_path(clean_text, pic_path_r, sizeof(pic_path_r));
+        if (pic_caption_r) {
+            render_picture_in_bubble(bubble, pic_path_r, bubble_max_w);
+            if (pic_caption_r[0] != '\0') {
+                lv_obj_t *lbl_cap = lv_label_create(bubble);
+                lv_label_set_text(lbl_cap, pic_caption_r);
+                lv_obj_set_style_text_color(lbl_cap, lv_color_white(), 0);
+                meck_set_font(lbl_cap, &meck_montserrat_18, 0);
+                lv_label_set_long_mode(lbl_cap, LV_LABEL_LONG_WRAP);
+                lv_obj_set_width(lbl_cap, bubble_max_w - 22);
+            }
+        } else {
+            lv_obj_t *lbl_body = lv_label_create(bubble);
+            lv_label_set_text(lbl_body, clean_text);
+            lv_obj_set_style_text_color(lbl_body, lv_color_white(), 0);
+            meck_set_font(lbl_body, &meck_montserrat_22, 0);
+            lv_label_set_long_mode(lbl_body, LV_LABEL_LONG_WRAP);
+            lv_obj_set_width(lbl_body, bubble_max_w - 22);
+        }
 
         // Footer: timestamp + hops/direct.
         char timebuf[32];
@@ -3533,6 +3681,18 @@ static void on_pos_edit_save(lv_event_t *e) {
     if (!prefs) return;
     const char* text = lv_textarea_get_text(ta_pos_edit);
     if (!text || !text[0]) {
+        // Empty field — clear the position value
+        if (g_pos_edit_field == 3) {
+            prefs->position_lat_e7 = 0;
+            mesh->getDataStore()->savePrefs(*prefs);
+            printf("Settings: Lat cleared\n");
+            refresh_position_labels();
+        } else if (g_pos_edit_field == 4) {
+            prefs->position_lon_e7 = 0;
+            mesh->getDataStore()->savePrefs(*prefs);
+            printf("Settings: Lon cleared\n");
+            refresh_position_labels();
+        }
         if (obj_pos_edit_panel) lv_obj_add_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -3617,59 +3777,139 @@ static void on_pos_mode_tap(lv_event_t *e) {
     refresh_position_labels();
 }
 
-static void on_pos_copy_tap(lv_event_t *e) {
+// ============================================================================
+// Attachment menu (+ button long-press)
+// ============================================================================
+
+static void attach_menu_close() {
+    if (obj_attach_menu) {
+        lv_obj_del(obj_attach_menu);
+        obj_attach_menu = NULL;
+    }
+    if (obj_attach_picker) {
+        lv_obj_del(obj_attach_picker);
+        obj_attach_picker = NULL;
+    }
+}
+
+static void on_attach_cancel(lv_event_t *e) {
+    (void)e;
+    attach_menu_close();
+}
+
+static void on_attach_share_pos(lv_event_t *e) {
+    (void)e;
+    attach_menu_close();
     Meck* mesh = meck_get_instance();
-    if (!mesh) return;
+    if (!mesh || !ta_compose) return;
     P4NodePrefs* prefs = mesh->getNodePrefs();
     if (!prefs) return;
     if (prefs->position_lat_e7 == 0 && prefs->position_lon_e7 == 0) return;
 
-    snprintf(g_position_paste_buffer, sizeof(g_position_paste_buffer),
-             "%.6f,%.6f",
+    char pos[32];
+    snprintf(pos, sizeof(pos), "%.6f,%.6f",
              (double)prefs->position_lat_e7 / 1e7,
              (double)prefs->position_lon_e7 / 1e7);
-    printf("Position: copied '%s' to paste buffer\n", g_position_paste_buffer);
+    lv_textarea_set_text(ta_compose, pos);
+    printf("Attach: shared position %s\n", pos);
+}
 
-    // Show a brief toast. Use a timed label on the position screen.
-    if (scr_settings_position) {
-        lv_obj_t *toast = lv_label_create(scr_settings_position);
-        lv_label_set_text(toast, "Copied!");
-        lv_obj_set_style_text_color(toast, lv_palette_main(LV_PALETTE_GREEN), 0);
-        meck_set_font(toast, &meck_montserrat_22, 0);
-        lv_obj_align(toast, LV_ALIGN_BOTTOM_MID, 0, -40);
-        // Auto-dismiss after 2s via a one-shot timer
-        lv_timer_t *tmr = lv_timer_create([](lv_timer_t *t) {
-            lv_obj_t *obj = (lv_obj_t *)lv_timer_get_user_data(t);
-            if (obj) lv_obj_del(obj);
-            lv_timer_del(t);
-        }, 2000, toast);
-        lv_timer_set_repeat_count(tmr, 1);
+static void on_attach_pick_file(lv_event_t *e) {
+    const char *path = (const char *)lv_event_get_user_data(e);
+    attach_menu_close();
+    if (!path) return;
+
+    // Queue the picture send as chunked channel messages
+    if (!g_in_dm_mode && g_active_channel < MAX_GROUP_CHANNELS) {
+        meck_request_picture_send(g_active_channel, path);
+        printf("Attach: sending %s on ch[%d]\n", path, g_active_channel);
+
+        // Clear textarea — chunks are sent in the background, not via the
+        // compose bar. A [PIC:path] message is injected into the channel
+        // ring once all chunks have been transmitted.
+        if (ta_compose) {
+            lv_textarea_set_text(ta_compose, "");
+        }
+    } else {
+        printf("Attach: picture send only supported on channels for now\n");
+        if (ta_compose) {
+            lv_textarea_set_text(ta_compose, "[Pictures: channels only]");
+        }
     }
 }
 
-// ============================================================================
-// Paste Position handlers
-// ============================================================================
-
-static void on_paste_position_tap(lv_event_t *e) {
+static void on_attach_long_press(lv_event_t *e) {
     (void)e;
-    if (g_position_paste_buffer[0] == '\0') return;
-    if (ta_compose) {
-        lv_textarea_add_text(ta_compose, g_position_paste_buffer);
+    attach_menu_close();
+
+    if (!scr_messages) return;
+    lv_obj_t *active = lv_screen_active();
+    if (active != scr_messages) return;
+
+    Meck* mesh = meck_get_instance();
+    P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : nullptr;
+    bool has_pos = prefs && (prefs->position_lat_e7 != 0 || prefs->position_lon_e7 != 0);
+
+    // Build compact popup menu
+    int menu_h = 60;  // base height for cancel
+    if (has_pos) menu_h += 60;
+    else menu_h += 35;  // space for "no position" label
+
+    obj_attach_menu = lv_obj_create(scr_messages);
+    lv_obj_set_size(obj_attach_menu, SCREEN_WIDTH - 80, menu_h);
+    lv_obj_align(obj_attach_menu, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(obj_attach_menu, lv_color_make(15, 15, 25), 0);
+    lv_obj_set_style_bg_opa(obj_attach_menu, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(obj_attach_menu, 16, 0);
+    lv_obj_set_style_border_width(obj_attach_menu, 1, 0);
+    lv_obj_set_style_border_color(obj_attach_menu,
+        lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_pad_all(obj_attach_menu, 10, 0);
+    lv_obj_clear_flag(obj_attach_menu, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_update_layout(obj_attach_menu);
+
+    int y = 0;
+
+    if (has_pos) {
+        lv_obj_t *btn_pos = lv_button_create(obj_attach_menu);
+        lv_obj_set_size(btn_pos, lv_obj_get_width(obj_attach_menu) - 20, 50);
+        lv_obj_set_pos(btn_pos, 0, y);
+        lv_obj_set_style_bg_color(btn_pos, lv_palette_main(LV_PALETTE_ORANGE), 0);
+        lv_obj_set_style_radius(btn_pos, 8, 0);
+        lv_obj_t *pos_lbl = lv_label_create(btn_pos);
+        lv_label_set_text(pos_lbl, "Share Position");
+        lv_obj_set_style_text_color(pos_lbl, lv_color_black(), 0);
+        meck_set_font(pos_lbl, &meck_montserrat_16, 0);
+        lv_obj_center(pos_lbl);
+        lv_obj_add_event_cb(btn_pos, on_attach_share_pos, LV_EVENT_CLICKED, NULL);
+        y += 55;
+    } else {
+        lv_obj_t *no_pos = lv_label_create(obj_attach_menu);
+        lv_label_set_text(no_pos, "No position set in Settings");
+        lv_obj_set_style_text_color(no_pos, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(no_pos, &meck_montserrat_14, 0);
+        lv_obj_set_pos(no_pos, 5, y);
+        y += 30;
     }
-    g_position_paste_buffer[0] = '\0';
-    if (btn_paste_position) lv_obj_add_flag(btn_paste_position, LV_OBJ_FLAG_HIDDEN);
+
+    // Cancel button
+    lv_obj_t *btn_cancel = lv_button_create(obj_attach_menu);
+    lv_obj_set_size(btn_cancel, lv_obj_get_width(obj_attach_menu) - 20, 45);
+    lv_obj_set_pos(btn_cancel, 0, y);
+    lv_obj_set_style_bg_color(btn_cancel, lv_color_make(80, 30, 30), 0);
+    lv_obj_set_style_radius(btn_cancel, 8, 0);
+    lv_obj_t *cancel_lbl = lv_label_create(btn_cancel);
+    lv_label_set_text(cancel_lbl, "Cancel");
+    lv_obj_set_style_text_color(cancel_lbl, lv_color_white(), 0);
+    meck_set_font(cancel_lbl, &meck_montserrat_14, 0);
+    lv_obj_center(cancel_lbl);
+    lv_obj_add_event_cb(btn_cancel, on_attach_cancel, LV_EVENT_CLICKED, NULL);
+
+    // Picture transfer disabled for v0.3.8 — re-enable when chunked
+    // channel message pipeline is stable.
+    // (Picture file listing and send UI removed from this menu.)
 }
 
-static void on_room_paste_position_tap(lv_event_t *e) {
-    (void)e;
-    if (g_position_paste_buffer[0] == '\0') return;
-    if (ta_room_compose) {
-        lv_textarea_add_text(ta_room_compose, g_position_paste_buffer);
-    }
-    g_position_paste_buffer[0] = '\0';
-    if (btn_room_paste_position) lv_obj_add_flag(btn_room_paste_position, LV_OBJ_FLAG_HIDDEN);
-}
 
 // ============================================================================
 // Channel share picker handlers
@@ -4325,6 +4565,9 @@ static void on_compose_size_changed(lv_event_t *e) {
     if (btn_send && ta_compose) {
         lv_obj_set_height(btn_send, lv_obj_get_height(ta_compose));
     }
+    if (btn_attach && ta_compose) {
+        lv_obj_set_height(btn_attach, lv_obj_get_height(ta_compose));
+    }
     meck_relayout_compose();
 }
 
@@ -4337,8 +4580,9 @@ static void on_compose_focused(lv_event_t *e) {
         // let meck_relayout_compose recompute obj_msg_scroll based on
         // the textarea's current height. 15 = gap between keyboard top
         // and textarea bottom.
-        if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 10, -(15 + MECK_KB_HEIGHT));
+        if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 75, -(15 + MECK_KB_HEIGHT));
         if (btn_send)   lv_obj_align(btn_send,   LV_ALIGN_BOTTOM_RIGHT, -10, -(15 + MECK_KB_HEIGHT));
+        if (btn_attach)  lv_obj_align(btn_attach,  LV_ALIGN_BOTTOM_LEFT, 10, -(15 + MECK_KB_HEIGHT));
         meck_relayout_compose();
     }
 }
@@ -4346,8 +4590,9 @@ static void on_compose_focused(lv_event_t *e) {
 static void on_compose_defocused(lv_event_t *e) {
     if (kb_compose) {
         lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
-        if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+        if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 75, -10);
         if (btn_send)   lv_obj_align(btn_send,   LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+        if (btn_attach)  lv_obj_align(btn_attach,  LV_ALIGN_BOTTOM_LEFT, 10, -10);
         meck_relayout_compose();
     }
 }
@@ -4358,8 +4603,9 @@ static void on_kb_event(lv_event_t *e) {
         on_send_clicked(NULL);
     } else if (code == LV_EVENT_CANCEL) {
         if (kb_compose) lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
-        if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+        if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 75, -10);
         if (btn_send)   lv_obj_align(btn_send,   LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+        if (btn_attach)  lv_obj_align(btn_attach,  LV_ALIGN_BOTTOM_LEFT, 10, -10);
         meck_relayout_compose();
     }
 }
@@ -5665,6 +5911,7 @@ static int find_channel_msg_heard_count(uint8_t ch_idx, uint32_t timestamp) {
 // retry modal should open for this context.
 static bool retry_is_eligible(const BubbleRetryCtx *ctx) {
     if (!ctx) return false;
+    if (!ctx->is_outgoing) return false;  // only outgoing can retry
     if (ctx->is_dm) {
         Meck *mesh = meck_get_instance();
         if (!mesh) return false;
@@ -5690,34 +5937,190 @@ static bool retry_is_eligible(const BubbleRetryCtx *ctx) {
     }
 }
 
-// LV_EVENT_LONG_PRESSED handler — attached to every sent bubble. Reads
-// the BubbleRetryCtx attached as user_data, checks eligibility against
-// current state, and opens the retry modal if eligible. If not, silently
-// returns (per the "no menu when retry isn't available" UX choice).
+// Strip emoji and multi-byte symbols from a name, keeping only ASCII and
+// 2-byte UTF-8 (Latin accented characters). Trims leading/trailing spaces.
+static void strip_emojis(const char *src, char *dest, int dest_len) {
+    int o = 0;
+    const uint8_t *p = (const uint8_t*)src;
+    while (*p && o < dest_len - 1) {
+        if (*p < 0x80) {
+            // ASCII
+            dest[o++] = (char)*p++;
+        } else if ((*p & 0xE0) == 0xC0) {
+            // 2-byte UTF-8 (Latin extended, accented chars) — keep
+            if (o + 2 < dest_len && (p[1] & 0xC0) == 0x80) {
+                dest[o++] = (char)*p++;
+                dest[o++] = (char)*p++;
+            } else {
+                p++;
+            }
+        } else if ((*p & 0xF0) == 0xE0) {
+            // 3-byte UTF-8 (emoji, CJK, symbols) — skip
+            p++;
+            if ((*p & 0xC0) == 0x80) p++;
+            if ((*p & 0xC0) == 0x80) p++;
+        } else if ((*p & 0xF8) == 0xF0) {
+            // 4-byte UTF-8 (supplementary plane emoji) — skip
+            p++;
+            if ((*p & 0xC0) == 0x80) p++;
+            if ((*p & 0xC0) == 0x80) p++;
+            if ((*p & 0xC0) == 0x80) p++;
+        } else {
+            p++;  // malformed — skip
+        }
+    }
+    dest[o] = '\0';
+    // Trim leading spaces
+    int start = 0;
+    while (dest[start] == ' ') start++;
+    if (start > 0) memmove(dest, dest + start, strlen(dest + start) + 1);
+    // Trim trailing spaces and dashes
+    int len = strlen(dest);
+    while (len > 0 && (dest[len-1] == ' ' || dest[len-1] == '-')) dest[--len] = '\0';
+}
+
+// Look up a path hash against the contact list. Returns the contact name
+// (emoji-stripped) or a hex string if no match is found.
+// hex_out is always filled with the 2-4 char hex prefix.
+static const char* lookup_hash_name(const uint8_t *hash, uint8_t hash_size,
+                                     char *name_out, int name_out_len,
+                                     char *hex_out, int hex_out_len) {
+    // Always format the hex prefix
+    if (hash_size == 1)
+        snprintf(hex_out, hex_out_len, "%02X", hash[0]);
+    else
+        snprintf(hex_out, hex_out_len, "%02X%02X", hash[0], hash[1]);
+
+    Meck *mesh = meck_get_instance();
+    if (mesh) {
+        ContactInfo *ci = mesh->lookupContactByPubKey(hash, hash_size);
+        if (ci && ci->name[0] != '\0') {
+            strip_emojis(ci->name, name_out, name_out_len);
+            if (name_out[0] != '\0') return name_out;
+        }
+    }
+    name_out[0] = '\0';
+    return NULL;  // no name found
+}
+
+// Build a human-readable path description from a BubbleRetryCtx.
+// Writes into g_path_copy_text for the "Copy Path" button.
+static void build_path_info_text(const BubbleRetryCtx *ctx) {
+    char buf[256];
+    int pos = 0;
+
+    if (ctx->is_outgoing) {
+        // Outgoing: show echo sources
+        if (ctx->heard_count == 0) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            "No repeater echoes received");
+        } else if (ctx->echo_hash_count > 0) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "Heard by:\n");
+            for (int i = 0; i < ctx->echo_hash_count && i < 8; i++) {
+                char name[48], hex[8];
+                const char *n = lookup_hash_name(
+                    &ctx->echo_hashes[i * ctx->echo_hash_size],
+                    ctx->echo_hash_size, name, sizeof(name),
+                    hex, sizeof(hex));
+                if (i > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
+                if (n)
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                    "  (%s)%s", hex, n);
+                else
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                    "  (%s)Unknown Repeater", hex);
+                if (pos >= (int)sizeof(buf) - 20) break;
+            }
+            if (ctx->heard_count > ctx->echo_hash_count) {
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                "\n  +%d more",
+                                ctx->heard_count - ctx->echo_hash_count);
+            }
+        } else {
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            "Heard %d Repeat%s",
+                            ctx->heard_count,
+                            ctx->heard_count == 1 ? "" : "s");
+        }
+    } else {
+        // Incoming: show path
+        uint8_t hops = ctx->msg_path_hash_count;
+        if (ctx->path_len == 0xFF) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "Route: direct");
+        } else if (hops == 0) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "Route: direct (0 hops)");
+        } else {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "Route (%d hop%s):\n",
+                            hops, hops == 1 ? "" : "s");
+            for (int i = 0; i < hops && i < 8; i++) {
+                char name[48], hex[8];
+                const char *n = lookup_hash_name(
+                    &ctx->msg_path_hashes[i * ctx->msg_path_hash_size],
+                    ctx->msg_path_hash_size, name, sizeof(name),
+                    hex, sizeof(hex));
+                if (i > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, " -> ");
+                if (n)
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                    "(%s)%s", hex, n);
+                else
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                    "(%s)Unknown Repeater", hex);
+                if (pos >= (int)sizeof(buf) - 20) break;
+            }
+        }
+    }
+    buf[sizeof(buf) - 1] = '\0';
+    strncpy(g_path_copy_text, buf, sizeof(g_path_copy_text) - 1);
+    g_path_copy_text[sizeof(g_path_copy_text) - 1] = '\0';
+}
+
+static void on_path_modal_close(lv_event_t *e) {
+    if (obj_path_panel) lv_obj_add_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_path_modal_copy(lv_event_t *e) {
+    if (ta_compose && g_path_copy_text[0] != '\0') {
+        lv_textarea_set_text(ta_compose, g_path_copy_text);
+    }
+    if (obj_path_panel) lv_obj_add_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// LV_EVENT_LONG_PRESSED handler — attached to every bubble (sent and
+// received). For sent bubbles that are retry-eligible, opens the retry
+// modal. For all bubbles, shows path/echo info with a Copy button.
 static void on_bubble_long_pressed(lv_event_t *e) {
     lv_obj_t *bubble = (lv_obj_t*)lv_event_get_target(e);
     if (!bubble) return;
     BubbleRetryCtx *ctx = (BubbleRetryCtx*)lv_obj_get_user_data(bubble);
     if (!ctx) return;
-    if (!retry_is_eligible(ctx)) return;
 
-    // Snapshot the body + target into the modal-pending statics. The
-    // bubble (and its ctx) may be freed by a rebuild between now and
-    // the modal's Send tap.
-    g_retry_pending_is_dm = ctx->is_dm;
-    g_retry_pending_idx   = ctx->target_idx;
-    strncpy(g_retry_pending_body, ctx->body, sizeof(g_retry_pending_body) - 1);
-    g_retry_pending_body[sizeof(g_retry_pending_body) - 1] = '\0';
-
-    if (lbl_retry_prompt) {
-        char preview[80];
-        snprintf(preview, sizeof(preview), "Retry sending:\n\"%s\"",
-                 g_retry_pending_body);
-        lv_label_set_text(lbl_retry_prompt, preview);
+    // For outgoing failed messages, show retry modal (existing behaviour)
+    if (ctx->is_outgoing && retry_is_eligible(ctx)) {
+        g_retry_pending_is_dm = ctx->is_dm;
+        g_retry_pending_idx   = ctx->target_idx;
+        strncpy(g_retry_pending_body, ctx->body, sizeof(g_retry_pending_body) - 1);
+        g_retry_pending_body[sizeof(g_retry_pending_body) - 1] = '\0';
+        if (lbl_retry_prompt) {
+            char preview[80];
+            snprintf(preview, sizeof(preview), "Retry sending:\n\"%s\"",
+                     g_retry_pending_body);
+            lv_label_set_text(lbl_retry_prompt, preview);
+        }
+        if (obj_retry_panel) {
+            lv_obj_clear_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(obj_retry_panel);
+        }
+        return;
     }
-    if (obj_retry_panel) {
-        lv_obj_clear_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(obj_retry_panel);
+
+    // For all other cases, show path info popup
+    build_path_info_text(ctx);
+    if (lbl_path_info) {
+        lv_label_set_text(lbl_path_info, g_path_copy_text);
+    }
+    if (obj_path_panel) {
+        lv_obj_clear_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(obj_path_panel);
     }
 }
 
@@ -5805,6 +6208,74 @@ static void create_retry_modal() {
     meck_set_font(lbl_cancel, &meck_montserrat_18, 0);
     lv_obj_center(lbl_cancel);
     lv_obj_add_event_cb(btn_cancel, on_retry_modal_cancel, LV_EVENT_CLICKED, NULL);
+}
+
+// Path info modal — shows repeater chain for incoming messages or echo
+// sources for outgoing messages. "Copy Path" pastes the text into compose.
+static void create_path_modal() {
+    if (!scr_messages) return;
+
+    obj_path_panel = lv_obj_create(scr_messages);
+    lv_obj_set_size(obj_path_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_path_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_path_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_path_panel, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(obj_path_panel, 0, 0);
+    lv_obj_add_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_path_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_path_panel, LV_SCROLLBAR_MODE_OFF);
+
+    int card_w = SCREEN_WIDTH - 80;
+    int card_h = 360;
+    lv_obj_t *card = lv_obj_create(obj_path_panel);
+    lv_obj_set_size(card, card_w, card_h);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_palette_main(LV_PALETTE_TEAL), 0);
+    lv_obj_set_style_pad_all(card, 16, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(card);
+    lv_label_set_text(title, "Message Path");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_TEAL), 0);
+    meck_set_font(title, &meck_montserrat_22, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lbl_path_info = lv_label_create(card);
+    lv_label_set_text(lbl_path_info, "");
+    lv_obj_set_style_text_color(lbl_path_info, lv_color_white(), 0);
+    meck_set_font(lbl_path_info, &meck_montserrat_16, 0);
+    lv_label_set_long_mode(lbl_path_info, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_path_info, card_w - 32);
+    lv_obj_align(lbl_path_info, LV_ALIGN_TOP_LEFT, 0, 35);
+
+    // Copy Path button
+    lv_obj_t *btn_copy = lv_button_create(card);
+    lv_obj_set_size(btn_copy, card_w - 32, 55);
+    lv_obj_align(btn_copy, LV_ALIGN_BOTTOM_MID, 0, -65);
+    lv_obj_set_style_bg_color(btn_copy, lv_palette_main(LV_PALETTE_TEAL), 0);
+    lv_obj_set_style_radius(btn_copy, 8, 0);
+    lv_obj_t *lbl_copy = lv_label_create(btn_copy);
+    lv_label_set_text(lbl_copy, "Copy Path");
+    lv_obj_set_style_text_color(lbl_copy, lv_color_white(), 0);
+    meck_set_font(lbl_copy, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_copy);
+    lv_obj_add_event_cb(btn_copy, on_path_modal_copy, LV_EVENT_CLICKED, NULL);
+
+    // Close button
+    lv_obj_t *btn_close = lv_button_create(card);
+    lv_obj_set_size(btn_close, card_w - 32, 55);
+    lv_obj_align(btn_close, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(btn_close, lv_color_make(60, 60, 70), 0);
+    lv_obj_set_style_radius(btn_close, 8, 0);
+    lv_obj_t *lbl_close = lv_label_create(btn_close);
+    lv_label_set_text(lbl_close, "Close");
+    lv_obj_set_style_text_color(lbl_close, lv_color_white(), 0);
+    meck_set_font(lbl_close, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_close);
+    lv_obj_add_event_cb(btn_close, on_path_modal_close, LV_EVENT_CLICKED, NULL);
 }
 
 // Slider event handler. LV_EVENT_VALUE_CHANGED fires continuously as the
@@ -7190,22 +7661,6 @@ static void create_settings_position_screen() {
         &lbl_pos_mode_value, on_pos_mode_tap, y);
     y += 75;
 
-    // Copy Position button
-    lv_obj_t *copy_btn = lv_button_create(scr_settings_position);
-    lv_obj_set_size(copy_btn, SCREEN_WIDTH - 40, 55);
-    lv_obj_set_pos(copy_btn, 20, y);
-    lv_obj_set_style_bg_color(copy_btn, lv_color_make(20, 40, 60), 0);
-    lv_obj_set_style_radius(copy_btn, 10, 0);
-    lv_obj_set_style_border_width(copy_btn, 1, 0);
-    lv_obj_set_style_border_color(copy_btn, lv_palette_main(LV_PALETTE_CYAN), 0);
-    lv_obj_add_event_cb(copy_btn, on_pos_copy_tap, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *copy_lbl = lv_label_create(copy_btn);
-    lv_label_set_text(copy_lbl, "Copy Position");
-    lv_obj_set_style_text_color(copy_lbl, lv_palette_main(LV_PALETTE_CYAN), 0);
-    meck_set_font(copy_lbl, &meck_montserrat_18, 0);
-    lv_obj_center(copy_lbl);
-
     // ---- Numeric edit overlay (for lat/lon entry) ----
     obj_pos_edit_panel = lv_obj_create(scr_settings_position);
     lv_obj_set_size(obj_pos_edit_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -7298,7 +7753,7 @@ static void voice_update_ui(void) {
         if (recording)
             lv_label_set_text(lbl_voice_record_btn, "Stop");
         else if (has_rec)
-            lv_label_set_text(lbl_voice_record_btn, "Re-record");
+            lv_label_set_text(lbl_voice_record_btn, "New");
         else
             lv_label_set_text(lbl_voice_record_btn, "Record");
     }
@@ -7318,7 +7773,7 @@ static void voice_update_ui(void) {
             lv_obj_add_flag(btn_voice_play, LV_OBJ_FLAG_HIDDEN);
     }
     if (btn_voice_send) {
-        if (has_rec && !recording && voice->isCodec2Valid())
+        if (has_rec && !recording)
             lv_obj_clear_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
         else
             lv_obj_add_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
@@ -7369,7 +7824,7 @@ static void on_voice_play_tap(lv_event_t *e) {
     }
     printf("Voice: playing %s\n", g_voice_last_wav_path);
     // Boost volume for voice playback (default 50% is too quiet)
-    meck_audio_set_volume_pct(85);
+    meck_audio_set_volume_pct(70);
     meck_audio_play_file(g_voice_last_wav_path, 0);
     if (lbl_voice_status) {
         lv_label_set_text(lbl_voice_status, "Playing...");
@@ -7380,6 +7835,14 @@ static void on_voice_play_tap(lv_event_t *e) {
 
 static void on_voice_discard_tap(lv_event_t *e) {
     (void)e;
+    // Delete the WAV file from SD if it exists
+    if (g_voice_last_wav_path[0] != '\0') {
+        if (remove(g_voice_last_wav_path) == 0) {
+            printf("Voice: deleted %s\n", g_voice_last_wav_path);
+        } else {
+            printf("Voice: failed to delete %s\n", g_voice_last_wav_path);
+        }
+    }
     g_voice_has_recording = false;
     g_voice_last_wav_path[0] = '\0';
     if (lbl_voice_status) {
@@ -7388,6 +7851,7 @@ static void on_voice_discard_tap(lv_event_t *e) {
             lv_palette_main(LV_PALETTE_GREY), 0);
     }
     voice_update_ui();
+    voice_prev_refresh();  // refresh the list to reflect deletion
     printf("Voice: recording discarded\n");
 }
 
@@ -7481,7 +7945,7 @@ static void voice_prev_refresh(void) {
         }
 
         lv_obj_t *row = lv_button_create(obj_voice_prev_scroll);
-        lv_obj_set_size(row, lv_obj_get_width(obj_voice_prev_scroll) - 10, 40);
+        lv_obj_set_size(row, SCREEN_WIDTH - 70, 40);
         lv_obj_set_pos(row, 5, y);
         lv_obj_set_style_bg_color(row, lv_color_make(20, 20, 30), 0);
         lv_obj_set_style_radius(row, 6, 0);
@@ -7521,12 +7985,13 @@ static void on_voice_contact_select(lv_event_t *e) {
 
     on_voice_contact_cancel(NULL);
 
-    // Track send completion: first packet at 5s, subsequent at 3s intervals.
-    // Last packet delay = 5000 + (numPackets-1) * 3000.
+    // Track send completion: ACK wait (up to 15s) + first packet at 1.5s
+    // + subsequent packets 3s apart. Use a generous estimate.
     MeckVoice* voice = meck_get_voice_instance();
     int numPkts = voice ? voice->getPacketCount() : 1;
-    uint32_t lastPktDelay = 5000 + (uint32_t)(numPkts - 1) * 3000;
-    g_voice_send_complete_ms = (uint32_t)(esp_timer_get_time() / 1000ULL) + lastPktDelay + 2000;
+    // Worst case: 15s ACK wait + 1.5s + (numPkts-1)*3s + 2s margin
+    uint32_t maxDelay = 15000 + 1500 + (uint32_t)(numPkts - 1) * 3000 + 2000;
+    g_voice_send_complete_ms = (uint32_t)(esp_timer_get_time() / 1000ULL) + maxDelay;
     g_voice_send_in_flight = true;
 
     if (lbl_voice_status) {
@@ -7544,12 +8009,30 @@ static void on_voice_send_tap(lv_event_t *e) {
     if (!mesh || !scr_voice) return;
 
     MeckVoice* voice = meck_get_voice_instance();
-    if (!voice || !voice->isCodec2Valid()) {
+    if (!voice) return;
+
+    // If Codec2 isn't valid but we have a loaded WAV (previous recording),
+    // load it into the record buffer and encode now.
+    if (!voice->isCodec2Valid() && g_voice_has_recording
+        && g_voice_last_wav_path[0] != '\0') {
         if (lbl_voice_status) {
-            lv_label_set_text(lbl_voice_status, "No encoded audio to send");
+            lv_label_set_text(lbl_voice_status, "Encoding...");
             lv_obj_set_style_text_color(lbl_voice_status,
-                lv_palette_main(LV_PALETTE_RED), 0);
+                lv_palette_main(LV_PALETTE_ORANGE), 0);
         }
+        printf("Voice: loading WAV for send: %s\n", g_voice_last_wav_path);
+        if (voice->loadFromWav(g_voice_last_wav_path)) {
+            voice->encodeCodec2();
+        }
+    }
+
+    if (!voice->isCodec2Valid()) {
+        if (lbl_voice_status) {
+            lv_label_set_text(lbl_voice_status, "Record or select a message first");
+            lv_obj_set_style_text_color(lbl_voice_status,
+                lv_palette_main(LV_PALETTE_ORANGE), 0);
+        }
+        printf("Voice: send blocked, Codec2 not valid\n");
         return;
     }
 
@@ -7787,7 +8270,7 @@ static void on_voice_inbox_row_tap(lv_event_t *e) {
 
     // Play the message
     printf("Voice inbox: playing [%d] %s from %s\n", idx, path, entry.senderName);
-    meck_audio_set_volume_pct(85);
+    meck_audio_set_volume_pct(70);
     meck_audio_play_file(path, 0);
 }
 
@@ -7991,6 +8474,11 @@ static void create_voice_landing_screen(void) {
     lv_obj_align(rec_lbl, LV_ALIGN_CENTER, 0, 25);
 
     lv_obj_add_event_cb(btn_voice_record_nav, [](lv_event_t *e) {
+        // Reset stale state if MeckVoice has no recording
+        MeckVoice* v = meck_get_voice_instance();
+        if (v && v->getRecSamples() == 0 && g_voice_last_wav_path[0] == '\0') {
+            g_voice_has_recording = false;
+        }
         voice_update_ui();
         voice_prev_refresh();
         if (scr_voice) lv_screen_load(scr_voice);
@@ -8109,17 +8597,17 @@ static void create_voice_record_screen(void) {
                         LV_EVENT_CLICKED, NULL);
     lv_obj_add_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
 
-    // Previous recordings header
+    // Previous recordings header — positioned below the action buttons
     lv_obj_t *prev_hdr = lv_label_create(scr_voice);
     lv_label_set_text(prev_hdr, "Previous recordings:");
     lv_obj_set_style_text_color(prev_hdr, lv_palette_main(LV_PALETTE_GREY), 0);
     meck_set_font(prev_hdr, &meck_montserrat_14, 0);
-    lv_obj_align(prev_hdr, LV_ALIGN_LEFT_MID, 20, 110);
+    lv_obj_set_pos(prev_hdr, 20, 810);
 
-    // Scrollable list of previous recordings
+    // Scrollable list of previous recordings (below header to bottom)
     obj_voice_prev_scroll = lv_obj_create(scr_voice);
-    lv_obj_set_size(obj_voice_prev_scroll, SCREEN_WIDTH - 40, SCREEN_HEIGHT - 420);
-    lv_obj_align(obj_voice_prev_scroll, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_pos(obj_voice_prev_scroll, 20, 840);
+    lv_obj_set_size(obj_voice_prev_scroll, SCREEN_WIDTH - 40, SCREEN_HEIGHT - 860);
     lv_obj_set_style_bg_opa(obj_voice_prev_scroll, 0, 0);
     lv_obj_set_style_border_width(obj_voice_prev_scroll, 0, 0);
     lv_obj_set_style_pad_all(obj_voice_prev_scroll, 0, 0);
@@ -8424,12 +8912,28 @@ static void create_messages_screen() {
     // dumped all messages into one big label, which couldn't do
     // bubbles/alignment/sender colouring.
 
+    // Attachment + button (left of compose area, long-press to open menu)
+    // Mirrors btn_send layout: same height, same y offset, height synced
+    // to textarea in on_compose_size_changed.
+    btn_attach = lv_button_create(scr_messages);
+    lv_obj_set_size(btn_attach, 60, 50);
+    lv_obj_align(btn_attach, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_style_bg_color(btn_attach, lv_color_make(50, 50, 60), 0);
+    lv_obj_set_style_radius(btn_attach, 8, 0);
+    lv_obj_t *attach_lbl = lv_label_create(btn_attach);
+    lv_label_set_text(attach_lbl, "+");
+    lv_obj_set_style_text_color(attach_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(attach_lbl, &meck_montserrat_28, 0);
+    lv_obj_center(attach_lbl);
+    lv_obj_add_event_cb(btn_attach, on_attach_long_press,
+                        LV_EVENT_LONG_PRESSED, NULL);
+
     ta_compose = lv_textarea_create(scr_messages);
-    lv_obj_set_width(ta_compose, SCREEN_WIDTH - 100);
+    lv_obj_set_width(ta_compose, SCREEN_WIDTH - 160);
     lv_obj_set_height(ta_compose, LV_SIZE_CONTENT);
     lv_obj_set_style_min_height(ta_compose, 50, 0);
     lv_obj_set_style_max_height(ta_compose, 150, 0);
-    lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 75, -10);
     lv_textarea_set_placeholder_text(ta_compose, "Type message...");
     // Multi-line so the keyboard's LV_SYMBOL_NEW_LINE (Enter) key inserts
     // a '\n' instead of being silently rejected. Sending is via the
@@ -8474,21 +8978,6 @@ static void create_messages_screen() {
     meck_set_font(send_lbl, &meck_montserrat_22, 0);
     lv_obj_center(send_lbl);
     lv_obj_add_event_cb(btn_send, on_send_clicked, LV_EVENT_CLICKED, NULL);
-
-    // Paste Position — appears when g_position_paste_buffer is non-empty.
-    // Sits left of the send button at the bottom.
-    btn_paste_position = lv_button_create(scr_messages);
-    lv_obj_set_size(btn_paste_position, 140, 40);
-    lv_obj_align(btn_paste_position, LV_ALIGN_BOTTOM_LEFT, 90, -15);
-    lv_obj_set_style_bg_color(btn_paste_position, lv_palette_main(LV_PALETTE_ORANGE), 0);
-    lv_obj_set_style_radius(btn_paste_position, 8, 0);
-    lv_obj_t *paste_lbl = lv_label_create(btn_paste_position);
-    lv_label_set_text(paste_lbl, "Paste Pos");
-    lv_obj_set_style_text_color(paste_lbl, lv_color_black(), 0);
-    meck_set_font(paste_lbl, &meck_montserrat_14, 0);
-    lv_obj_center(paste_lbl);
-    lv_obj_add_event_cb(btn_paste_position, on_paste_position_tap, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_flag(btn_paste_position, LV_OBJ_FLAG_HIDDEN);
 
     kb_compose = lv_keyboard_create(scr_messages);
     meck_style_keyboard(kb_compose);
@@ -10211,7 +10700,10 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // Voice over LoRa: drain pending VE3 envelopes and voice data packets.
     // When an incoming session is complete, auto-play via MeckVoice.
     {
-        meck_drain_pending_voice();
+        // Voice and picture transfer disabled for v0.3.8 — re-enable when
+        // the send/receive pipeline is stable.
+        // meck_drain_pending_voice();
+        // meck_drain_pending_pictures();
 
         MeckVoice* voice = meck_get_voice_instance();
         if (voice && voice->isIncomingComplete()) {
@@ -10304,17 +10796,35 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             }
         }
 
-        // Detect voice send completion by timeout
+        // Detect voice send status changes
         if (g_voice_send_in_flight && lbl_voice_status) {
-            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
-            if (now_ms >= g_voice_send_complete_ms) {
-                g_voice_send_in_flight = false;
-                const char *cur = lv_label_get_text(lbl_voice_status);
-                if (cur && strncmp(cur, "Sending", 7) == 0) {
-                    lv_label_set_text(lbl_voice_status, "Sent");
-                    lv_obj_set_style_text_color(lbl_voice_status,
-                        lv_palette_main(LV_PALETTE_GREEN), 0);
+            int vs = meck_voice_send_get_status();
+            if (vs == VOICE_SEND_PACKETS_QUEUED) {
+                // Packets are queued via sendDirect. Estimate completion
+                // from packet count.
+                uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+                if (now_ms >= g_voice_send_complete_ms) {
+                    g_voice_send_in_flight = false;
+                    const char *cur = lv_label_get_text(lbl_voice_status);
+                    if (cur && strncmp(cur, "Sending", 7) == 0) {
+                        lv_label_set_text(lbl_voice_status, "Sent");
+                        lv_obj_set_style_text_color(lbl_voice_status,
+                            lv_palette_main(LV_PALETTE_GREEN), 0);
+                        printf("Voice: send complete (all packets transmitted)\n");
+                    }
                 }
+            } else if (vs == VOICE_SEND_ACK_TIMEOUT) {
+                g_voice_send_in_flight = false;
+                lv_label_set_text(lbl_voice_status, "Failed: no path");
+                lv_obj_set_style_text_color(lbl_voice_status,
+                    lv_palette_main(LV_PALETTE_RED), 0);
+                printf("Voice: UI updated - ACK timeout, no path\n");
+            } else if (vs == VOICE_SEND_NO_PATH) {
+                g_voice_send_in_flight = false;
+                lv_label_set_text(lbl_voice_status, "Failed: path unknown");
+                lv_obj_set_style_text_color(lbl_voice_status,
+                    lv_palette_main(LV_PALETTE_RED), 0);
+                printf("Voice: UI updated - ACK received but no path\n");
             }
         }
     }
@@ -10619,24 +11129,6 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                     }
                 }
             }
-        }
-    }
-
-    // ---- Paste Position button visibility ----
-    // Show on compose screens when the buffer is non-empty, hide when empty.
-    {
-        bool has_paste = (g_position_paste_buffer[0] != '\0');
-        if (btn_paste_position) {
-            if (has_paste && scr_messages && lv_screen_active() == scr_messages)
-                lv_obj_clear_flag(btn_paste_position, LV_OBJ_FLAG_HIDDEN);
-            else
-                lv_obj_add_flag(btn_paste_position, LV_OBJ_FLAG_HIDDEN);
-        }
-        if (btn_room_paste_position) {
-            if (has_paste && scr_room_messages && lv_screen_active() == scr_room_messages)
-                lv_obj_clear_flag(btn_room_paste_position, LV_OBJ_FLAG_HIDDEN);
-            else
-                lv_obj_add_flag(btn_room_paste_position, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
@@ -14299,20 +14791,6 @@ static void create_room_messages_screen() {
     lv_obj_center(send_lbl);
     lv_obj_add_event_cb(btn_room_send, on_room_send_clicked, LV_EVENT_CLICKED, NULL);
 
-    // Paste Position for room compose
-    btn_room_paste_position = lv_button_create(scr_room_messages);
-    lv_obj_set_size(btn_room_paste_position, 140, 40);
-    lv_obj_align(btn_room_paste_position, LV_ALIGN_BOTTOM_LEFT, 90, -15);
-    lv_obj_set_style_bg_color(btn_room_paste_position, lv_palette_main(LV_PALETTE_ORANGE), 0);
-    lv_obj_set_style_radius(btn_room_paste_position, 8, 0);
-    lv_obj_t *room_paste_lbl = lv_label_create(btn_room_paste_position);
-    lv_label_set_text(room_paste_lbl, "Paste Pos");
-    lv_obj_set_style_text_color(room_paste_lbl, lv_color_black(), 0);
-    meck_set_font(room_paste_lbl, &meck_montserrat_14, 0);
-    lv_obj_center(room_paste_lbl);
-    lv_obj_add_event_cb(btn_room_paste_position, on_room_paste_position_tap, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_flag(btn_room_paste_position, LV_OBJ_FLAG_HIDDEN);
-
     kb_room_compose = lv_keyboard_create(scr_room_messages);
     meck_style_keyboard(kb_room_compose);
     lv_keyboard_set_textarea(kb_room_compose, ta_room_compose);
@@ -14373,6 +14851,7 @@ extern "C" void meck_ui_init() {
     create_channel_picker_screen();
     create_messages_screen();
     create_retry_modal();
+    create_path_modal();
     create_dm_inbox_screen();
     create_contacts_screen();
     create_contact_detail_screen();

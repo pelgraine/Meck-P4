@@ -420,6 +420,62 @@ public:
     uint32_t getC2Bytes() const { return _c2Bytes; }
     const uint8_t *getC2Data() const { return _c2Data; }
 
+    // ---- WAV load from SD (for re-encoding previous recordings) ----
+
+    bool loadFromWav(const char *path) {
+        if (!ensureRecBuffer()) return false;
+
+        FILE *f = fopen(path, "rb");
+        if (!f) {
+            printf("MeckVoice: loadFromWav: can't open %s\n", path);
+            return false;
+        }
+
+        // Read and validate WAV header
+        uint8_t hdr[44];
+        if (fread(hdr, 1, 44, f) != 44) {
+            printf("MeckVoice: loadFromWav: header too short\n");
+            fclose(f);
+            return false;
+        }
+        if (memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0) {
+            printf("MeckVoice: loadFromWav: not a WAV file\n");
+            fclose(f);
+            return false;
+        }
+
+        uint16_t channels = hdr[22] | (hdr[23] << 8);
+        uint32_t sampleRate = hdr[24] | (hdr[25] << 8) | (hdr[26] << 16) | (hdr[27] << 24);
+        uint16_t bitsPerSample = hdr[34] | (hdr[35] << 8);
+        uint32_t dataSize = hdr[40] | (hdr[41] << 8) | (hdr[42] << 16) | (hdr[43] << 24);
+
+        printf("MeckVoice: loadFromWav: %luHz %dch %dbit %lu bytes\n",
+               (unsigned long)sampleRate, channels, bitsPerSample,
+               (unsigned long)dataSize);
+
+        if (bitsPerSample != 16) {
+            printf("MeckVoice: loadFromWav: only 16-bit supported\n");
+            fclose(f);
+            return false;
+        }
+
+        // Read samples, de-interleave stereo to mono (keep L channel)
+        _recSamples = 0;
+        uint32_t totalFrames = dataSize / (channels * sizeof(int16_t));
+        int16_t frame[2];  // max 2 channels
+
+        for (uint32_t i = 0; i < totalFrames && _recSamples < VOICE_BUF_SAMPLES; i++) {
+            if (fread(frame, sizeof(int16_t), channels, f) != channels) break;
+            _recBuffer[_recSamples++] = frame[0];  // L channel only
+        }
+
+        fclose(f);
+        printf("MeckVoice: loadFromWav: loaded %lu mono samples (%.1fs)\n",
+               (unsigned long)_recSamples,
+               _recSamples / (float)VOICE_SAMPLE_RATE);
+        return _recSamples > 0;
+    }
+
     // ---- WAV save to SD ----
 
     bool saveToWav(const char *filename) {

@@ -334,6 +334,20 @@ struct P4ChannelMessage {
     // rather than appending a duplicate. In-memory only — not part of the
     // on-disk record, recomputed at load time from file position.
     uint32_t file_offset;
+
+    // ---- Path view data (in-memory only, not persisted) ----
+    // Incoming messages: repeater hashes from the packet's path field.
+    // Up to 8 hops × 2 bytes each = 16 bytes max.
+    uint8_t msg_path_hash_size;       // 1 or 2 bytes per hop (0 = not captured)
+    uint8_t msg_path_hash_count;      // number of hops stored
+    uint8_t msg_path_hashes[16];      // repeater pub_key prefix hashes
+
+    // Outgoing messages: first-hop hash from each distinct echo packet.
+    // Each echo that bounces back carries a path whose first entry is the
+    // repeater nearest to us that forwarded our packet. Up to 8 captured.
+    uint8_t echo_hash_size;           // 1 or 2 (matches getPathHashSize)
+    uint8_t echo_hash_count;          // distinct echo sources captured (<=8)
+    uint8_t echo_hashes[16];          // first-hop hash from each echo
 };
 
 // ---- On-disk format for channel message persistence ----
@@ -665,6 +679,13 @@ public:
             _recent_outgoing_ch[_recent_outgoing_idx] = channel_idx;
             _recent_outgoing_idx = (_recent_outgoing_idx + 1) % RECENT_OUTGOING_RING;
 
+            // Suppress local echo for picture chunk messages [PD:...].
+            // The sender gets a single [PIC:path] injected when all chunks
+            // are done, not 8 lines of base64.
+            if (strncmp(text, "[PD:", 4) == 0) {
+                return true;
+            }
+
             // Local echo — add to message history so it shows on screen
             char echo[P4_MSG_TEXT_LEN];
             snprintf(echo, sizeof(echo), "%s: %s", _prefs->node_name, text);
@@ -683,6 +704,12 @@ public:
                 m.heard_count = 0;  // no echoes yet — increments as repeaters re-flood
                 m.valid = true;
                 m.file_offset = 0;  // not yet persisted — queue drain sets this after append
+                // Path view: outgoing messages start clean; echo handler
+                // populates echo_hashes as repeaters re-flood our packet.
+                m.msg_path_hash_size = 0;
+                m.msg_path_hash_count = 0;
+                m.echo_hash_size = 0;
+                m.echo_hash_count = 0;
                 strncpy(m.text, echo, P4_MSG_TEXT_LEN - 1);
                 m.text[P4_MSG_TEXT_LEN - 1] = '\0';
                 if (_msg_count_ch[channel_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[channel_idx]++;
@@ -908,6 +935,30 @@ public:
             _pending_voice_pkt[_pending_voice_pkt_tail].valid = false;
             _pending_voice_pkt_tail = (_pending_voice_pkt_tail + 1) % P4_PENDING_VOICE_PKT_RING;
             _pending_voice_pkt_count--;
+            ok = true;
+        }
+        xSemaphoreGive(_mutex);
+        return ok;
+    }
+
+    // ---- Picture chunk pending ring ----
+    static constexpr int P4_PENDING_PIC_RING = 8;
+
+    struct PendingPicChunk {
+        bool valid;
+        uint8_t channel_idx;
+        char text[200];   // raw [PD:...] message
+        char sender[32];
+    };
+
+    bool drainPendingPicChunk(PendingPicChunk& out) {
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        bool ok = false;
+        if (_pending_pic_count > 0) {
+            out = _pending_pic_chunk[_pending_pic_tail];
+            _pending_pic_chunk[_pending_pic_tail].valid = false;
+            _pending_pic_tail = (_pending_pic_tail + 1) % P4_PENDING_PIC_RING;
+            _pending_pic_count--;
             ok = true;
         }
         xSemaphoreGive(_mutex);
@@ -1952,6 +2003,34 @@ public:
         memset((void*)_msg_unread_ch, 0, sizeof(_msg_unread_ch));
     }
 
+    // Inject a synthetic message into a channel ring (e.g. completed picture).
+    // Called from the LVGL/drain task, not from the radio callback.
+    void injectChannelMessage(uint8_t ch_idx, const char *text) {
+        if (ch_idx >= MAX_GROUP_CHANNELS) return;
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        P4ChannelMessage* ring = _msgs_ch[ch_idx];
+        if (ring) {
+            _msg_newest_ch[ch_idx] = (_msg_newest_ch[ch_idx] + 1) % P4_MSG_PER_CHANNEL;
+            P4ChannelMessage& m = ring[_msg_newest_ch[ch_idx]];
+            m.timestamp = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+            m.channel_idx = ch_idx;
+            m.path_len = 0;
+            m.heard_count = 0;
+            m.valid = true;
+            m.file_offset = 0;
+            m.msg_path_hash_size = 0;
+            m.msg_path_hash_count = 0;
+            m.echo_hash_size = 0;
+            m.echo_hash_count = 0;
+            strncpy(m.text, text, P4_MSG_TEXT_LEN - 1);
+            m.text[P4_MSG_TEXT_LEN - 1] = '\0';
+            if (_msg_count_ch[ch_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[ch_idx]++;
+            _msg_unread_ch[ch_idx]++;
+            _msg_dirty = true;
+        }
+        xSemaphoreGive(_mutex);
+    }
+
     int getMessages(P4ChannelMessage* dest, int max_count, uint8_t channel_idx) {
         if (channel_idx >= MAX_GROUP_CHANNELS) return 0;
         P4ChannelMessage* ring = _msgs_ch[channel_idx];
@@ -2334,6 +2413,17 @@ protected:
                         if (existing.heard_count < 0xFF) {
                             existing.heard_count++;
                         }
+                        // Capture the first-hop hash from this echo's path.
+                        // This identifies the repeater nearest to us that
+                        // forwarded our packet. Store up to 8 distinct sources.
+                        uint8_t ehsz = pkt->getPathHashSize();
+                        uint8_t ehcnt = pkt->getPathHashCount();
+                        if (ehcnt > 0 && existing.echo_hash_count < 8) {
+                            existing.echo_hash_size = ehsz;
+                            memcpy(&existing.echo_hashes[existing.echo_hash_count * ehsz],
+                                   pkt->path, ehsz);
+                            existing.echo_hash_count++;
+                        }
                         printf("Meck:   heard_count now %u (file_offset=%u)\n",
                                (unsigned)existing.heard_count,
                                (unsigned)existing.file_offset);
@@ -2361,6 +2451,28 @@ protected:
 
         printf("Meck: channel[%d] msg: %s\n", ch_idx, text);
 
+        // Intercept picture chunk messages [PD:...] — stash for assembly
+        // but do NOT store in the channel message ring. The drain function
+        // injects a single [PIC:path] message when all chunks arrive.
+        if (text && strncmp(text, "[PD:", 4) == 0) {
+            // Stash raw chunk in pending ring for LVGL task to process
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            PendingPicChunk& pc = _pending_pic_chunk[_pending_pic_head];
+            pc.valid = true;
+            pc.channel_idx = ch_idx;
+            strncpy(pc.text, text, sizeof(pc.text) - 1);
+            pc.text[sizeof(pc.text) - 1] = '\0';
+            pc.sender[0] = '\0';
+            _pending_pic_head = (_pending_pic_head + 1) % P4_PENDING_PIC_RING;
+            if (_pending_pic_count < P4_PENDING_PIC_RING)
+                _pending_pic_count++;
+            else
+                _pending_pic_tail = (_pending_pic_tail + 1) % P4_PENDING_PIC_RING;
+            xSemaphoreGive(_mutex);
+            printf("Meck: channel[%d] pic chunk stashed (suppressed from ring)\n", ch_idx);
+            return;  // do NOT store in message ring
+        }
+
         xSemaphoreTake(_mutex, portMAX_DELAY);
         P4ChannelMessage* ring = (ch_idx < MAX_GROUP_CHANNELS) ? _msgs_ch[ch_idx] : nullptr;
         P4ChannelMessage saved_copy;
@@ -2374,6 +2486,16 @@ protected:
             m.heard_count = 0;  // unused for incoming, but keep deterministic
             m.valid = true;
             m.file_offset = 0;  // queue drain sets this after initial append
+            // Capture path hashes from packet for path view
+            m.msg_path_hash_size = pkt->getPathHashSize();
+            m.msg_path_hash_count = pkt->getPathHashCount();
+            if (m.msg_path_hash_count > 8) m.msg_path_hash_count = 8;
+            uint8_t pb = m.msg_path_hash_count * m.msg_path_hash_size;
+            if (pb > 16) pb = 16;
+            memcpy(m.msg_path_hashes, pkt->path, pb);
+            // Clear echo fields (incoming messages don't have echoes)
+            m.echo_hash_size = 0;
+            m.echo_hash_count = 0;
             strncpy(m.text, text, P4_MSG_TEXT_LEN - 1);
             m.text[P4_MSG_TEXT_LEN - 1] = '\0';
             if (_msg_count_ch[ch_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[ch_idx]++;
@@ -3922,6 +4044,12 @@ private:
     int  _pending_voice_pkt_head  = 0;
     int  _pending_voice_pkt_tail  = 0;
     int  _pending_voice_pkt_count = 0;
+
+    // ---- Pending picture chunk ring ----
+    PendingPicChunk _pending_pic_chunk[P4_PENDING_PIC_RING] = {};
+    int  _pending_pic_head  = 0;
+    int  _pending_pic_tail  = 0;
+    int  _pending_pic_count = 0;
 
     // ---- Expected-ACK tracking table for outgoing DMs ----
     // Direct port of upstream MyMesh's circular ack table. Each entry

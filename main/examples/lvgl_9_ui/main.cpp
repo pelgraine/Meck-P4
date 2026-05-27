@@ -5620,7 +5620,7 @@ extern "C" uint16_t meck_battery_remaining_mah();
 extern "C" uint8_t  meck_battery_pct_from_chip();
 
 #if (configUSE_TRACE_FACILITY == 1) && (configGENERATE_RUN_TIME_STATS == 1) && (configUSE_STATS_FORMATTING_FUNCTIONS == 1)
-static void meck_stats_task(void *arg)
+static void __attribute__((unused)) meck_stats_task(void *arg)
 {
     // First dump is at +5s so initial boot-time bursts (LVGL setup, SD mount,
     // NVS load) don't dominate the percentages. After that, every 10 seconds.
@@ -5679,7 +5679,7 @@ static void meck_stats_task(void *arg)
     }
 }
 #else
-static void meck_stats_task(void *arg)
+static void __attribute__((unused)) meck_stats_task(void *arg)
 {
     printf("meck_stats_task: FreeRTOS trace/runtime-stats configs disabled, "
            "stats unavailable. Set CONFIG_FREERTOS_USE_TRACE_FACILITY=y, "
