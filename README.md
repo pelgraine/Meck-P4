@@ -31,6 +31,9 @@ with a `meshcore` ESP-IDF component added on top.
 - [Notification Sounds](#notification-sounds)
 - [Per-Contact Path Editor](#per-contact-path-editor)
 - [Trace Route](#trace-route)
+- [Path View](#path-view)
+- [Position Adverts and Share Position](#position-adverts-and-share-position)
+- [Private Channels](#private-channels)
 - [Discover](#discover)
 - [Audio Player](#audio-player)
 - [Maps](#maps)
@@ -159,10 +162,10 @@ This generates `release/meck-p4-0.1.bin` along with a SHA-256 checksum.
 
 ## Home Screen
 
-The home screen is a horizontal seven-tile layout. Swipe left or right to
+The home screen is a horizontal nine-tile layout. Swipe left or right to
 navigate between tiles. The Home tile (tile 0) shows node name, unread
 message count, battery percentage and clock in the top-right corner, and
-a ten-tile navigation grid (2 columns × 5 rows) linking to Messages,
+a ten-tile navigation grid (2 columns x 5 rows) linking to Messages,
 Contacts, Settings, Reader, Notes, Discover, Trace, Maps, Audio, and Web.
 
 |Tile           |Purpose                                                                                            |
@@ -173,7 +176,9 @@ Contacts, Settings, Reader, Notes, Discover, Trace, Maps, Audio, and Web.
 |3 Advert       |Long-press to send a manual advert                                                                 |
 |4 GPS          |Fix status, satellites, position, altitude, sentence rate. Long-press the tile to toggle GPS on/off|
 |5 Battery      |Voltage, charge percent, current, chip temperature, remaining mAh                                  |
-|6 Shutdown     |Long-press to power down                                                                           |
+|6 Voice        |Placeholder for voice over LoRa (not yet enabled)                                                  |
+|7 Camera       |Placeholder for picture over LoRa (not yet enabled)                                                |
+|8 Shutdown     |Long-press to power down                                                                           |
 
 -----
 
@@ -481,6 +486,52 @@ Useful for diagnosing where in a chain a route is breaking down — if you get r
 
 -----
 
+## Path View
+
+The **+** button on the channel messages or DM compose screen provides access to **Path View**. Path View displays the routing path that messages take through the mesh, showing each hop in the route.
+
+-----
+
+## Position Adverts and Share Position
+
+Meck-P4 can include your GPS position in outgoing adverts and share your current position with contacts.
+
+### Position settings
+
+Open **Settings > Position** to configure position behaviour:
+
+|Setting                            |Description                                                                                                |
+|-----------------------------------|-----------------------------------------------------------------------------------------------------------|
+|**Latitude** (tap to edit)         |Manual latitude entry in decimal degrees                                                                   |
+|**Longitude** (tap to edit)        |Manual longitude entry in decimal degrees                                                                  |
+|**Share Position** (tap to cycle)  |Controls how position is shared: Off / Manual / Auto-GPS. In Auto-GPS mode, position is refreshed from the L76K GPS snapshot every 15 minutes and saved to prefs automatically.|
+|**Copy Position**                  |Copies the current lat/lon to the clipboard                                                                |
+
+When a position is set (either manually or via GPS), it is encoded into your outgoing adverts so other nodes on the mesh can see your location on their Maps screen.
+
+### Share Position button
+
+The **+** button on the channel messages screen includes a **Share Position** option that sends your current position as a message to the active channel or DM conversation.
+
+-----
+
+## Private Channels
+
+Channels in Meck-P4 can be public or private:
+
+- **Public channels** are prefixed with `#` (e.g. `#test`, `#sydney`). The channel secret is derived via SHA-256 from the name, matching the standard MeshCore convention. Anyone who knows the name can join.
+- **Private channels** have no `#` prefix. A random 16-byte secret is generated when the channel is created, so only users who have been invited can participate.
+
+### Sharing private channels
+
+On the channel messages screen, the **+** button includes a **Share Channel** option. Tap it to open a contact picker and send the channel name and secret as a DM to the selected contact. The recipient sees a pending invite notification that they can accept (tap) or dismiss (long-press).
+
+### Creating channels
+
+When adding a channel (via the channel picker or Settings > Channels), type a name starting with `#` for a public channel or without `#` for a private channel. The secret is handled automatically.
+
+-----
+
 ## Discover
 
 Tap **Discover** from the home grid to open the active-discovery screen. Unlike passive advert reception (which depends on a node spontaneously broadcasting and can take up to 12 hours per node), Discover sends a zero-hop **DISCOVER_REQ** control packet on the air and any repeater or room server within radio range responds within a second or two with its public key, type, and the SNR it measured when receiving your probe.
@@ -649,6 +700,7 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Default Region**  |Tap to open text editor, enter region name (e.g. `au-nsw`), **Confirm** to save. Empty = unscoped. See [Region Scope](#region-scope).                                                                                           |
 |**UTC Offset**      |Tap to adjust (-12 to +14)                                                                                                                                                                                                      |
 |**Home Color**      |Tap to cycle: Plain / Multi                                                                                                                                                                                                     |
+|**Position >>**     |Opens the Position sub-screen (latitude, longitude, share position mode, copy position). See [Position Adverts and Share Position](#position-adverts-and-share-position).|
 |**Contacts >>**     |Opens the Contacts sub-screen (auto-add policies, type toggles)                                                                                                                                                                 |
 |**Channels >>**     |Opens the Channels sub-screen (per-channel region scope, notification preferences, notification tones, add/delete channels)                                                                                                     |
 |**Backup to SD**    |Force-write of every NVS blob to the SD card. Tap shows OK (count) or Failed                                                                                                                                                    |
@@ -765,6 +817,7 @@ Rate) and the preset row will show “Custom”.
 ## Repository Layout
 
 - `components/meshcore/` — Meck radio, mesh, persistence, and UI code
+- `components/codec2/` — Codec2 voice codec (1200bps mode), ESP-IDF component wrapper around drowe67/codec2
 - `main/examples/lvgl_9_ui/` — LilyGo’s display + LVGL bring-up, lightly
   modified to hand off to Meck after init
 - `components/cpp_bus_driver/` — LilyGo’s hardware driver collection
@@ -781,6 +834,8 @@ Files of particular note:
 - `MeckMesh.h` — protocol-side hooks: receive, send, advert handling, ring
   buffers, contact mutation, channel migration, active-discovery state
 - `MeckDataStore.h` — NVS and SD persistence
+- `MeckVoice.h` — voice over LoRa: Codec2 encode/decode, VE3 protocol, session management (not yet enabled)
+- `MeckPicture.h` — picture over LoRa infrastructure (not yet enabled)
 - `MeckAudio.cpp` / `MeckAudio.h` — audio backend wrapping `chmorgan/esp-audio-player` for WAV + MP3 playback
 - `MeckAudioUI.cpp` / `MeckAudioUI.h` — audio browser and Now Playing screens
 - `NotifSounds.h` — per-channel notification tone config, SD scanning, and playback request queue
@@ -877,19 +932,37 @@ no particular timeframes attached.
 - [x] **Region scope** — device-wide default region in Settings, per-channel scope via Settings → Channels. Scope key derived via SHA-256, matching upstream Meck v1.7+ / MeshCore v1.15+ protocol. Repeater region management supported via CLI commands in the Repeater Admin screen.
 - [x] **Channels settings sub-screen** — Settings → Channels with per-channel region scope, notification preferences (All / Mentions / None), notification tone picker, add and delete channels
 - [x] **Notification sounds** — 7 bundled MP3 tones copied to SD on first boot, per-channel tone assignment via picker, automatic playback at 80% volume on new messages (skips if audio player is active), tone config persisted to SD
+- [x] **Position adverts** — encode GPS position into outgoing adverts so other nodes see your location on their Maps screen
+- [x] **Share position** — + button on channel/DM compose to send current position as a message
+- [x] **Position settings sub-screen** — Settings > Position with manual lat/lon entry, share position mode cycle (Off / Manual / Auto-GPS), copy position button, GPS auto-update every 15 minutes
+- [x] **Path view** — view message routing paths through the mesh via the + button
+- [x] **Private channels** — channels without a # prefix generate a random secret; share via DM with contact picker, pending invite accept/dismiss
+- [x] **Voice over LoRa infrastructure** — Codec2 1200bps encode/decode, ES8311 mic capture, VE3 protocol, recording/playback/send UI (infrastructure complete, not yet enabled)
+- [x] **Picture over LoRa infrastructure** — chunked image transfer protocol (infrastructure complete, not yet enabled)
+- [x] Updated splash screen and progress bar
+- [x] Home screen expanded to nine tiles (Voice and Camera placeholders added)
+- [x] Maps and Trace tile colours swapped to avoid two adjacent red tiles
+- [x] MAX_GROUP_CHANNELS bumped from 8 to 12
 - [x] AMOLED variant verification
 
 **Pending:**
 
+- [ ] Voice over LoRa — enable Codec2 voice messaging end-to-end (infrastructure is complete, UI and protocol are in place, pending final integration and testing)
+- [ ] Picture over LoRa — enable image transfer end-to-end (infrastructure is complete, pending final integration)
+- [ ] Voice and Camera home tiles — currently placeholders, will activate when voice/picture features are enabled
+- [ ] ESP32-C6 coprocessor integration — BLE companion firmware, WiFi connectivity
 - [ ] Notes app
+- [ ] Mentions-only notification filtering — the "Mentions" preference currently behaves the same as "All"; filtering to trigger only on @nodename is planned
+- [ ] Serial CLI commands on the P4 — local serial settings require a serial terminal, which is not yet implemented. Remote CLI via Repeater Admin works normally
+- [ ] Audio bookmarks not working
+- [ ] M4B audiobook files not supported (MP3 and WAV only)
+- [ ] Audio player pause button disappears if you exit and re-enter the audio screen while a track is playing, or start a second track after the first
 - [ ] Audio cover-art rendering at >256x256 — pre-flight succeeds but the LVGL heap
   can’t allocate decoded framebuffers for larger sizes; needs decode-time
   downscale or a streaming decoder. 256x256 size png file works.
 - [ ] Web browser & IRC client
 - [ ] PCF8563 hardware RTC integration — read on boot, write on shutdown
   so time survives power-off
-- [ ] ESP32-C6 BLE companion firmware — make the device usable as a
-  Bluetooth companion to the iOS / Android MeshCore apps
 - [ ] Light sleep actually engaging — the screen-off path releases the
   dsi_phy NO_LIGHT_SLEEP PM lock, but other PM locks still prevent
   automatic light sleep entry. Power saving in v0.3.5 comes from
@@ -897,14 +970,14 @@ no particular timeframes attached.
 - [ ] Touch wake from screen-off — currently boot-button only
 - [ ] OTA firmware updates over WiFi via the ESP32-C6
 - [ ] GPS cold-boot acquisition speed-up — EASY (predicted ephemeris)
-  doesn’t appear to be persisting across reboots as intended;
-  targeted for v0.3.6
+  doesn’t appear to be persisting across reboots as intended
 
 -----
 
 ## License
 
 MIT for Meck-specific code. The wider project links libraries with mixed
-licensing including GPL-3.0; the combined firmware binary is effectively
-GPL-3.0 when distributed. See the upstream Meck README for the full
-dependency license matrix.
+licensing including GPL-3.0 (GxEPD2, esp32-audioI2S) and LGPL-2.1
+(Codec2); the combined firmware binary is effectively GPL-3.0 when
+distributed. See the upstream Meck README for the full dependency
+license matrix.
