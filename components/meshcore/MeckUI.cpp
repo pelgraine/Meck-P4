@@ -4252,6 +4252,7 @@ static void on_tone_picker_select(lv_event_t *e) {
             // Preview: play the selected tone
             char path[64];
             NotifSounds::buildTonePath(path, sizeof(path), files[fileIdx].c_str());
+            meck_audio_codec_wake();
             meck_audio_play_file(path, 0);
         }
     }
@@ -6817,6 +6818,14 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
                     wifi_dimmed = true;
                     printf("Screen: WiFi active, dimming display (no sleep)\n");
                 }
+                // Boot button wakes from wifi-dim (touch indev still runs
+                // but lv_display_get_inactive_time won't drop below threshold
+                // unless there's genuine touch input).
+                if (wifi_dimmed && meck_boot_button_pressed()) {
+                    meck_screen_set_brightness(prefs->screen_brightness ? prefs->screen_brightness : 200);
+                    wifi_dimmed = false;
+                    printf("Screen: woke from wifi-dim via boot button\n");
+                }
             } else {
                 printf("Screen: entering off-state after %u min idle\n",
                        (unsigned)prefs->screen_off_minutes);
@@ -8190,6 +8199,7 @@ static void on_voice_play_tap(lv_event_t *e) {
     printf("Voice: playing %s\n", g_voice_last_wav_path);
     // Boost volume for voice playback (default 50% is too quiet)
     meck_audio_set_volume_pct(70);
+    meck_audio_codec_wake();
     meck_audio_play_file(g_voice_last_wav_path, 0);
     if (lbl_voice_status) {
         lv_label_set_text(lbl_voice_status, "Playing...");
@@ -8636,6 +8646,7 @@ static void on_voice_inbox_row_tap(lv_event_t *e) {
     // Play the message
     printf("Voice inbox: playing [%d] %s from %s\n", idx, path, entry.senderName);
     meck_audio_set_volume_pct(70);
+    meck_audio_codec_wake();
     meck_audio_play_file(path, 0);
 }
 
@@ -11673,6 +11684,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                         char path[64];
                         NotifSounds::buildTonePath(path, sizeof(path),
                             g_notif_sounds.getSoundForChannel(i));
+                        meck_audio_codec_wake();
                         meck_audio_play_file(path, 0);
                     }
                 }

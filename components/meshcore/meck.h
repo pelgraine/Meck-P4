@@ -108,6 +108,12 @@ void meck_battery_bind(meck_battery_fn get_mv, meck_battery_fn get_pct);
 uint16_t meck_battery_get_mv(void);
 uint16_t meck_battery_get_pct(void);
 
+// Audio codec power management. Call meck_audio_codec_wake() before any
+// playback (DAC + optionally ADC for recording). Call meck_audio_codec_sleep()
+// when done to save ~5-10mA. Safe to call multiple times.
+void meck_audio_codec_wake(void);
+void meck_audio_codec_sleep(void);
+
 // Companion push notifications -- called from MeckMesh callbacks to
 // notify the companion app (both BLE and WiFi) of incoming messages,
 // acks, and contact updates.

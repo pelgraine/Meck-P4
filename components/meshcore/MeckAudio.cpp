@@ -28,6 +28,7 @@
  */
 
 #include "MeckAudio.h"
+#include "meck.h"
 
 /* ---- ESP-IDF ---- */
 #include "freertos/FreeRTOS.h"
@@ -569,6 +570,9 @@ extern "C" bool meck_audio_play_file(const char *path, uint32_t resume_sec)
     if (!path || !*path) return false;
     if (!g_inited && !meck_audio_init()) return false;
 
+    /* Wake the ES8311 codec (may have been powered down to save ~5-10mA). */
+    meck_audio_codec_wake();
+
     /* Save bookmark for the outgoing track if we were playing. */
     if (g_fp && g_current_path[0]) {
         uint32_t cur = meck_audio_get_position_sec();
@@ -626,6 +630,9 @@ extern "C" void meck_audio_stop(void)
     meck_audio_i2s_reset_counter();
     g_seek_start_sec = 0;
     set_state(MECK_AUDIO_STATE_IDLE);
+
+    /* Power down the ES8311 codec to save ~5-10mA while idle. */
+    meck_audio_codec_sleep();
 }
 
 /*

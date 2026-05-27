@@ -3470,6 +3470,24 @@ extern "C" bool meck_gps_is_enabled(void)
     return L76k_Gps_Mode != Gps_Mode::OFF;
 }
 
+// Audio codec (ES8311) power management — saves ~5-10mA when idle.
+extern "C" void meck_audio_codec_wake(void)
+{
+    if (Sys_Status.es8311.init_flag) {
+        ES8311->set_dac_power(true);
+        ES8311->set_pga_power(true);
+    }
+}
+
+extern "C" void meck_audio_codec_sleep(void)
+{
+    if (Sys_Status.es8311.init_flag) {
+        ES8311->set_dac_power(false);
+        ES8311->set_adc_power(false);
+        ES8311->set_pga_power(false);
+    }
+}
+
 bool Sdmmc_Init(const char *base_path)
 {
     esp_vfs_fat_sdmmc_mount_config_t mount_config =
@@ -3922,6 +3940,11 @@ void System_Ui_Callback_Init(void)
     {
         if (status == true)
         {
+            // Wake audio codec before playback
+            if (Sys_Status.es8311.init_flag) {
+                ES8311->set_dac_power(true);
+                printf("es8311 DAC woken for playback\n");
+            }
             ES8311_Speaker_Mode = Es8311_Mode::PLAY_MUSIC;
 
             vTaskResume(Speaker_Task_Handle);
@@ -3929,6 +3952,11 @@ void System_Ui_Callback_Init(void)
         else
         {
             Music_Play_End_Flag = true;
+            // Sleep audio codec after playback to save power
+            if (Sys_Status.es8311.init_flag) {
+                ES8311->set_dac_power(false);
+                printf("es8311 DAC powered down after playback\n");
+            }
         }
     };
 
@@ -4436,6 +4464,12 @@ void ES8311_Init(void)
     {
         printf("es8311 initialization success\n");
         Sys_Status.es8311.init_flag = true;
+        // Audio codec not continuously needed — power down analog stages
+        // to save ~5-10mA. Woken on demand before playback.
+        ES8311->set_dac_power(false);
+        ES8311->set_adc_power(false);
+        ES8311->set_pga_power(false);
+        printf("es8311 powered down (wake on playback)\n");
     }
     else
     {
@@ -6172,6 +6206,10 @@ extern "C" void app_main(void)
     {
         printf("icm20948 init success\n");
         Sys_Status.icm20948.init_flag = true;
+        // IMU not used by Meck — put to sleep to save ~3mA.
+        // Task is already suspended; this powers down the chip itself.
+        ICM20948->sleep(true);
+        printf("icm20948 put to sleep (not used by Meck)\n");
     }
 
     _lock_acquire(&lvgl_api_lock);
