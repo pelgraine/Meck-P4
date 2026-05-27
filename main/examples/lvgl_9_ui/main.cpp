@@ -4659,6 +4659,7 @@ void Ethernet_Init(void)
     }
 }
 
+
 void Esp32c6_At_Init(void)
 {
     // ESP32C6_AT->begin();
@@ -6059,7 +6060,8 @@ extern "C" void app_main(void)
 
     // ESP32C6复位模式
     // XL9535->pin_mode(XL9535_ESP32C6_EN, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
-    Esp32c6_At_Init();
+    meck_ble_bind(ESP32C6_AT.get());
+    // Esp32c6_At_Init();  // disabled — BLE handled by SerialC6BLEInterface
 
     _lock_acquire(&lvgl_api_lock);
     Set_Lvgl_Startup_Progress_Bar(40);

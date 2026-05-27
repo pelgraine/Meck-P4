@@ -76,6 +76,12 @@ void meck_screen_set_brightness(uint8_t value);
 void meck_gps_set_enabled(bool enabled);
 bool meck_gps_is_enabled(void);
 
+// Hand the ESP32-C6 AT driver pointer to the Meck BLE subsystem.
+// Called from main.cpp after ESP32C6_AT->begin() succeeds, before
+// meck_app_start(). The pointer is stored internally and used by
+// SerialC6BLEInterface for BLE companion transport.
+void meck_ble_bind(void* esp_at_ptr);
+
 #ifdef __cplusplus
 }
 #endif

@@ -33,6 +33,7 @@
 #include "BundledSounds.h"
 // #include "BundledPictures.h"  // disabled for v0.3.8
 #include "NotifSounds.h"
+#include "SerialC6BLEInterface.h"
 
 // ---- Static instances ----
 static P4DataStore g_dataStore;
@@ -49,6 +50,15 @@ static P4RTCClock g_rtc;
 static P4MeshTables g_mesh_tables;
 static Meck* g_the_mesh = nullptr;
 NotifSounds g_notif_sounds;
+
+// ---- BLE companion transport via ESP32-C6 AT over SDIO ----
+static SerialC6BLEInterface g_ble_interface;
+static Cpp_Bus_Driver::Esp_At* g_c6_at = nullptr;
+
+extern "C" void meck_ble_bind(void* esp_at_ptr) {
+    g_c6_at = (Cpp_Bus_Driver::Esp_At*)esp_at_ptr;
+    printf("meck_ble_bind: C6 AT pointer bound\n");
+}
 
 // ---- Internal accessor (declared in target.h) ----
 Meck* meck_get_instance() { return g_the_mesh; }
@@ -138,6 +148,15 @@ extern "C" bool meck_app_init() {
     // copyBundledPicturesToSD();  // disabled for v0.3.8
     g_notif_sounds.begin();
 
+    // 7. Initialize BLE companion transport via C6
+    if (g_c6_at) {
+        g_ble_interface.begin(g_c6_at, g_node_prefs.node_name);
+        g_ble_interface.enable();
+        printf("meck_app_init: BLE companion interface enabled\n");
+    } else {
+        printf("meck_app_init: WARNING — meck_ble_bind not called, BLE disabled\n");
+    }
+
     printf("meck_app_init: Meck stack ready\n");
     return true;
 }
@@ -162,6 +181,11 @@ static void meck_task(void* arg) {
         // meck_apply_pending_voice_send();
         // meck_apply_pending_picture_send();
         meck_apply_pending_save();
+        // Drain C6 SDIO so BLE connections stay alive
+        {
+            static uint8_t _ble_rx_buf[MAX_FRAME_SIZE];
+            g_ble_interface.checkRecvFrame(_ble_rx_buf);
+        }
         if (g_the_mesh) {
             g_the_mesh->loop();
         }
