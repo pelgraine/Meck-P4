@@ -1639,8 +1639,11 @@ public:
     void saveChannels() {
         if (!_store) return;
 
-        P4ChannelRecord records[MAX_GROUP_CHANNELS];
-        memset(records, 0, sizeof(records));
+        P4ChannelRecord* records = (P4ChannelRecord*)calloc(MAX_GROUP_CHANNELS, sizeof(P4ChannelRecord));
+        if (!records) {
+            printf("Meck: saveChannels: alloc failed\n");
+            return;
+        }
 
         for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
             ChannelDetails ch;
@@ -1653,16 +1656,22 @@ public:
             }
         }
         _store->saveChannels(records, MAX_GROUP_CHANNELS);
+        free(records);
     }
 
     // Load channels from P4DataStore. Returns true if channels were loaded.
     bool loadChannels() {
         if (!_store) return false;
 
-        P4ChannelRecord records[MAX_GROUP_CHANNELS];
+        P4ChannelRecord* records = (P4ChannelRecord*)calloc(MAX_GROUP_CHANNELS, sizeof(P4ChannelRecord));
+        if (!records) {
+            printf("Meck: loadChannels: alloc failed\n");
+            return false;
+        }
         int count = 0;
 
         if (!_store->loadChannels(records, MAX_GROUP_CHANNELS, count)) {
+            free(records);
             return false;
         }
 
@@ -1680,6 +1689,7 @@ public:
                 loaded++;
             }
         }
+        free(records);
         printf("Meck: loaded %d channels from store\n", loaded);
         return (loaded > 0);
     }
@@ -2445,6 +2455,12 @@ protected:
             if (matched_idx >= 0) {
                 meck_request_save_message(ch_idx, matched_idx, &saved_copy);
             }
+
+            // Push own-echo to companion app so it can show "heard by N repeaters".
+            // The upstream pushes ALL channel messages (including echoes) and lets
+            // the app detect them by matching sender + timestamp.
+            int8_t snr4 = (int8_t)(pkt->getSNR() * 4);
+            meck_companion_push_channel_msg(ch_idx, real_path_len, timestamp, snr4, text);
             return;
         }
 
@@ -3507,6 +3523,8 @@ protected:
                 _expected_ack_table[i].acked = true;
                 printf("Meck: DM ACK matched (idx=%d, %s, trip=%lums)\n",
                        i, c ? c->name : "?", trip_ms);
+                // Push to companion app
+                meck_companion_push_send_confirmed(data, (uint32_t)trip_ms);
                 return c;
             }
         }

@@ -104,7 +104,7 @@
 // ---- MeshCore configuration ----
 // No BLE on P4 main chip — companion-only via WiFi or USB
 #define MAX_CONTACTS               2000  // 32MB PSRAM allows generous limits
-#define MAX_GROUP_CHANNELS         12
+#define MAX_GROUP_CHANNELS         40
 
 // LoRa defaults (AU_915 for Sydney)
 #define LORA_FREQ_DEFAULT          916.575

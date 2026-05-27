@@ -573,7 +573,7 @@ static lv_obj_t *scr_radio_picker  = NULL;
 // Channel picker
 static lv_obj_t *scr_channel_picker  = NULL;
 static lv_obj_t *obj_ch_picker_scroll = NULL;
-static lv_obj_t *lbl_picker_unread[8] = {};
+static lv_obj_t *lbl_picker_unread[MAX_GROUP_CHANNELS] = {};
 // Cached handle for the Direct Messages pseudo-row's unread badge. Set
 // when refresh_channel_picker constructs the row; read by
 // ui_update_timer_cb to update the badge text without a full picker
@@ -7879,7 +7879,7 @@ static void refresh_channel_picker() {
 
     int num_ch = mesh->getActiveChannelCount();
 
-    for (int i = 0; i < num_ch && i < 8; i++) {
+    for (int i = 0; i < num_ch && i < MAX_GROUP_CHANNELS; i++) {
         ChannelDetails ch;
         if (!mesh->getChannel(i, ch) || ch.name[0] == '\0') continue;
 
@@ -11318,6 +11318,13 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         }
     }
 
+    // Live-refresh WiFi IP on the settings sub-screen (deferred enable
+    // means the IP isn't available when the toggle first fires)
+    if (lbl_set_wifi_ip) {
+        const char* ip = meck_wifi_get_ip();
+        lv_label_set_text(lbl_set_wifi_ip, (ip && ip[0]) ? ip : "Not connected");
+    }
+
     // DM inbox live refresh. If the user is sitting on the inbox screen
     // when a new DM arrives, the list needs to rebuild so the unread
     // badge updates and a brand-new contact appears as a row. Gated on
@@ -11640,10 +11647,10 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 
     // Channel picker unread badges + notification tone trigger
     if (mesh) {
-        static int prev_unread[8] = {};
+        static int prev_unread[MAX_GROUP_CHANNELS] = {};
         int num_ch = mesh->getActiveChannelCount();
         P4NodePrefs* nprefs = mesh->getNodePrefs();
-        for (int i = 0; i < num_ch && i < 8; i++) {
+        for (int i = 0; i < num_ch && i < MAX_GROUP_CHANNELS; i++) {
             if (!lbl_picker_unread[i]) continue;
             int unread = mesh->getUnreadCount(i);
             if (unread > 0) {

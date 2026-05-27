@@ -1,3 +1,4 @@
+
 /*
  * P4DataStore.h — NVS + SD card backed storage for ESP32-P4
  *
@@ -142,7 +143,7 @@ struct P4NodePrefs {
     // for group channels, index MAX_GROUP_CHANNELS for DMs. Values:
     // 0 = All (default), 1 = Mentions only, 2 = None (muted).
     // Appending here is safe — loadPrefs tolerates short reads.
-    uint8_t channel_notif[21];       // 20 group channels + 1 DM slot
+    uint8_t channel_notif[41];       // 40 group channels + 1 DM slot
 
     // Position sharing for adverts. position_mode controls whether the
     // device includes lat/lon in self-adverts:

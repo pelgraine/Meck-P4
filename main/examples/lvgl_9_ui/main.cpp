@@ -6103,6 +6103,14 @@ extern "C" void app_main(void)
     BQ27220->set_temperature_mode(Cpp_Bus_Driver::Bq27220xxxx::Temperature_Mode::EXTERNAL_NTC);
     BQ27220->set_sleep_current_threshold(50);
 
+    // Register BQ27220 accessors with Meck so the companion app can
+    // report battery voltage and percentage.
+    if (Sys_Status.bq27220.init_flag) {
+        meck_battery_bind(
+            []() -> uint16_t { return BQ27220->get_voltage(); },
+            []() -> uint16_t { return (uint16_t)BQ27220->get_status_of_charge(); }
+        );
+    }
     _lock_acquire(&lvgl_api_lock);
     Set_Lvgl_Startup_Progress_Bar(50);
     _lock_release(&lvgl_api_lock);

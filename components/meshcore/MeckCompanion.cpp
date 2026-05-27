@@ -498,6 +498,22 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         return;
     }
 
+    // ---- CMD_SET_CHANNEL (32) ---- import/update a channel
+    if (cmd == CMD_SET_CHANNEL && len >= 2 + 32 + 16) {
+        uint8_t channel_idx = _cmd[1];
+        ChannelDetails channel;
+        strzcpy(channel.name, (char*)&_cmd[2], 32);
+        memset(channel.channel.secret, 0, sizeof(channel.channel.secret));
+        memcpy(channel.channel.secret, &_cmd[2 + 32], 16);  // 128-bit key
+        if (_mesh->setChannel(channel_idx, channel)) {
+            _mesh->saveChannels();
+            writeOKFrame();
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);
+        }
+        return;
+    }
+
     // ---- Unhandled command ----
     printf("Companion: unhandled cmd 0x%02X len=%d\n", cmd, (int)len);
     writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);

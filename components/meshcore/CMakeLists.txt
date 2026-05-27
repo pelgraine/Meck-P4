@@ -87,7 +87,7 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 )
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
-    -DMAX_GROUP_CHANNELS=12
+    -DMAX_GROUP_CHANNELS=40
     -DMAX_CONTACTS=2000
     -DHAVE_CODEC2=1
 )
