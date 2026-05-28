@@ -731,13 +731,15 @@ port 5000.
 WiFi is configured from the Settings screen:
 
 1. Open **Settings** from the home grid.
-2. Open the WiFi configuration and let the device scan for nearby networks.
-3. Select your network from the list.
-4. Enter the network password on the virtual keyboard and confirm.
+2. Tap the **WiFi Companion** row to open the WiFi settings.
+3. Enter your network **SSID** and confirm.
+4. Enter your network **password** and confirm.
+5. Toggle **WiFi on**.
+6. Wait a few seconds for the **IP address** field to populate.
 
-Once connected, the device stores the credentials and reconnects
-automatically on later boots. The assigned IP address is shown on the home
-screen and on the settings page, and refreshes live.
+The device stores the credentials and reconnects automatically on later
+boots. The assigned IP address is also shown on the home screen and on the
+settings page, and refreshes live.
 
 When WiFi is active, the screen dims to zero brightness instead of entering
 light sleep, because light sleep would drop the SDIO bus and the TCP
