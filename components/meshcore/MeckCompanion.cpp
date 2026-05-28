@@ -35,6 +35,9 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define CMD_SET_RADIO_TX_POWER        12
 #define CMD_RESET_PATH                13
 #define CMD_REMOVE_CONTACT            15
+#define CMD_EXPORT_PRIVATE_KEY        23
+#define CMD_IMPORT_PRIVATE_KEY        24
+#define CMD_GET_CONTACT_BY_KEY        30
 #define CMD_REBOOT                    19
 #define CMD_GET_BATT_AND_STORAGE      20
 #define CMD_DEVICE_QEURY              22
@@ -57,6 +60,7 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define RESP_CODE_BATT_AND_STORAGE    12
 #define RESP_CODE_DEVICE_INFO         13
 #define RESP_CODE_DISABLED            15
+#define RESP_CODE_PRIVATE_KEY         14
 #define RESP_CODE_CHANNEL_INFO        18
 #define RESP_CODE_AUTOADD_CONFIG      25
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
@@ -523,6 +527,43 @@ void MeckCompanion::handleCmdFrame(size_t len) {
             } else {
                 writeErrFrame(ERR_CODE_TABLE_FULL);
             }
+        }
+        return;
+    }
+
+    // ---- CMD_EXPORT_PRIVATE_KEY (23) ----
+    if (cmd == CMD_EXPORT_PRIVATE_KEY) {
+        mesh::LocalIdentity id = _mesh->getIdentity();
+        _out[0] = RESP_CODE_PRIVATE_KEY;
+        id.writeTo(&_out[1], 64);
+        _serial->writeFrame(_out, 65);
+        return;
+    }
+
+    // ---- CMD_IMPORT_PRIVATE_KEY (24) ----
+    if (cmd == CMD_IMPORT_PRIVATE_KEY && len >= 65) {
+        if (!mesh::LocalIdentity::validatePrivateKey(&_cmd[1])) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        } else {
+            mesh::LocalIdentity identity;
+            identity.readFrom(&_cmd[1], 64);
+            if (_mesh->getDataStore()->saveIdentity(identity)) {
+                writeOKFrame();
+                printf("Companion: private key imported (reboot to apply)\n");
+            } else {
+                writeErrFrame(ERR_CODE_NOT_FOUND);
+            }
+        }
+        return;
+    }
+
+    // ---- CMD_GET_CONTACT_BY_KEY (30) ----
+    if (cmd == CMD_GET_CONTACT_BY_KEY && len >= 1 + PUB_KEY_SIZE) {
+        ContactInfo* c = _mesh->lookupContactByPubKey(&_cmd[1], PUB_KEY_SIZE);
+        if (c) {
+            writeContactRespFrame(RESP_CODE_CONTACT, *c);
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);
         }
         return;
     }

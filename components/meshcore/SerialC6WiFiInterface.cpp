@@ -475,7 +475,7 @@ size_t SerialC6WiFiInterface::checkRecvFrame(uint8_t dest[]) {
     // We don't block waiting for SEND OK; it's caught by drainLines()
     // on the next poll cycle.
     int sends = 0;
-    while (_client_connected && _client_id >= 0 && _send_queue_len > 0 && sends < 4) {
+    while (_client_connected && _client_id >= 0 && _send_queue_len > 0 && sends < 2) {
         Frame& f = _send_queue[0];
         int total = 3 + f.len;   // '>' + len_lo + len_hi + payload
 
@@ -494,21 +494,34 @@ size_t SerialC6WiFiInterface::checkRecvFrame(uint8_t dest[]) {
         _got_error = false;
         _at->send_packet(cmd, cmd_n);
 
-        // Wait for '>' prompt (should arrive within a few ms)
-        unsigned long t0 = millis();
-        while ((long)(millis() - t0) < 500) {
-            pollSDIO();
-            drainLines();
-            if (_got_prompt) break;
-            if (_got_error)  break;
-            vTaskDelay(pdMS_TO_TICKS(1));
+        // Wait for '>' prompt. The C6's SDIO TX buffer can overflow during
+        // burst sends (e.g. 610-contact export), causing send_packet to
+        // silently fail. Retry a few times with increasing backoff before
+        // giving up.
+        bool got_it = false;
+        for (int retry = 0; retry < 3 && !got_it; retry++) {
+            if (retry > 0) {
+                // Backoff: give the C6 time to flush its TCP buffers
+                vTaskDelay(pdMS_TO_TICKS(50 * retry));
+                _got_prompt = false;
+                _got_error = false;
+                _at->send_packet(cmd, cmd_n);
+            }
+            unsigned long t0 = millis();
+            while ((long)(millis() - t0) < 500) {
+                pollSDIO();
+                drainLines();
+                if (_got_prompt) { got_it = true; break; }
+                if (_got_error)  break;
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
         }
 
-        if (_got_prompt) {
+        if (got_it) {
             _at->send_packet((const char*)pkt, total);
             _last_write_ms = millis();
-            // Don't wait for SEND OK — caught by next drainLines() poll.
-            vTaskDelay(pdMS_TO_TICKS(1));
+            // Give the C6 time to flush TCP before the next CIPSEND
+            vTaskDelay(pdMS_TO_TICKS(5));
             pollSDIO();
             drainLines();
         } else {

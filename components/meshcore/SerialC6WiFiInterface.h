@@ -114,6 +114,6 @@ private:
         _line_len = 0;
     }
 
-    static constexpr int WRITE_MIN_INTERVAL_MS = 2;
+    static constexpr int WRITE_MIN_INTERVAL_MS = 20;
     unsigned long _last_write_ms;
 };

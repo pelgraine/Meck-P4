@@ -6402,6 +6402,16 @@ extern "C" void app_main(void)
     meck_app_start();
 
      //     System_Startup_Message_Init();  // disabled, Meck does not need LilyGo factory popups
+
+    // Set the current screen's background to black before building Meck's
+    // UI. Without this, LVGL's default blue-tinted theme background shows
+    // through for a frame during the transition from the progress bar to
+    // the home screen.
+    _lock_acquire(&lvgl_api_lock);
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
+    _lock_release(&lvgl_api_lock);
+
     meck_ui_init();
 
     _lock_acquire(&lvgl_api_lock);
