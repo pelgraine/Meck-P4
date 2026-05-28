@@ -1,8 +1,9 @@
 # Meck-P4 — MeshCore for the LilyGo T-Display P4
 
 A port of [Meck](https://github.com/pelgraine/Meck) (a MeshCore fork) to the
-LilyGo T-Display P4. Targets the ESP32-P4 main MCU; the onboard ESP32-C6 is
-not currently used by Meck on this device while the firmware is still at pre-release stage. Built on top of LilyGo’s
+LilyGo T-Display P4. Targets the ESP32-P4 main MCU; as of v0.4 the onboard
+ESP32-C6 is used for WiFi companion connectivity to the MeshCore app (BLE is
+not yet enabled). Built on top of LilyGo’s
 [T-Display-P4](https://github.com/Xinyuan-LilyGO/T-Display-P4) example tree
 with a `meshcore` ESP-IDF component added on top.
 
@@ -41,6 +42,7 @@ with a `meshcore` ESP-IDF component added on top.
 - [Config Import](#config-import)
 - [Debug Logs](#debug-logs)
 - [Settings](#settings)
+- [WiFi Companion](#wifi-companion)
 - [GPS](#gps)
 - [Battery](#battery)
 - [Clock Sync](#clock-sync)
@@ -65,8 +67,9 @@ init in `main/examples/lvgl_9_ui/main.cpp`.
 |**T-Display P4** (TFT)|4.05” punch-hole TFT LCD (1232×568)|GT911 capacitive touch + virtual keyboard|SX1262|BQ27220 fuel gauge, 1000 mAh|L76K (UART1)|PCF8563 (initialised but not yet used)|
 
 The T-Display P4 uses the ESP32-P4 (RISC-V dual-core) with 16 MB flash and
-32 MB PSRAM. The onboard ESP32-C6 (WiFi 6 / BLE 5.3 coprocessor) is present
-but not yet used by Meck.
+32 MB PSRAM. The onboard ESP32-C6 (WiFi 6 / BLE 5.3 coprocessor) provides
+WiFi companion connectivity to the MeshCore app as of v0.4; BLE is not yet
+enabled.
 
 -----
 
@@ -716,6 +719,41 @@ All settings persist via NVS with an SD card mirror.
 
 -----
 
+## WiFi Companion
+
+As of v0.4, Meck-P4 can act as a WiFi companion radio for the MeshCore app.
+The onboard ESP32-C6 provides the WiFi link (over SDIO using AT commands),
+and the MeshCore app connects to the device over your local network on TCP
+port 5000.
+
+### Connecting to WiFi
+
+WiFi is configured from the Settings screen:
+
+1. Open **Settings** from the home grid.
+2. Open the WiFi configuration and let the device scan for nearby networks.
+3. Select your network from the list.
+4. Enter the network password on the virtual keyboard and confirm.
+
+Once connected, the device stores the credentials and reconnects
+automatically on later boots. The assigned IP address is shown on the home
+screen and on the settings page, and refreshes live.
+
+When WiFi is active, the screen dims to zero brightness instead of entering
+light sleep, because light sleep would drop the SDIO bus and the TCP
+connection. Touch or the boot button wakes the screen.
+
+### Connecting the MeshCore app
+
+1. Note the IP address shown on the device after it joins your network.
+2. In the MeshCore app, add a companion device over WiFi (TCP) using that IP
+   address and port **5000**.
+
+For instructions on using the MeshCore companion app itself (messaging,
+contacts, channels, and so on), see <https://meshcore.io/>.
+
+-----
+
 ## GPS
 
 The L76K GPS module is driven via UART1. Fix status, satellites, position,
@@ -944,13 +982,14 @@ no particular timeframes attached.
 - [x] Maps and Trace tile colours swapped to avoid two adjacent red tiles
 - [x] MAX_GROUP_CHANNELS bumped from 8 to 12
 - [x] AMOLED variant verification
+- [x] **ESP32-C6 WiFi companion** — connect the MeshCore app over WiFi (TCP port 5000), with on-device SSID/password configuration. See [WiFi Companion](#wifi-companion).
 
 **Pending:**
 
 - [ ] Voice over LoRa — enable Codec2 voice messaging end-to-end (infrastructure is complete, UI and protocol are in place, pending final integration and testing)
 - [ ] Picture over LoRa — enable image transfer end-to-end (infrastructure is complete, pending final integration)
 - [ ] Voice and Camera home tiles — currently placeholders, will activate when voice/picture features are enabled
-- [ ] ESP32-C6 coprocessor integration — BLE companion firmware, WiFi connectivity
+- [ ] ESP32-C6 BLE companion firmware (WiFi companion is complete as of v0.4)
 - [ ] Notes app
 - [ ] Mentions-only notification filtering — the "Mentions" preference currently behaves the same as "All"; filtering to trigger only on @nodename is planned
 - [ ] Serial CLI commands on the P4 — local serial settings require a serial terminal, which is not yet implemented. Remote CLI via Repeater Admin works normally
