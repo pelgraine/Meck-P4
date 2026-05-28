@@ -3474,6 +3474,7 @@ extern "C" bool meck_gps_is_enabled(void)
 extern "C" void meck_audio_codec_wake(void)
 {
     if (Sys_Status.es8311.init_flag) {
+        ES8311_IIS_Bus->enable_channels();
         ES8311->set_dac_power(true);
         ES8311->set_pga_power(true);
     }
@@ -3485,6 +3486,7 @@ extern "C" void meck_audio_codec_sleep(void)
         ES8311->set_dac_power(false);
         ES8311->set_adc_power(false);
         ES8311->set_pga_power(false);
+        ES8311_IIS_Bus->disable_channels();
     }
 }
 
@@ -3940,11 +3942,8 @@ void System_Ui_Callback_Init(void)
     {
         if (status == true)
         {
-            // Wake audio codec before playback
-            if (Sys_Status.es8311.init_flag) {
-                ES8311->set_dac_power(true);
-                printf("es8311 DAC woken for playback\n");
-            }
+            // Wake audio codec + I2S channels before playback
+            meck_audio_codec_wake();
             ES8311_Speaker_Mode = Es8311_Mode::PLAY_MUSIC;
 
             vTaskResume(Speaker_Task_Handle);
@@ -3952,11 +3951,8 @@ void System_Ui_Callback_Init(void)
         else
         {
             Music_Play_End_Flag = true;
-            // Sleep audio codec after playback to save power
-            if (Sys_Status.es8311.init_flag) {
-                ES8311->set_dac_power(false);
-                printf("es8311 DAC powered down after playback\n");
-            }
+            // Sleep audio codec + release I2S PM locks
+            meck_audio_codec_sleep();
         }
     };
 
@@ -4465,10 +4461,11 @@ void ES8311_Init(void)
         printf("es8311 initialization success\n");
         Sys_Status.es8311.init_flag = true;
         // Audio codec not continuously needed — power down analog stages
-        // to save ~5-10mA. Woken on demand before playback.
+        // and release I2S PM locks to save ~5-10mA. Woken on demand before playback.
         ES8311->set_dac_power(false);
         ES8311->set_adc_power(false);
         ES8311->set_pga_power(false);
+        ES8311_IIS_Bus->disable_channels();
         printf("es8311 powered down (wake on playback)\n");
     }
     else

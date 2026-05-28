@@ -95,13 +95,17 @@ bool SerialC6WiFiInterface::atCmd(const char* cmd, int timeout_ms) {
     _at->send_packet(buf, n);
     C6WIFI_LOG(">> %s", cmd);
 
+    // Longer commands (CWJAP) can take 10-15 seconds. Yield generously
+    // to keep IDLE0 alive and prevent the task watchdog from firing.
+    int delay_ms = (timeout_ms > 5000) ? 100 : 10;
+
     unsigned long t0 = millis();
     while ((long)(millis() - t0) < timeout_ms) {
         pollSDIO();
         drainLines();
         if (_got_ok)    return true;
         if (_got_error) return false;
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
     C6WIFI_LOG("AT timeout: %s", cmd);
     return false;
@@ -339,6 +343,10 @@ bool SerialC6WiFiInterface::connectWiFi() {
 
     // Station mode
     if (!atCmd("AT+CWMODE=1", 2000)) return false;
+    // Brief settle — the C6 sometimes fires async WiFi events (from a
+    // previously saved AP) immediately after CWMODE, which can cause
+    // "busy p..." if CWJAP arrives while those are still in flight.
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     // Join AP (can take 5-10 seconds)
     char cmd[128];
@@ -354,8 +362,15 @@ bool SerialC6WiFiInterface::connectWiFi() {
 
 void SerialC6WiFiInterface::fetchIP() {
     _ip_addr[0] = '\0';
-    atCmd("AT+CIFSR", 3000);
-    // processLine will capture +CIFSR:STAIP into _ip_addr
+    // The C6 may still be flushing async WiFi events (WIFI CONNECTED,
+    // WIFI GOT IP) after CWJAP succeeds. Give it a moment to settle,
+    // then retry CIFSR a few times if the IP comes back empty.
+    for (int attempt = 0; attempt < 3; attempt++) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        atCmd("AT+CIFSR", 3000);
+        if (_ip_addr[0] != '\0') return;
+        C6WIFI_LOG("CIFSR: IP empty, retry %d/3", attempt + 1);
+    }
 }
 
 bool SerialC6WiFiInterface::startServer() {

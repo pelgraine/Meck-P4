@@ -1,4 +1,3 @@
-
 /*
  * P4DataStore.h — NVS + SD card backed storage for ESP32-P4
  *
@@ -41,6 +40,7 @@
 #pragma once
 
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -83,6 +83,13 @@ struct P4ChannelsHeader {
     uint8_t max_channels;   // MAX_GROUP_CHANNELS
     uint8_t reserved;
 };
+
+// Prefs layout version. Bump this whenever a field is inserted, resized,
+// or reordered (NOT needed for appending at the end). loadPrefs checks
+// this against a stored NVS key and migrates safely on mismatch.
+//   v1 = original layout (channel_notif[21])
+//   v2 = channel_notif expanded to [41], wifi/ble/position fields added
+#define MECK_PREFS_VERSION  2
 
 // Minimal NodePrefs for P4 (matches fields needed for radio operation)
 struct P4NodePrefs {
@@ -440,15 +447,20 @@ public:
     bool loadPrefs(P4NodePrefs &prefs) {
         if (!_initialized) return false;
 
+        // The "stable prefix" is every field from freq through
+        // default_scope_key -- these have never moved. channel_notif
+        // onward may differ between versions.
+        static constexpr size_t STABLE_PREFIX =
+            offsetof(P4NodePrefs, channel_notif);
+
         // Try NVS first
         nvs_handle_t handle;
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
         if (err == ESP_OK) {
-            // Older firmware may have stored a shorter struct (before fields
-            // like font_scale were added). Zero-fill prefs, then read using
-            // the on-disk blob size so the missing tail comes up as zero —
-            // which setDefaults already maps to sensible values for every
-            // field. Avoids wiping users' saved prefs on every struct grow.
+            // Check stored prefs layout version
+            uint8_t stored_ver = 0;
+            nvs_get_u8(handle, "prefs_v", &stored_ver);
+
             memset(&prefs, 0, sizeof(P4NodePrefs));
             size_t len = 0;
             err = nvs_get_blob(handle, "prefs", NULL, &len);
@@ -458,22 +470,56 @@ public:
             nvs_close(handle);
 
             if (err == ESP_OK && len > 0 && len <= sizeof(P4NodePrefs)) {
-                ESP_LOGI(TAG, "loadPrefs: from NVS (name=%s, freq=%.3f, sf=%d)",
-                         prefs.node_name, prefs.freq, prefs.sf);
+                if (stored_ver != MECK_PREFS_VERSION) {
+                    // Layout mismatch: the blob was written with a different
+                    // struct layout. Preserve the stable prefix (radio params,
+                    // node name, screen settings, etc.) and reset everything
+                    // from channel_notif onward to safe defaults.
+                    ESP_LOGW(TAG, "loadPrefs: version mismatch (stored=%d, current=%d), "
+                             "migrating (preserving radio/name, resetting tail)",
+                             (int)stored_ver, MECK_PREFS_VERSION);
+
+                    // Save the stable prefix from the old blob
+                    uint8_t prefix_buf[STABLE_PREFIX];
+                    memcpy(prefix_buf, &prefs, STABLE_PREFIX);
+
+                    // Reset everything to defaults
+                    prefs.setDefaults();
+
+                    // Restore the stable prefix
+                    memcpy(&prefs, prefix_buf, STABLE_PREFIX);
+
+                    // Persist with new version so this only happens once
+                    savePrefs(prefs);
+                } else {
+                    ESP_LOGI(TAG, "loadPrefs: from NVS (name=%s, freq=%.3f, sf=%d)",
+                             prefs.node_name, prefs.freq, prefs.sf);
+                }
                 return true;
             }
         }
 
-        // NVS empty — try SD restore
+        // NVS empty -- try SD restore
         if (p4_sdcard_is_mounted() && p4_sdcard_file_exists(SD_PREFS_PATH)) {
             FILE* f = fopen(SD_PREFS_PATH, "rb");
             if (f) {
-                // Same shorter-blob tolerance as the NVS path above.
                 memset(&prefs, 0, sizeof(P4NodePrefs));
                 size_t rd = fread(&prefs, 1, sizeof(P4NodePrefs), f);
                 fclose(f);
                 if (rd > 0 && rd <= sizeof(P4NodePrefs)) {
-                    // Save to NVS for next boot
+                    // Check whether the SD blob matches current version.
+                    // SD files don't store a version, so use size as heuristic:
+                    // if the file is smaller than current struct, migrate.
+                    if (rd < sizeof(P4NodePrefs)) {
+                        ESP_LOGW(TAG, "loadPrefs: SD blob size %u < struct %u, migrating",
+                                 (unsigned)rd, (unsigned)sizeof(P4NodePrefs));
+                        uint8_t prefix_buf[STABLE_PREFIX];
+                        size_t copy_len = (rd < STABLE_PREFIX) ? rd : STABLE_PREFIX;
+                        memcpy(prefix_buf, &prefs, copy_len);
+                        prefs.setDefaults();
+                        memcpy(&prefs, prefix_buf, copy_len);
+                    }
+                    // Save to NVS with current version
                     savePrefs(prefs);
                     ESP_LOGI(TAG, "loadPrefs: restored from SD (name=%s)", prefs.node_name);
                     return true;
@@ -495,7 +541,12 @@ public:
         if (err != ESP_OK) return false;
 
         err = nvs_set_blob(handle, "prefs", &prefs, sizeof(P4NodePrefs));
-        if (err == ESP_OK) err = nvs_commit(handle);
+        if (err == ESP_OK) {
+            // Store layout version alongside the blob so loadPrefs can
+            // detect struct changes on next boot.
+            nvs_set_u8(handle, "prefs_v", MECK_PREFS_VERSION);
+            err = nvs_commit(handle);
+        }
         nvs_close(handle);
 
         if (err != ESP_OK) {
@@ -512,7 +563,8 @@ public:
             }
         }
 
-        ESP_LOGI(TAG, "savePrefs: saved (name=%s)", prefs.node_name);
+        ESP_LOGI(TAG, "savePrefs: saved (name=%s) caller=%p",
+                 prefs.node_name, __builtin_return_address(0));
         return true;
     }
 

@@ -91,10 +91,10 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define FIRMWARE_VER_CODE 12
 #endif
 #ifndef FIRMWARE_BUILD_DATE
-#define FIRMWARE_BUILD_DATE "27 May 2026"
+#define FIRMWARE_BUILD_DATE __DATE__
 #endif
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "v1.8-p4"
+#define FIRMWARE_VERSION "v" MECK_FIRMWARE_VERSION "-p4"
 #endif
 
 // ---------------------------------------------------------------------------

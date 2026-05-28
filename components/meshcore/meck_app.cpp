@@ -217,7 +217,11 @@ static void meck_apply_pending_wifi() {
         g_wifi_interface.begin(g_c6_at);
         g_wifi_interface.setCredentials(g_node_prefs.wifi_ssid, g_node_prefs.wifi_password);
         g_wifi_interface.enable();
-        printf("meck_apply_pending_wifi: enabled (IP: %s)\n", g_wifi_interface.getIP());
+        if (g_wifi_interface.isEnabled()) {
+            printf("meck_apply_pending_wifi: enabled (IP: %s)\n", g_wifi_interface.getIP());
+        } else {
+            printf("meck_apply_pending_wifi: enable FAILED\n");
+        }
     } else if (action < 0 && g_wifi_interface.isEnabled()) {
         g_wifi_interface.disable();
         printf("meck_apply_pending_wifi: disabled\n");
