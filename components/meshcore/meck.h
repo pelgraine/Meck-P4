@@ -35,7 +35,7 @@
 // Firmware identity -- single source of truth for UI and companion protocol.
 // Update MECK_FIRMWARE_VERSION here before each release.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.4"
+#define MECK_FIRMWARE_VERSION "0.3.9"
 
 #ifdef __cplusplus
 extern "C" {
@@ -134,6 +134,11 @@ void meck_companion_push_send_confirmed(const uint8_t* ack_hash, uint32_t trip_t
 void meck_companion_push_new_advert(const void* contact_info);
 void meck_companion_push_advert(const uint8_t* pub_key);
 void meck_companion_push_path_updated(const uint8_t* pub_key);
+// Streams a raw received packet (SNR, RSSI, full frame bytes) to the app
+// via PUSH_CODE_LOG_RX_DATA. Used by the app to detect flood repeats of its
+// own sent messages and display "Heard X Repeats".
+void meck_companion_push_rx_log(int8_t snr_x4, int8_t rssi,
+                                 const uint8_t* raw, int len);
 
 #ifdef __cplusplus
 }

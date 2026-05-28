@@ -6819,6 +6819,7 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
                 if (wifi_dimmed && meck_boot_button_pressed()) {
                     meck_screen_set_brightness(prefs->screen_brightness ? prefs->screen_brightness : 200);
                     wifi_dimmed = false;
+                    lv_display_trigger_activity(NULL);
                     printf("Screen: woke from wifi-dim via boot button\n");
                 }
             } else {
@@ -6845,6 +6846,7 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
             // headers that conflict with LilyGo's strict-flag build.
             uint8_t b = prefs->screen_brightness ? prefs->screen_brightness : 200;
             meck_screen_set_brightness(b);
+            lv_display_trigger_activity(NULL);
         }
     }
 }

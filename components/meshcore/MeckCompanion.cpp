@@ -83,6 +83,7 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define PUSH_CODE_PATH_UPDATED        0x81
 #define PUSH_CODE_SEND_CONFIRMED      0x82
 #define PUSH_CODE_MSG_WAITING         0x83
+#define PUSH_CODE_LOG_RX_DATA         0x88
 #define PUSH_CODE_NEW_ADVERT          0x8A
 
 // ---- Response codes for received messages (queued in offline queue) ----
@@ -385,17 +386,24 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         } else {
             ChannelDetails channel;
             bool ok = _mesh->getChannel(channel_idx, channel);
-            if (ok && _mesh->sendGroupMessage(msg_timestamp, channel.channel,
-                                               _mesh->getNodeName(), text, len - i)) {
-                // Record so isOurOwnEcho matches flood echoes from repeaters
-                _mesh->recordOutgoingSend(msg_timestamp, channel_idx);
-                // Inject local echo into ring with matching timestamp so
-                // the echo handler can update heard_count on this entry
-                char echo_buf[200];
-                snprintf(echo_buf, sizeof(echo_buf), "%s: %s",
-                         _mesh->getNodeName(), text);
-                _mesh->injectChannelMessage(channel_idx, echo_buf, msg_timestamp);
-                writeOKFrame();
+            if (ok) {
+                meck_tables_begin_outgoing();
+                bool sent = _mesh->sendGroupMessage(msg_timestamp, channel.channel,
+                                                     _mesh->getNodeName(), text, len - i);
+                meck_tables_end_outgoing();
+                if (sent) {
+                    // Record so isOurOwnEcho matches flood echoes from repeaters
+                    _mesh->recordOutgoingSend(msg_timestamp, channel_idx);
+                    // Inject local echo into ring with matching timestamp so
+                    // the echo handler can update heard_count on this entry
+                    char echo_buf[200];
+                    snprintf(echo_buf, sizeof(echo_buf), "%s: %s",
+                             _mesh->getNodeName(), text);
+                    _mesh->injectChannelMessage(channel_idx, echo_buf, msg_timestamp);
+                    writeOKFrame();
+                } else {
+                    writeErrFrame(ERR_CODE_NOT_FOUND);
+                }
             } else {
                 writeErrFrame(ERR_CODE_NOT_FOUND);
             }
@@ -886,6 +894,18 @@ void MeckCompanion::pushSendConfirmed(const uint8_t* ack_hash, uint32_t trip_tim
     memcpy(&_out[1], ack_hash, 4);
     memcpy(&_out[5], &trip_time, 4);
     _serial->writeFrame(_out, 9);
+}
+
+void MeckCompanion::pushRxLog(int8_t snr_x4, int8_t rssi,
+                              const uint8_t* raw, int len) {
+    if (!_serial || !_serial->isConnected()) return;
+    if (len <= 0 || len + 3 > MAX_FRAME_SIZE) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_LOG_RX_DATA;
+    _out[i++] = (uint8_t)snr_x4;
+    _out[i++] = (uint8_t)rssi;
+    memcpy(&_out[i], raw, len); i += len;
+    _serial->writeFrame(_out, i);
 }
 
 void MeckCompanion::pushNewAdvert(const ContactInfo& contact) {

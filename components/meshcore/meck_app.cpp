@@ -124,6 +124,14 @@ extern "C" void meck_companion_push_send_confirmed(const uint8_t* ack_hash, uint
     g_wifi_companion.pushSendConfirmed(ack_hash, trip_time);
 }
 
+extern "C" void meck_companion_push_rx_log(int8_t snr_x4, int8_t rssi,
+                                            const uint8_t* raw, int len) {
+#if MECK_BLE_ENABLED
+    g_companion.pushRxLog(snr_x4, rssi, raw, len);
+#endif
+    g_wifi_companion.pushRxLog(snr_x4, rssi, raw, len);
+}
+
 extern "C" void meck_companion_push_new_advert(const void* contact_info) {
     const ContactInfo* ci = (const ContactInfo*)contact_info;
 #if MECK_BLE_ENABLED

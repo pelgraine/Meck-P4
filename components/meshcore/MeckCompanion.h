@@ -49,7 +49,6 @@ public:
 
     // ACK received for a sent message
     void pushSendConfirmed(const uint8_t* ack_hash, uint32_t trip_time);
-
     // New contact discovered
     void pushNewAdvert(const ContactInfo& contact);
 
@@ -58,6 +57,9 @@ public:
 
     // Self-echo heard (path updated)
     void pushPathUpdated(const uint8_t* pub_key);
+
+    // Raw RX packet stream (SNR, RSSI, full frame) for app repeat analysis
+    void pushRxLog(int8_t snr_x4, int8_t rssi, const uint8_t* raw, int len);
 
 private:
     void handleCmdFrame(size_t len);

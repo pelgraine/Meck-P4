@@ -2050,7 +2050,9 @@ public:
             strncpy(m.text, text, P4_MSG_TEXT_LEN - 1);
             m.text[P4_MSG_TEXT_LEN - 1] = '\0';
             if (_msg_count_ch[ch_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[ch_idx]++;
-            _msg_unread_ch[ch_idx]++;
+            // Note: do NOT increment _msg_unread_ch here. This method is
+            // used for outgoing messages from the companion app, which
+            // should not trigger notification tones or unread badges.
             _msg_dirty = true;
         }
         xSemaphoreGive(_mutex);
@@ -2416,18 +2418,24 @@ public:
 protected:
     // ---- BaseChatMesh pure virtual overrides ----
 
+    // Dispatcher RX hook: fires for every raw packet received over the radio,
+    // before parsing and before the hasSeen() duplicate filter. The companion
+    // app uses this stream (PUSH_CODE_LOG_RX_DATA) to detect repeats of its
+    // own sent messages and render "Heard X Repeats" with repeater identity
+    // (from the packet path), SNR, and hop count. This is the same mechanism
+    // stock MeshCore companion firmware uses.
+    void logRxRaw(float snr, float rssi, const uint8_t raw[], int len) override {
+        meck_companion_push_rx_log((int8_t)(snr * 4), (int8_t)rssi, raw, len);
+    }
+
     void onChannelMessageRecv(const mesh::GroupChannel& channel, mesh::Packet* pkt,
                                uint32_t timestamp, const char* text) override {
         uint8_t ch_idx = findChannelIdx(channel);
 
         // Self-echo dedup: if this is our own packet bouncing back via flood,
-        // drop it. We already wrote a local-echo entry at send time. Update
-        // that entry's path_len to reflect the real flood-relay path so the
-        // user sees their message was successfully relayed, AND bump
-        // heard_count so we accumulate a "heard by N repeaters" indicator
-        // as additional repeaters re-flood the same packet. Each increment
-        // also queues a save so the count is rewritten in-place at the
-        // record's existing file_offset on SD (set on the initial append).
+        // don't store in ring (we already wrote a local-echo entry at send time).
+        // Update that entry's heard_count so we accumulate a "heard by N repeaters"
+        // indicator as additional repeaters re-flood the same packet.
         if (isOurOwnEcho(timestamp, ch_idx)) {
             uint8_t real_path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFE;
             // Debug: lets you confirm in serial whether a sent packet bounced
@@ -2491,11 +2499,12 @@ protected:
                 meck_request_save_message(ch_idx, matched_idx, &saved_copy);
             }
 
-            // Push own-echo to companion app so it can show "heard by N repeaters".
-            // The upstream pushes ALL channel messages (including echoes) and lets
-            // the app detect them by matching sender + timestamp.
-            int8_t snr4 = (int8_t)(pkt->getSNR() * 4);
-            meck_companion_push_channel_msg(ch_idx, real_path_len, timestamp, snr4, text);
+            // Device-side heard_count is updated above for the on-screen
+            // "Heard X Repeats" display. The companion app learns about
+            // echoes via logRxRaw() (PUSH_CODE_LOG_RX_DATA), which streams
+            // every raw RX packet to the app for its own repeat analysis.
+            // Do NOT push the echo as a channel message here (the app would
+            // render it as a duplicate incoming message).
             return;
         }
 
@@ -2563,10 +2572,12 @@ protected:
             meck_request_save_message(ch_idx, wrote_idx, &saved_copy);
         }
 
-        // Push to companion app (both BLE and WiFi)
+        // Push to companion app (both BLE and WiFi).
+        {
         uint8_t pl = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
         int8_t snr4 = (int8_t)(pkt->getSNR() * 4);
         meck_companion_push_channel_msg(ch_idx, pl, timestamp, snr4, text);
+        }
     }
 
     void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt,
