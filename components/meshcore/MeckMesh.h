@@ -458,6 +458,18 @@ struct P4RecentHeard {
     bool valid;
 };
 
+// Advert path cache — stores the inbound path (hashes) from the most
+// recent advert of each node, so the companion app can look them up via
+// CMD_GET_ADVERT_PATH (42) and display route details.
+#define P4_ADVERT_PATH_TABLE_SIZE  32
+struct P4AdvertPath {
+    uint8_t  pubkey_prefix[7];
+    uint8_t  path_len;
+    char     name[32];
+    uint32_t recv_timestamp;
+    uint8_t  path[MAX_PATH_SIZE];
+};
+
 // ---- Active Discovery ----
 //
 // Discovery is an active scan, not a passive list-of-cached-adverts. The
@@ -550,6 +562,7 @@ public:
         _recent_newest = -1;
         _recent_dirty = false;
         memset(_recent, 0, sizeof(_recent));
+        memset(_advert_paths, 0, sizeof(_advert_paths));
 
         _discovered_count = 0;
         _discovery_active = false;
@@ -2016,14 +2029,15 @@ public:
 
     // Inject a synthetic message into a channel ring (e.g. completed picture).
     // Called from the LVGL/drain task, not from the radio callback.
-    void injectChannelMessage(uint8_t ch_idx, const char *text) {
+    void injectChannelMessage(uint8_t ch_idx, const char *text, uint32_t ts = 0) {
         if (ch_idx >= MAX_GROUP_CHANNELS) return;
+        if (ts == 0) ts = (uint32_t)(esp_timer_get_time() / 1000000ULL);
         xSemaphoreTake(_mutex, portMAX_DELAY);
         P4ChannelMessage* ring = _msgs_ch[ch_idx];
         if (ring) {
             _msg_newest_ch[ch_idx] = (_msg_newest_ch[ch_idx] + 1) % P4_MSG_PER_CHANNEL;
             P4ChannelMessage& m = ring[_msg_newest_ch[ch_idx]];
-            m.timestamp = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+            m.timestamp = ts;
             m.channel_idx = ch_idx;
             m.path_len = 0;
             m.heard_count = 0;
@@ -2372,6 +2386,27 @@ public:
     }
 
     const mesh::LocalIdentity& getIdentity() const { return self_id; }
+
+    // Record an outgoing send so isOurOwnEcho can match flood echoes.
+    // Called from the companion handler after sendGroupMessage succeeds.
+    void recordOutgoingSend(uint32_t ts, uint8_t ch_idx) {
+        _recent_outgoing_ts[_recent_outgoing_idx] = ts;
+        _recent_outgoing_ch[_recent_outgoing_idx] = ch_idx;
+        _recent_outgoing_idx = (_recent_outgoing_idx + 1) % RECENT_OUTGOING_RING;
+    }
+
+    // Look up a cached advert path by pub_key prefix (7 bytes).
+    // Returns nullptr if not found.
+    const P4AdvertPath* lookupAdvertPath(const uint8_t* pub_key) const {
+        for (int i = 0; i < P4_ADVERT_PATH_TABLE_SIZE; i++) {
+            if (_advert_paths[i].recv_timestamp != 0 &&
+                memcmp(_advert_paths[i].pubkey_prefix, pub_key,
+                       sizeof(_advert_paths[i].pubkey_prefix)) == 0) {
+                return &_advert_paths[i];
+            }
+        }
+        return nullptr;
+    }
     bool isClockSynced() const {
         // Mirrors the SYNC_THRESHOLD computation in onAdvertRecv:
         // build epoch minus 7 days. Self-maintaining.
@@ -3198,6 +3233,29 @@ protected:
         if (_recent_count < P4_RECENT_HEARD_SIZE) _recent_count++;
         _recent_dirty = true;
 
+        // Cache inbound path for CMD_GET_ADVERT_PATH (42).
+        // The companion app uses this to display route details.
+        if (packet->isRouteFlood() && mesh::Packet::isValidPathLen(packet->path_len)) {
+            P4AdvertPath* slot = &_advert_paths[0];
+            uint32_t oldest = 0xFFFFFFFF;
+            for (int j = 0; j < P4_ADVERT_PATH_TABLE_SIZE; j++) {
+                if (memcmp(_advert_paths[j].pubkey_prefix, id.pub_key,
+                           sizeof(slot->pubkey_prefix)) == 0) {
+                    slot = &_advert_paths[j];
+                    break;
+                }
+                if (_advert_paths[j].recv_timestamp < oldest) {
+                    oldest = _advert_paths[j].recv_timestamp;
+                    slot = &_advert_paths[j];
+                }
+            }
+            memcpy(slot->pubkey_prefix, id.pub_key, sizeof(slot->pubkey_prefix));
+            strncpy(slot->name, name, sizeof(slot->name) - 1);
+            slot->name[sizeof(slot->name) - 1] = '\0';
+            slot->recv_timestamp = _rtc_ref.getCurrentTime();
+            slot->path_len = mesh::Packet::copyPath(slot->path, packet->path, packet->path_len);
+        }
+
         // Secondary capture path: while a discovery scan is open, any
         // flood advert from a repeater that happens to land in the
         // window is also tracked. The PRIMARY discovery signal is
@@ -3996,6 +4054,10 @@ private:
     int _recent_count;
     int _recent_newest;
     volatile bool _recent_dirty;
+
+    // Advert path cache — populated in onAdvertRecv, queried by
+    // CMD_GET_ADVERT_PATH (42) from the companion app.
+    P4AdvertPath _advert_paths[P4_ADVERT_PATH_TABLE_SIZE];
 
     // Active discovery ring + window state. _discovered[] is a flat
     // array (not a circular ring like _recent[]); we just walk it and

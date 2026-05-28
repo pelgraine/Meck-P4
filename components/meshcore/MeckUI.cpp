@@ -6090,18 +6090,17 @@ static void build_path_info_text(const BubbleRetryCtx *ctx) {
                     &ctx->echo_hashes[i * ctx->echo_hash_size],
                     ctx->echo_hash_size, name, sizeof(name),
                     hex, sizeof(hex));
-                if (i > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
                 if (n)
                     pos += snprintf(buf + pos, sizeof(buf) - pos,
-                                    "  (%s)%s", hex, n);
+                                    "  %d. (%s) %s\n", i + 1, hex, n);
                 else
                     pos += snprintf(buf + pos, sizeof(buf) - pos,
-                                    "  (%s)Unknown Repeater", hex);
+                                    "  %d. (%s) Unknown\n", i + 1, hex);
                 if (pos >= (int)sizeof(buf) - 20) break;
             }
             if (ctx->heard_count > ctx->echo_hash_count) {
                 pos += snprintf(buf + pos, sizeof(buf) - pos,
-                                "\n  +%d more",
+                                "  +%d more",
                                 ctx->heard_count - ctx->echo_hash_count);
             }
         } else {
@@ -6111,7 +6110,7 @@ static void build_path_info_text(const BubbleRetryCtx *ctx) {
                             ctx->heard_count == 1 ? "" : "s");
         }
     } else {
-        // Incoming: show path
+        // Incoming: show path as numbered list
         uint8_t hops = ctx->msg_path_hash_count;
         if (ctx->path_len == 0xFF) {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "Route: direct");
@@ -6126,13 +6125,12 @@ static void build_path_info_text(const BubbleRetryCtx *ctx) {
                     &ctx->msg_path_hashes[i * ctx->msg_path_hash_size],
                     ctx->msg_path_hash_size, name, sizeof(name),
                     hex, sizeof(hex));
-                if (i > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, " -> ");
                 if (n)
                     pos += snprintf(buf + pos, sizeof(buf) - pos,
-                                    "(%s)%s", hex, n);
+                                    "  %d. (%s) %s\n", i + 1, hex, n);
                 else
                     pos += snprintf(buf + pos, sizeof(buf) - pos,
-                                    "(%s)Unknown Repeater", hex);
+                                    "  %d. (%s) Unknown\n", i + 1, hex);
                 if (pos >= (int)sizeof(buf) - 20) break;
             }
         }

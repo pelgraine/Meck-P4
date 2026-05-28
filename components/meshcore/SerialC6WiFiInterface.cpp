@@ -93,7 +93,12 @@ bool SerialC6WiFiInterface::atCmd(const char* cmd, int timeout_ms) {
     char buf[256];
     int n = snprintf(buf, sizeof(buf), "%s\r\n", cmd);
     _at->send_packet(buf, n);
-    C6WIFI_LOG(">> %s", cmd);
+    // Mask credentials in log output
+    if (strncmp(cmd, "AT+CWJAP=", 9) == 0) {
+        C6WIFI_LOG(">> AT+CWJAP=\"%s\",\"****\"", _ssid);
+    } else {
+        C6WIFI_LOG(">> %s", cmd);
+    }
 
     // Longer commands (CWJAP) can take 10-15 seconds. Yield generously
     // to keep IDLE0 alive and prevent the task watchdog from firing.
@@ -271,9 +276,13 @@ void SerialC6WiFiInterface::processLine(const char* line, int len) {
         return;
     }
 
-    // Log anything else
+    // Log anything else (mask credentials in echoed AT commands)
     if (len > 0) {
-        C6WIFI_LOG("[C6] %s", line);
+        if (strncmp(line, "AT+CWJAP=", 9) == 0) {
+            C6WIFI_LOG("[C6] AT+CWJAP=\"%s\",\"****\"", _ssid);
+        } else {
+            C6WIFI_LOG("[C6] %s", line);
+        }
     }
 }
 

@@ -29,6 +29,9 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define CMD_SET_ADVERT_NAME           8
 #define CMD_SET_ADVERT_LATLON         14
 #define CMD_SET_OTHER_PARAMS          38
+#define CMD_GET_CUSTOM_VARS           40
+#define CMD_SET_CUSTOM_VAR            41
+#define CMD_GET_ADVERT_PATH           42
 #define CMD_ADD_UPDATE_CONTACT        9
 #define CMD_SYNC_NEXT_MESSAGE         10
 #define CMD_SET_RADIO_PARAMS          11
@@ -45,6 +48,7 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define CMD_SET_CHANNEL               32
 #define CMD_GET_AUTOADD_CONFIG        59
 #define CMD_SET_PATH_HASH_MODE        61
+#define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 
 // ---- Response codes ----
@@ -61,6 +65,8 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define RESP_CODE_DEVICE_INFO         13
 #define RESP_CODE_DISABLED            15
 #define RESP_CODE_PRIVATE_KEY         14
+#define RESP_CODE_CUSTOM_VARS         21
+#define RESP_CODE_ADVERT_PATH         22
 #define RESP_CODE_CHANNEL_INFO        18
 #define RESP_CODE_AUTOADD_CONFIG      25
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
@@ -381,6 +387,14 @@ void MeckCompanion::handleCmdFrame(size_t len) {
             bool ok = _mesh->getChannel(channel_idx, channel);
             if (ok && _mesh->sendGroupMessage(msg_timestamp, channel.channel,
                                                _mesh->getNodeName(), text, len - i)) {
+                // Record so isOurOwnEcho matches flood echoes from repeaters
+                _mesh->recordOutgoingSend(msg_timestamp, channel_idx);
+                // Inject local echo into ring with matching timestamp so
+                // the echo handler can update heard_count on this entry
+                char echo_buf[200];
+                snprintf(echo_buf, sizeof(echo_buf), "%s: %s",
+                         _mesh->getNodeName(), text);
+                _mesh->injectChannelMessage(channel_idx, echo_buf, msg_timestamp);
                 writeOKFrame();
             } else {
                 writeErrFrame(ERR_CODE_NOT_FOUND);
@@ -580,6 +594,93 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         return;
     }
 
+    // ---- CMD_GET_CUSTOM_VARS (40) ----
+    if (cmd == CMD_GET_CUSTOM_VARS) {
+        _out[0] = RESP_CODE_CUSTOM_VARS;
+        char *dp = (char *)&_out[1];
+        char *end = (char *)&_out[MAX_FRAME_SIZE - 1];
+
+        // gps
+        dp += snprintf(dp, end - dp, "gps:%d", meck_gps_is_enabled() ? 1 : 0);
+
+        // gps_interval (we don't have a configurable interval; report 0)
+        dp += snprintf(dp, end - dp, ",gps_interval:0");
+
+        // latitude / longitude (from prefs, converted from e7 to degrees)
+        if (prefs->position_lat_e7 != 0 || prefs->position_lon_e7 != 0) {
+            dp += snprintf(dp, end - dp, ",latitude:%.7f",
+                           (double)prefs->position_lat_e7 / 1e7);
+            dp += snprintf(dp, end - dp, ",longitude:%.7f",
+                           (double)prefs->position_lon_e7 / 1e7);
+        } else {
+            dp += snprintf(dp, end - dp, ",latitude:0,longitude:0");
+        }
+
+        _serial->writeFrame(_out, dp - (char *)_out);
+        return;
+    }
+
+    // ---- CMD_SET_CUSTOM_VAR (41) ----
+    if (cmd == CMD_SET_CUSTOM_VAR && len >= 4) {
+        _cmd[len] = 0;  // null-terminate
+        char *sp = (char *)&_cmd[1];
+        char *np = strchr(sp, ':');
+        if (!np) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+            return;
+        }
+        *np++ = 0;  // split name:value
+
+        bool success = false;
+        if (strcmp(sp, "gps") == 0) {
+            bool on = (np[0] == '1');
+            meck_gps_set_enabled(on);
+            prefs->gps_enabled = on ? 1 : 2;
+            _mesh->savePrefs();
+            success = true;
+        } else if (strcmp(sp, "latitude") == 0) {
+            double lat = atof(np);
+            prefs->position_lat_e7 = (int32_t)(lat * 1e7);
+            if (prefs->position_mode == 0 && prefs->position_lat_e7 != 0)
+                prefs->position_mode = 1;
+            _mesh->savePrefs();
+            success = true;
+        } else if (strcmp(sp, "longitude") == 0) {
+            double lon = atof(np);
+            prefs->position_lon_e7 = (int32_t)(lon * 1e7);
+            if (prefs->position_mode == 0 && prefs->position_lon_e7 != 0)
+                prefs->position_mode = 1;
+            _mesh->savePrefs();
+            success = true;
+        } else if (strcmp(sp, "gps_interval") == 0) {
+            // Acknowledged but not used (P4 GPS is on/off only)
+            success = true;
+        }
+
+        if (success)
+            writeOKFrame();
+        else
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        return;
+    }
+
+    // ---- CMD_GET_ADVERT_PATH (42) ----
+    if (cmd == CMD_GET_ADVERT_PATH && len >= 2 + PUB_KEY_SIZE) {
+        const uint8_t* pub_key = &_cmd[2];  // byte 1 = reserved
+        const P4AdvertPath* found = _mesh->lookupAdvertPath(pub_key);
+        if (found) {
+            int i = 0;
+            _out[i++] = RESP_CODE_ADVERT_PATH;
+            memcpy(&_out[i], &found->recv_timestamp, 4); i += 4;
+            _out[i++] = found->path_len;
+            i += mesh::Packet::writePath(&_out[i], found->path, found->path_len);
+            _serial->writeFrame(_out, i);
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);
+        }
+        return;
+    }
+
     // ---- CMD_GET_AUTOADD_CONFIG (59) ----
     if (cmd == CMD_GET_AUTOADD_CONFIG) {
         _out[0] = RESP_CODE_AUTOADD_CONFIG;
@@ -590,11 +691,49 @@ void MeckCompanion::handleCmdFrame(size_t len) {
 
     // ---- CMD_GET_DEFAULT_FLOOD_SCOPE (64) ----
     if (cmd == CMD_GET_DEFAULT_FLOOD_SCOPE) {
-        int i = 0;
-        _out[i++] = RESP_CODE_DEFAULT_FLOOD_SCOPE;
-        strzcpy((char*)&_out[i], prefs->default_scope_name, 31);
-        i += 31;
-        _serial->writeFrame(_out, i);
+        _out[0] = RESP_CODE_DEFAULT_FLOOD_SCOPE;
+        if (prefs->default_scope_name[0] != '\0') {
+            memcpy(&_out[1], prefs->default_scope_name, 31);
+            memcpy(&_out[1 + 31], prefs->default_scope_key, 16);
+            _serial->writeFrame(_out, 1 + 31 + 16);
+        } else {
+            _serial->writeFrame(_out, 1);  // no scope = just resp code
+        }
+        return;
+    }
+
+    // ---- CMD_SET_DEFAULT_FLOOD_SCOPE (63) ----
+    if (cmd == CMD_SET_DEFAULT_FLOOD_SCOPE && len >= 1) {
+        if (len >= 1 + 31 + 16) {
+            // Name + key provided
+            int n = strlen((char*)&_cmd[1]);
+            if (n > 0 && n < 31) {
+                strcpy(prefs->default_scope_name, (char*)&_cmd[1]);
+                memcpy(prefs->default_scope_key, &_cmd[1 + 31], 16);
+                _mesh->savePrefs();
+                writeOKFrame();
+            } else {
+                writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+            }
+        } else {
+            // Clear scope
+            memset(prefs->default_scope_name, 0, sizeof(prefs->default_scope_name));
+            memset(prefs->default_scope_key, 0, sizeof(prefs->default_scope_key));
+            _mesh->savePrefs();
+            writeOKFrame();
+        }
+        return;
+    }
+
+    // ---- CMD_SET_PATH_HASH_MODE (61) ----
+    if (cmd == CMD_SET_PATH_HASH_MODE && _cmd[1] == 0 && len >= 3) {
+        if (_cmd[2] >= 3) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        } else {
+            prefs->path_hash_mode = _cmd[2];
+            _mesh->savePrefs();
+            writeOKFrame();
+        }
         return;
     }
 

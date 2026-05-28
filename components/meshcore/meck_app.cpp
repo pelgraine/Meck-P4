@@ -328,15 +328,13 @@ extern "C" bool meck_app_init() {
         if (g_node_prefs.ble_pin == 0) {
             g_node_prefs.ble_pin = 100000 + (esp_random() % 900000);
             if (g_the_mesh) g_the_mesh->getDataStore()->savePrefs(g_node_prefs);
-            printf("meck_app_init: generated BLE PIN %06lu\n",
-                   (unsigned long)g_node_prefs.ble_pin);
+            printf("meck_app_init: generated BLE PIN (masked in log)\n");
         }
         g_ble_interface.setPin(g_node_prefs.ble_pin);
 
         if (g_node_prefs.ble_enabled != 0) {
             g_ble_interface.enable();
-            printf("meck_app_init: BLE companion enabled (PIN %06lu)\n",
-                   (unsigned long)g_node_prefs.ble_pin);
+            printf("meck_app_init: BLE companion enabled\n");
         } else {
             printf("meck_app_init: BLE companion interface OFF (pref)\n");
         }
