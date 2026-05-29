@@ -44,6 +44,8 @@ idf_component_register(
         "MeckCompanion.cpp"
         "MeckEmoji.cpp"
         "MeckEmojiPicker.cpp"
+        "MeckReader.cpp"
+        "MeckReaderUI.cpp"
         "es8311.cpp" 
         "meck_montserrat_14.c"
         "meck_montserrat_16.c"

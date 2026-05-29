@@ -38,6 +38,7 @@
 #include "MeckMesh.h"
 #include "MeckDataStore.h"
 #include "MeckAudioUI.h"
+#include "MeckReaderUI.h"
 #include "MeckAudio.h"
 #include "MeckVoice.h"
 
@@ -198,6 +199,14 @@ static void meck_set_font(lv_obj_t* obj, const lv_font_t* base, lv_style_selecto
         g_font_reg_count++;
         lv_obj_add_event_cb(obj, meck_font_reg_remove_cb, LV_EVENT_DELETE, NULL);
     }
+}
+
+// Exposed to sibling UI modules (e.g. MeckReaderUI) so screens built outside
+// this file can register their labels with the font-scale system and honour
+// the Settings font-size preference like the rest of the UI.
+extern "C" void meck_ui_set_font(lv_obj_t* obj, const lv_font_t* base,
+                                 lv_style_selector_t part) {
+    meck_set_font(obj, base, part);
 }
 
 // Update an already-registered object's base font (or register fresh if
@@ -1350,7 +1359,7 @@ static void show_not_implemented(const char* feature_name) {
     if (lbl_not_impl_title) lv_label_set_text(lbl_not_impl_title, feature_name);
     if (scr_not_implemented) lv_screen_load(scr_not_implemented);
 }
-static void cb_todo_reader(lv_event_t* e)   { show_not_implemented("Reader"); }
+static void cb_todo_reader(lv_event_t* e)   { meck_reader_ui_show_browser(); }
 static void cb_todo_notes(lv_event_t* e)    { show_not_implemented("Notes"); }
 static void cb_todo_discover(lv_event_t* e) {
     // Wired to the Discover tile on the home grid. Mirrors Meck T-Deck
@@ -15543,6 +15552,7 @@ extern "C" void meck_ui_init() {
     create_admin_home_screen();
     create_room_messages_screen();
     meck_audio_ui_init();
+    meck_reader_ui_init();
     meck_map_ui_init();
 
     lv_timer_create(ui_update_timer_cb, 500, NULL);
