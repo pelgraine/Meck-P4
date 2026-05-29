@@ -6222,7 +6222,7 @@ static lv_font_fmt_txt_dsc_t font_dsc = {
 
 /*Initialize a public general font descriptor*/
 #if LVGL_VERSION_MAJOR >= 8
-const lv_font_t meck_montserrat_30 = {
+lv_font_t meck_montserrat_30 = {
 #else
 lv_font_t meck_montserrat_30 = {
 #endif

@@ -59,6 +59,8 @@ extern "C" int meck_voice_send_get_status(void);
 #include <sys/lock.h>
 #include <algorithm>
 #include "lvgl.h"
+#include "MeckEmojiPicker.h"
+#include "MeckEmoji.h"
 #include "t_display_p4_driver.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -91,14 +93,14 @@ extern _lock_t lvgl_api_lock;
 // ASCII text — they only differ in glyph coverage. Defined in
 // meck_montserrat_<size>.c at the component root.
 extern "C" {
-    extern const lv_font_t meck_montserrat_14;
-    extern const lv_font_t meck_montserrat_16;
-    extern const lv_font_t meck_montserrat_18;
-    extern const lv_font_t meck_montserrat_22;
-    extern const lv_font_t meck_montserrat_24;
-    extern const lv_font_t meck_montserrat_28;
-    extern const lv_font_t meck_montserrat_30;
-    extern const lv_font_t meck_montserrat_32;
+    extern lv_font_t meck_montserrat_14;
+    extern lv_font_t meck_montserrat_16;
+    extern lv_font_t meck_montserrat_18;
+    extern lv_font_t meck_montserrat_22;
+    extern lv_font_t meck_montserrat_24;
+    extern lv_font_t meck_montserrat_28;
+    extern lv_font_t meck_montserrat_30;
+    extern lv_font_t meck_montserrat_32;
 }
 
 // LVGL doesn't ship a LV_SYMBOL_LOCK in its standard set, but the
@@ -1729,6 +1731,98 @@ static const char *meck_kb_map_uc_qwertz[] = {
     ""
 };
 
+// ----------------------------------------------------------------------------
+// Composer keyboard maps. Identical to the maps above except row 4 carries an
+// emoji key (MECK_EMOJI_KEY) between "ABC"/"abc" and the space bar; the space
+// bar narrows from 10 to 7 width units to make room. Applied only to
+// kb_compose and kb_room_compose by meck_style_keyboard(). Tapping the emoji
+// key opens the picker (see on_kb_emoji_event); it never types.
+// ----------------------------------------------------------------------------
+static const char *meck_kb_map_lc_em[] = {
+    "q","w","e","r","t","y","u","i","o","p",                                "\n",
+    "a","s","d","f","g","h","j","k","l",            LV_SYMBOL_BACKSPACE,    "\n",
+    ",","z","x","c","v","b","n","m",".",            LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "ABC", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+static const char *meck_kb_map_uc_em[] = {
+    "Q","W","E","R","T","Y","U","I","O","P",                                "\n",
+    "A","S","D","F","G","H","J","K","L",            LV_SYMBOL_BACKSPACE,    "\n",
+    ",","Z","X","C","V","B","N","M",".",            LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "abc", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+// Row 4 widths: arrows 2/2, '-' 3, ABC 4, emoji 3, space 7 (was 10), 1# 3.
+// Row total stays 24. Rows 1-3 are copied unchanged from meck_kb_ctrl_lc.
+static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_em[] = {
+    MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
+    MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(14),
+    MKB(8),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB_NR(7),
+    MKB(2),     MKB_NR(3), MKB_NR(4), MKB_NR(3), MKB(7), MKB_NR(3), MKB(2)
+};
+
+static const char *meck_kb_map_lc_azerty_em[] = {
+    "a","z","e","r","t","y","u","i","o","p",                                "\n",
+    "q","s","d","f","g","h","j","k","l","m",        LV_SYMBOL_BACKSPACE,    "\n",
+    ",","w","x","c","v","b","n",".",                LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "ABC", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+static const char *meck_kb_map_uc_azerty_em[] = {
+    "A","Z","E","R","T","Y","U","I","O","P",                                "\n",
+    "Q","S","D","F","G","H","J","K","L","M",        LV_SYMBOL_BACKSPACE,    "\n",
+    ",","W","X","C","V","B","N",".",                LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "abc", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+// AZERTY composer widths: rows 1-3 copied from meck_kb_ctrl_azerty, row 4
+// same as meck_kb_ctrl_em row 4.
+static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_azerty_em[] = {
+    MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
+    MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(14),
+    MKB(8),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB_NR(7),
+    MKB(2),     MKB_NR(3), MKB_NR(4), MKB_NR(3), MKB(7), MKB_NR(3), MKB(2)
+};
+
+static const char *meck_kb_map_lc_qwertz_em[] = {
+    "q","w","e","r","t","z","u","i","o","p",                                "\n",
+    "a","s","d","f","g","h","j","k","l",            LV_SYMBOL_BACKSPACE,    "\n",
+    ",","y","x","c","v","b","n","m",".",            LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "ABC", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+static const char *meck_kb_map_uc_qwertz_em[] = {
+    "Q","W","E","R","T","Z","U","I","O","P",                                "\n",
+    "A","S","D","F","G","H","J","K","L",            LV_SYMBOL_BACKSPACE,    "\n",
+    ",","Y","X","C","V","B","N","M",".",            LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "abc", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+// QWERTZ composer maps reuse meck_kb_ctrl_em (same cell shape as QWERTY).
+
+static const char *meck_kb_map_special_em[] = {
+    "1","2","3","4","5","6","7","8","9","0",            LV_SYMBOL_BACKSPACE,  "\n",
+    "abc","@","#","$","%","&","*","(",")","\"",         LV_SYMBOL_NEW_LINE,   "\n",
+    "_","-","=","+","/","!","?",":",";","'",",",".",                          "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", MECK_EMOJI_KEY, " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    ""
+};
+
+// Special composer widths: rows 1-3 copied from meck_kb_ctrl_special, row 4
+// inserts emoji at 3 and narrows space from 8 to 5 (row total stays 21).
+static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_special_em[] = {
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(8),
+    MKB_NR(8), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(7),
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
+    MKB_NR(2), MKB(2), MKB_NR(5), MKB_NR(3), MKB(5), MKB(2), MKB_NR(2)
+};
+
 // ============================================================================
 // Accent popover — iOS-style long-press popover showing Czech + French
 // accented variants of the held letter. Tap a variant to insert it; tap
@@ -1997,6 +2091,30 @@ static void on_kb_long_press(lv_event_t *e) {
     meck_open_accent_popover(kb, ta, &anchor, txt, variants);
 }
 
+// PRESSED handler for the two composer keyboards. If the pressed key is the
+// emoji key, open the picker instead of typing. Nulling the selected button
+// makes LVGL's default keyboard handler bail before the release-VALUE_CHANGED
+// inserts the key glyph (the same defuse on_kb_long_press uses).
+static void on_kb_emoji_event(lv_event_t *e) {
+    lv_obj_t *kb = (lv_obj_t *)lv_event_get_target(e);
+    uint32_t id = lv_buttonmatrix_get_selected_button(kb);
+    if (id == LV_BUTTONMATRIX_BUTTON_NONE) return;
+
+    const char *txt = lv_buttonmatrix_get_button_text(kb, id);
+    if (!txt || strcmp(txt, MECK_EMOJI_KEY) != 0) return;
+
+    lv_obj_t *ta = lv_keyboard_get_textarea(kb);
+    lv_buttonmatrix_set_selected_button(kb, LV_BUTTONMATRIX_BUTTON_NONE);
+
+    uint8_t dark = 1;
+    Meck *mesh = meck_get_instance();
+    if (mesh) {
+        P4NodePrefs *prefs = mesh->getNodePrefs();
+        if (prefs) dark = (prefs->kb_dark_mode == 0) ? 1 : 0;
+    }
+    meck_emoji_picker_open(kb, ta, dark != 0);
+}
+
 // ----------------------------------------------------------------------------
 // Keyboard styling — picks layout from prefs->kb_layout and applies the
 // dark theme overrides if prefs->kb_dark_mode == 0 (the default).
@@ -2049,12 +2167,36 @@ static void meck_style_keyboard(lv_obj_t *kb) {
             break;
     }
 
+    // Composer keyboards get an emoji key in row 4 (the space bar shrinks to
+    // make room). Every other keyboard keeps the standard maps. The pointer
+    // check works because kb_compose/kb_room_compose are assigned before this
+    // runs at their creation sites and by the restyle-all path.
+    const char **map_special = meck_kb_map_special;
+    const lv_buttonmatrix_ctrl_t *ctrl_special = meck_kb_ctrl_special;
+    if (kb == kb_compose || kb == kb_room_compose) {
+        if (map_lc == meck_kb_map_lc_azerty) {
+            map_lc = meck_kb_map_lc_azerty_em;
+            map_uc = meck_kb_map_uc_azerty_em;
+            ctrl   = meck_kb_ctrl_azerty_em;
+        } else if (map_lc == meck_kb_map_lc_qwertz) {
+            map_lc = meck_kb_map_lc_qwertz_em;
+            map_uc = meck_kb_map_uc_qwertz_em;
+            ctrl   = meck_kb_ctrl_em;
+        } else {
+            map_lc = meck_kb_map_lc_em;
+            map_uc = meck_kb_map_uc_em;
+            ctrl   = meck_kb_ctrl_em;
+        }
+        map_special  = meck_kb_map_special_em;
+        ctrl_special = meck_kb_ctrl_special_em;
+    }
+
     // SPECIAL gets its own map + ctrl_map so CLICK_TRIG stays absent in
     // every mode — see the long comment block above the maps for why.
     lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_LOWER, map_lc, ctrl);
     lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_TEXT_UPPER, map_uc, ctrl);
     lv_keyboard_set_map(kb, LV_KEYBOARD_MODE_SPECIAL,
-                        meck_kb_map_special, meck_kb_ctrl_special);
+                        map_special, ctrl_special);
 
     // Dark theme: matches the rest of the Meck UI (the panel/ID-row colour
     // is also lv_color_make(15, 15, 20), so the keyboard blends in).
@@ -2309,10 +2451,34 @@ extern "C" void strip_unrenderable(const char *src, char *dst, size_t dst_sz) {
             }
             p += 2;
         } else if ((b & 0xF0) == 0xE0) {
-            // 3-byte UTF-8: codepoint > 0x07FF, always above 0x00FF — drop
+            // 3-byte UTF-8: U+0800..U+FFFF. Above the Montserrat range, but
+            // keep the ones the emoji fallback can render (e.g. U+2639,
+            // U+2665, and the VS-16 selector). Drop the rest.
+            if ((p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80) { p++; continue; }
+            uint32_t cp = ((uint32_t)(b & 0x0F) << 12) |
+                          ((uint32_t)(p[1] & 0x3F) << 6) |
+                          (uint32_t)(p[2] & 0x3F);
+            if (meck_emoji_is_renderable(cp) && di + 3 < dst_sz) {
+                dst[di++] = (char)p[0];
+                dst[di++] = (char)p[1];
+                dst[di++] = (char)p[2];
+            }
             p += 3;
         } else if ((b & 0xF8) == 0xF0) {
-            // 4-byte UTF-8: emoji and other supplementary planes — drop
+            // 4-byte UTF-8: supplementary planes (most emoji). Keep the ones
+            // the emoji fallback can render; drop everything else.
+            if ((p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80 ||
+                (p[3] & 0xC0) != 0x80) { p++; continue; }
+            uint32_t cp = ((uint32_t)(b & 0x07) << 18) |
+                          ((uint32_t)(p[1] & 0x3F) << 12) |
+                          ((uint32_t)(p[2] & 0x3F) << 6) |
+                          (uint32_t)(p[3] & 0x3F);
+            if (meck_emoji_is_renderable(cp) && di + 4 < dst_sz) {
+                dst[di++] = (char)p[0];
+                dst[di++] = (char)p[1];
+                dst[di++] = (char)p[2];
+                dst[di++] = (char)p[3];
+            }
             p += 4;
         } else {
             // continuation or invalid lead byte
@@ -9067,6 +9233,21 @@ static void create_channel_picker_screen() {
     lv_obj_center(confirm_lbl);
     lv_obj_add_event_cb(btn_ch_confirm, on_ch_add_save, LV_EVENT_CLICKED, NULL);
 
+    // Cancel button under Confirm. Without this the only way out of the
+    // modal was the keyboard CANCEL event, which has no visible affordance.
+    // Wired to on_ch_add_cancel, which just hides the panel.
+    lv_obj_t *btn_ch_cancel = lv_button_create(obj_ch_add_panel);
+    lv_obj_set_size(btn_ch_cancel, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_ch_cancel, LV_ALIGN_TOP_MID, 0, 247);
+    lv_obj_set_style_bg_color(btn_ch_cancel, lv_color_make(70, 70, 80), 0);
+    lv_obj_set_style_radius(btn_ch_cancel, 8, 0);
+    lv_obj_t *cancel_lbl = lv_label_create(btn_ch_cancel);
+    lv_label_set_text(cancel_lbl, "Cancel");
+    lv_obj_set_style_text_color(cancel_lbl, lv_color_white(), 0);
+    meck_set_font(cancel_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(cancel_lbl);
+    lv_obj_add_event_cb(btn_ch_cancel, on_ch_add_cancel, LV_EVENT_CLICKED, NULL);
+
     kb_ch_add = lv_keyboard_create(obj_ch_add_panel);
     meck_style_keyboard(kb_ch_add);
     lv_keyboard_set_textarea(kb_ch_add, ta_ch_add);
@@ -9365,6 +9546,8 @@ static void create_messages_screen() {
     lv_obj_add_event_cb(kb_compose, on_kb_event, LV_EVENT_CANCEL, NULL);
     lv_obj_add_event_cb(kb_compose, on_kb_long_press,
                         LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_event_cb(kb_compose, on_kb_emoji_event,
+                        LV_EVENT_PRESSED, NULL);
 }
 
 // ============================================================================
@@ -11354,6 +11537,16 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     if (g_in_dm_mode && scr_messages && lv_screen_active() == scr_messages
         && g_active_dm_contact_idx >= 0) {
         rebuild_dm_bubbles(g_active_dm_contact_idx);
+    }
+
+    // Public channel live refresh. Mirror of the DM block above: scr_messages
+    // hosts both modes, but only DM was refreshed on the tick. Without this a
+    // sent channel post stays "Sending..." until the user leaves and returns,
+    // because isMessageDirty() only fires on new content, not on the elapsed
+    // retry threshold that flips an unheard post to "Failed".
+    if (!g_in_dm_mode && scr_messages && lv_screen_active() == scr_messages
+        && g_active_channel < MAX_GROUP_CHANNELS) {
+        rebuild_message_bubbles(g_active_channel);
     }
 
     // Home tiles: clock once per minute. Timer fires at 500ms so 120 ticks
@@ -15211,6 +15404,8 @@ static void create_room_messages_screen() {
     lv_obj_add_event_cb(kb_room_compose, on_room_kb_event, LV_EVENT_CANCEL, NULL);
     lv_obj_add_event_cb(kb_room_compose, on_kb_long_press,
                         LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_event_cb(kb_room_compose, on_kb_emoji_event,
+                        LV_EVENT_PRESSED, NULL);
 }
 
 extern "C" void meck_ui_init() {
@@ -15224,6 +15419,8 @@ extern "C" void meck_ui_init() {
     esp_log_level_set("ledc", ESP_LOG_NONE);
 
     _lock_acquire(&lvgl_api_lock);
+
+    meck_emoji_init();
 
     scr_home = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_home, lv_color_black(), 0);
