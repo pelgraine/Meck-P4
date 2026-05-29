@@ -4778,6 +4778,9 @@ static void on_compose_focused(lv_event_t *e) {
 }
 
 static void on_compose_defocused(lv_event_t *e) {
+    // Scrolling the emoji picker can pull focus off the textarea; don't hide
+    // the composer keyboard while the picker is open.
+    if (meck_emoji_picker_is_open()) return;
     if (kb_compose) {
         lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
         if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 75, -10);
@@ -4848,6 +4851,7 @@ static void on_room_compose_focused(lv_event_t *e) {
 }
 
 static void on_room_compose_defocused(lv_event_t *e) {
+    if (meck_emoji_picker_is_open()) return;
     if (kb_room_compose) {
         lv_obj_add_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
         if (ta_room_compose) lv_obj_align(ta_room_compose,
