@@ -102,6 +102,9 @@ void meck_emoji_picker_open(lv_obj_t *kb, lv_obj_t *ta, bool dark) {
     lv_obj_set_size(g_overlay, sw, sh);
     lv_obj_set_pos(g_overlay, 0, 0);
     lv_obj_add_flag(g_overlay, LV_OBJ_FLAG_CLICKABLE);
+    // Don't let picker taps pull focus off the composer textarea, or the
+    // keyboard's focus/defocus layout gets out of sync (composer left raised).
+    lv_obj_remove_flag(g_overlay, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_add_event_cb(g_overlay, on_picker_overlay_pressed,
                         LV_EVENT_CLICKED, NULL);
 
@@ -110,6 +113,7 @@ void meck_emoji_picker_open(lv_obj_t *kb, lv_obj_t *ta, bool dark) {
     lv_obj_set_size(g_panel, (sw * 90) / 100, (sh * 60) / 100);
     lv_obj_center(g_panel);
     lv_obj_add_flag(g_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(g_panel, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_flex_flow(g_panel, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(g_panel, LV_FLEX_ALIGN_SPACE_EVENLY,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
@@ -139,6 +143,7 @@ void meck_emoji_picker_open(lv_obj_t *kb, lv_obj_t *ta, bool dark) {
 
     for (int i = 0; i < MECK_PICKER_TOTAL; i++) {
         lv_obj_t *cell = lv_button_create(g_panel);
+        lv_obj_remove_flag(cell, LV_OBJ_FLAG_CLICK_FOCUSABLE);
         lv_obj_set_size(cell, 56, 56);
         lv_obj_set_style_radius(cell, 6, LV_PART_MAIN);
         if (dark) {

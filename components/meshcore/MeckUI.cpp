@@ -9385,6 +9385,12 @@ static void create_dm_inbox_screen() {
     // Slot 8 (slots 0-5,7 used elsewhere; 6 is free but reserved). 8
     // groups visually with the message-related screens at slot 4 +5.
     screen_attach_clock_battery(scr_dm_inbox, 8, &meck_montserrat_24, 30);
+    // Move clock under the battery so the long "Direct Messages" title
+    // doesn't overlap it (mirrors the message thread / WiFi / debug screens).
+    if (lbl_screen_clock[8]) {
+        lv_obj_set_style_text_align(lbl_screen_clock[8], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(lbl_screen_clock[8], LV_ALIGN_TOP_RIGHT, -15, 55);
+    }
 
     lv_obj_t *btn_back = lv_button_create(scr_dm_inbox);
     lv_obj_set_size(btn_back, 100, 70);
