@@ -37,6 +37,7 @@ with a `meshcore` ESP-IDF component added on top.
 - [Private Channels](#private-channels)
 - [Discover](#discover)
 - [Audio Player](#audio-player)
+- [Reader](#reader)
 - [Maps](#maps)
 - [Config Export](#config-export)
 - [Config Import](#config-import)
@@ -58,18 +59,14 @@ with a `meshcore` ESP-IDF component added on top.
 
 ## Supported Devices
 
-Meck-P4 currently targets the LilyGo T-Display P4 (TFT version). The AMOLED
-variant has not been tested but should work after adjusting the display
-init in `main/examples/lvgl_9_ui/main.cpp`.
+Meck-P4 runs on the LilyGo T-Display P4 in **both** of its display variants, and both are verified working. The two boards are otherwise identical; they differ only in the screen and its touch controller. Select the panel at build time with `CONFIG_SCREEN_TYPE_HI8561` (TFT) or `CONFIG_SCREEN_TYPE_RM69A10` (AMOLED).
 
-|Device                |Display                            |Input                                    |LoRa  |Battery                     |GPS         |RTC                                   |
-|----------------------|-----------------------------------|-----------------------------------------|------|----------------------------|------------|--------------------------------------|
-|**T-Display P4** (TFT)|4.05” punch-hole TFT LCD (1232×568)|GT911 capacitive touch + virtual keyboard|SX1262|BQ27220 fuel gauge, 1000 mAh|L76K (UART1)|PCF8563 (initialised but not yet used)|
+|Variant   |Panel model    |Display                          |Display driver|Touch driver       |
+|----------|---------------|---------------------------------|--------------|-------------------|
+|**TFT**   |H0405S002T002  |a-Si TFT, 4.05", 540 × 1168 px   |HI8561        |HI8561 (integrated)|
+|**AMOLED**|H0410S001AMT001|a-Si AMOLED, 4.1", 568 × 1232 px |RM69A10       |GT9895             |
 
-The T-Display P4 uses the ESP32-P4 (RISC-V dual-core) with 16 MB flash and
-32 MB PSRAM. The onboard ESP32-C6 (WiFi 6 / BLE 5.3 coprocessor) provides
-WiFi companion connectivity to the MeshCore app as of v0.4; BLE is not yet
-enabled.
+Both panels are 10-point capacitive touch, and the UI is rendered rotated to portrait. Everything outside the screen is common to both boards: an **ESP32-P4** (RISC-V dual-core) with 16 MB flash and 32 MB PSRAM; an onboard **ESP32-C6** (WiFi 6 / BLE 5.3) coprocessor over SDIO that provides WiFi companion connectivity to the MeshCore app as of v0.4 (BLE not yet enabled); an **SX1262** LoRa radio on the HPD16A module; a **BQ27220** fuel gauge (1000 mAh) with an **LGS4056H** charger; an **L76K** GPS on UART1; a **PCF8563** RTC (initialised but not yet used); an **ES8311** audio codec (NS4150B amplifier plus an electret microphone); an **ICM20948** IMU; an **AW86224** haptic motor; an **OV2710** MIPI camera; and an **XL9535** IO expander.
 
 -----
 
@@ -262,6 +259,12 @@ The set covers French and Czech in full; other languages with overlapping accent
 Tap the **`#+=`** key on the bottom row to switch the keyboard into symbol mode. Symbols include the usual punctuation plus `_`, `,`, and `:` — these were moved off the main letter rows so the `1#` shift key (which doubles as a row-mode toggle) doesn’t fight them for placement.
 
 Tap **`abc`** to switch back to letters.
+
+### Emoji
+
+The two message-composer keyboards (channel and DM compose) have an **emoji key** just to the right of the space bar. Tap it to open a scrollable picker; tap an emoji to insert it and the picker closes, or tap outside the picker to dismiss without inserting.
+
+Emoji render in colour both in the picker and inline in your messages, drawn from a set of Twemoji images baked into the firmware. Codepoints outside that set fall back to the normal text font.
 
 -----
 
@@ -582,10 +585,12 @@ Tap **Audio** from the home grid to open the audio player. Plays WAV and MP3 fil
 
 |Subtree                    |Defaults                                                                                         |
 |---------------------------|-------------------------------------------------------------------------------------------------|
-|`/sdcard/audio/music/`     |Standard music playback. Resume bookmark off by default.                                         |
+|`/sdcard/audio/music/`     |Standard music playback. Always starts from the beginning (no resume bookmark).                 |
 |`/sdcard/audio/audiobooks/`|Audiobook mode. Resume bookmark on, sleep timer available, position tracked through the playlist.|
 
 Inside each, organise however you like (typically Artist / Album / track, or Author / Book / chapter). The audio browser shows breadcrumbs and lets you tap a track to play, with transport controls (-30s, play/pause, +30s), volume, and a progress bar on the Now Playing screen.
+
+Playback continues when you leave the player. While a track is playing, a **`>>` indicator** appears in the header, including in the Audio and Reader file browsers; tap it to jump straight back to the Now Playing screen for the current track without restarting it. Audiobooks resume from where you left off across reboots; music always starts from the beginning.
 
 **Cover art** displays when a **256x256 `cover.png`** is placed alongside your tracks. Other filenames (`folder.png`, `front.png`, `album.png`) are also recognised, case-insensitive. Larger PNGs are read by the file scanner but fail to allocate at decode time — see the audio player guide for the working recipe and a downscale command if you have higher-resolution covers on hand.
 
@@ -596,6 +601,22 @@ Inside each, organise however you like (typically Artist / Album / track, or Aut
 For full setup instructions including the `mp3_clean.py` script usage, SD card layout, troubleshooting, and developer notes, see:
 
 **[Audio player guide](https://github.com/pelgraine/Meck-P4/blob/main/information/Meck%20Docs/audioplayerguide.md)**
+
+-----
+
+## Reader
+
+Tap **Reader** from the home grid to open the text reader. It lists files from the SD card under `/sdcard/books`, with the same folder navigation, breadcrumb, and up-one-level button as the audio browser, so you can organise books into subfolders however you like.
+
+As of **v0.5** the reader opens **plain-text (`.txt`) files** only. EPUB support is planned for a future firmware release, handled as an EPUB-to-text conversion that produces a `.txt` the reader then opens.
+
+Tap a file to start reading. In the reading view, tap the **left third** of the screen to turn back a page and the **right two-thirds** to turn forward. Back returns to the file list; from the `/sdcard/books` root, Back returns to the home screen.
+
+**Progress** shows as a percentage at the bottom of the reading view. It is based on your byte position through the file (the start of the current page divided by the file size), so it tracks how far through the whole file you are rather than counting pages.
+
+**Resume bookmark.** A **green play icon** beside a file in the list means that file has a saved reading position. Re-opening it resumes at the page you were on, so you can leave a book part-read and pick it up later. Your position is saved as you turn pages and when you leave the book.
+
+**Font size.** The reader honours the font-size preference in **Settings**: the same setting that scales the rest of the UI also sizes the body text of your `.txt` files.
 
 -----
 
@@ -940,9 +961,11 @@ no particular timeframes attached.
   (QWERTY / AZERTY / QWERTZ), long-press accent popover for French
   and Czech diacritics
 - [x] **Audio player** — WAV + MP3 playback from SD with music /
-  audiobook subtrees, transport controls, volume, bookmarks. See
-  [Audio Player](#audio-player). Cover-art rendering still incomplete
-  in v0.2 (see audio guide for status).
+  audiobook subtrees, transport controls, volume, and a tappable
+  now-playing indicator that returns to the current track without
+  restarting it. Audiobook resume bookmarks; music starts fresh each
+  time. See [Audio Player](#audio-player). Cover-art rendering above
+  256x256 still incomplete (see audio guide for status).
 - [x] Settings screen with node name, radio preset, TX power, path hash
   mode, UTC offset, home color, brightness, auto screen-off, KB theme,
   KB layout
@@ -995,9 +1018,8 @@ no particular timeframes attached.
 - [ ] Notes app
 - [ ] Mentions-only notification filtering — the "Mentions" preference currently behaves the same as "All"; filtering to trigger only on @nodename is planned
 - [ ] Serial CLI commands on the P4 — local serial settings require a serial terminal, which is not yet implemented. Remote CLI via Repeater Admin works normally
-- [ ] Audio bookmarks not working
 - [ ] M4B audiobook files not supported (MP3 and WAV only)
-- [ ] Audio player pause button disappears if you exit and re-enter the audio screen while a track is playing, or start a second track after the first
+- [ ] Audio player pause button can take a second or two to refresh after a track change or when returning to the Now Playing screen; it no longer disappears for the rest of the session
 - [ ] Audio cover-art rendering at >256x256 — pre-flight succeeds but the LVGL heap
   can’t allocate decoded framebuffers for larger sizes; needs decode-time
   downscale or a streaming decoder. 256x256 size png file works.
