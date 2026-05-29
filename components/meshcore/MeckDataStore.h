@@ -168,6 +168,12 @@ struct P4NodePrefs {
     char wifi_ssid[33];              // WiFi SSID
     char wifi_password[65];          // WiFi password
 
+    // Keep an unsent channel message and restore it when re-entering that
+    // channel. The drafts themselves live in RAM (not persisted); this flag
+    // is the user's on/off setting. Appending here is safe; loadPrefs
+    // tolerates short reads, so existing blobs come up with it off.
+    uint8_t save_drafts;             // 0=off (default), 1=on
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -204,6 +210,7 @@ struct P4NodePrefs {
         wifi_enabled = 0;       // off by default
         memset(wifi_ssid, 0, sizeof(wifi_ssid));
         memset(wifi_password, 0, sizeof(wifi_password));
+        save_drafts = 0;        // off by default
     }
 };
 

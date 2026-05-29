@@ -442,6 +442,7 @@ static lv_obj_t *lbl_set_font_scale  = NULL;
 #if MECK_BLE_ENABLED
 static lv_obj_t *lbl_set_ble         = NULL;
 #endif
+static lv_obj_t *lbl_set_drafts      = NULL;
 
 // WiFi settings sub-screen (Settings > WiFi Companion)
 static lv_obj_t *scr_settings_wifi        = NULL;
@@ -600,6 +601,11 @@ static lv_obj_t *ta_compose             = NULL;
 static lv_obj_t *kb_compose             = NULL;
 static lv_obj_t *btn_send               = NULL;
 static uint8_t  g_active_channel        = 0;
+
+// In-RAM per-channel message drafts (channels only, not persisted across
+// reboot). Restored when entering a channel, captured when leaving the
+// messages screen, cleared on send. Gated by prefs->save_drafts.
+static char     g_channel_drafts[MAX_GROUP_CHANNELS][160] = {};
 
 // ============================================================================
 // DMs — per-contact conversation rings + state
@@ -1325,6 +1331,7 @@ static void on_settings_font_scale_tap(lv_event_t *e);
 #if MECK_BLE_ENABLED
 static void on_settings_ble_tap(lv_event_t *e);
 #endif
+static void on_settings_drafts_tap(lv_event_t *e);
 static void goto_settings_wifi(lv_event_t *e);
 static void create_settings_wifi_screen();
 static void on_gps_tile_long_press(lv_event_t *e);
@@ -1733,7 +1740,7 @@ static const char *meck_kb_map_uc_qwertz[] = {
 
 // ----------------------------------------------------------------------------
 // Composer keyboard maps. Identical to the maps above except row 4 carries an
-// emoji key (MECK_EMOJI_KEY) between "ABC"/"abc" and the space bar; the space
+// emoji key (MECK_EMOJI_KEY) to the right of the space bar; the space
 // bar narrows from 10 to 7 width units to make room. Applied only to
 // kb_compose and kb_room_compose by meck_style_keyboard(). Tapping the emoji
 // key opens the picker (see on_kb_emoji_event); it never types.
@@ -1742,7 +1749,7 @@ static const char *meck_kb_map_lc_em[] = {
     "q","w","e","r","t","y","u","i","o","p",                                "\n",
     "a","s","d","f","g","h","j","k","l",            LV_SYMBOL_BACKSPACE,    "\n",
     ",","z","x","c","v","b","n","m",".",            LV_SYMBOL_NEW_LINE,     "\n",
-    LV_SYMBOL_LEFT, "-", "ABC", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    LV_SYMBOL_LEFT, "-", "ABC", " ", MECK_EMOJI_KEY, "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
@@ -1750,24 +1757,24 @@ static const char *meck_kb_map_uc_em[] = {
     "Q","W","E","R","T","Y","U","I","O","P",                                "\n",
     "A","S","D","F","G","H","J","K","L",            LV_SYMBOL_BACKSPACE,    "\n",
     ",","Z","X","C","V","B","N","M",".",            LV_SYMBOL_NEW_LINE,     "\n",
-    LV_SYMBOL_LEFT, "-", "abc", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    LV_SYMBOL_LEFT, "-", "abc", " ", MECK_EMOJI_KEY, "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
-// Row 4 widths: arrows 2/2, '-' 3, ABC 4, emoji 3, space 7 (was 10), 1# 3.
+// Row 4 widths: arrows 2/2, '-' 3, ABC 4, space 7 (was 10), emoji 3, 1# 3.
 // Row total stays 24. Rows 1-3 are copied unchanged from meck_kb_ctrl_lc.
 static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_em[] = {
     MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
     MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(14),
     MKB(8),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB_NR(7),
-    MKB(2),     MKB_NR(3), MKB_NR(4), MKB_NR(3), MKB(7), MKB_NR(3), MKB(2)
+    MKB(2),     MKB_NR(3), MKB_NR(4), MKB(7), MKB_NR(3), MKB_NR(3), MKB(2)
 };
 
 static const char *meck_kb_map_lc_azerty_em[] = {
     "a","z","e","r","t","y","u","i","o","p",                                "\n",
     "q","s","d","f","g","h","j","k","l","m",        LV_SYMBOL_BACKSPACE,    "\n",
     ",","w","x","c","v","b","n",".",                LV_SYMBOL_NEW_LINE,     "\n",
-    LV_SYMBOL_LEFT, "-", "ABC", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    LV_SYMBOL_LEFT, "-", "ABC", " ", MECK_EMOJI_KEY, "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
@@ -1775,7 +1782,7 @@ static const char *meck_kb_map_uc_azerty_em[] = {
     "A","Z","E","R","T","Y","U","I","O","P",                                "\n",
     "Q","S","D","F","G","H","J","K","L","M",        LV_SYMBOL_BACKSPACE,    "\n",
     ",","W","X","C","V","B","N",".",                LV_SYMBOL_NEW_LINE,     "\n",
-    LV_SYMBOL_LEFT, "-", "abc", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    LV_SYMBOL_LEFT, "-", "abc", " ", MECK_EMOJI_KEY, "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
@@ -1785,14 +1792,14 @@ static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_azerty_em[] = {
     MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
     MKB(7),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(14),
     MKB(8),     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB_NR(7),
-    MKB(2),     MKB_NR(3), MKB_NR(4), MKB_NR(3), MKB(7), MKB_NR(3), MKB(2)
+    MKB(2),     MKB_NR(3), MKB_NR(4), MKB(7), MKB_NR(3), MKB_NR(3), MKB(2)
 };
 
 static const char *meck_kb_map_lc_qwertz_em[] = {
     "q","w","e","r","t","z","u","i","o","p",                                "\n",
     "a","s","d","f","g","h","j","k","l",            LV_SYMBOL_BACKSPACE,    "\n",
     ",","y","x","c","v","b","n","m",".",            LV_SYMBOL_NEW_LINE,     "\n",
-    LV_SYMBOL_LEFT, "-", "ABC", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    LV_SYMBOL_LEFT, "-", "ABC", " ", MECK_EMOJI_KEY, "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
@@ -1800,7 +1807,7 @@ static const char *meck_kb_map_uc_qwertz_em[] = {
     "Q","W","E","R","T","Z","U","I","O","P",                                "\n",
     "A","S","D","F","G","H","J","K","L",            LV_SYMBOL_BACKSPACE,    "\n",
     ",","Y","X","C","V","B","N","M",".",            LV_SYMBOL_NEW_LINE,     "\n",
-    LV_SYMBOL_LEFT, "-", "abc", MECK_EMOJI_KEY, " ", "1#", LV_SYMBOL_RIGHT,
+    LV_SYMBOL_LEFT, "-", "abc", " ", MECK_EMOJI_KEY, "1#", LV_SYMBOL_RIGHT,
     ""
 };
 
@@ -1810,17 +1817,17 @@ static const char *meck_kb_map_special_em[] = {
     "1","2","3","4","5","6","7","8","9","0",            LV_SYMBOL_BACKSPACE,  "\n",
     "abc","@","#","$","%","&","*","(",")","\"",         LV_SYMBOL_NEW_LINE,   "\n",
     "_","-","=","+","/","!","?",":",";","'",",",".",                          "\n",
-    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", MECK_EMOJI_KEY, " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, "abc", " ", MECK_EMOJI_KEY, LV_SYMBOL_RIGHT, LV_SYMBOL_OK,
     ""
 };
 
 // Special composer widths: rows 1-3 copied from meck_kb_ctrl_special, row 4
-// inserts emoji at 3 and narrows space from 8 to 5 (row total stays 21).
+// narrows space from 8 to 5 and places emoji (3) to its right (row total stays 21).
 static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_special_em[] = {
     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(8),
     MKB_NR(8), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(7),
     MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
-    MKB_NR(2), MKB(2), MKB_NR(5), MKB_NR(3), MKB(5), MKB(2), MKB_NR(2)
+    MKB_NR(2), MKB(2), MKB_NR(5), MKB(5), MKB_NR(3), MKB(2), MKB_NR(2)
 };
 
 // ============================================================================
@@ -2371,6 +2378,10 @@ static void settings_update_labels() {
             prefs->ble_enabled != 0 ? "On" : "Off");
     }
 #endif
+    if (lbl_set_drafts) {
+        lv_label_set_text(lbl_set_drafts,
+            prefs->save_drafts != 0 ? "On" : "Off");
+    }
 }
 
 // ============================================================================
@@ -4725,6 +4736,8 @@ static void on_send_clicked(lv_event_t *e) {
         } else {
             // Channel path (existing behaviour).
             meck_request_send_text(g_active_channel, text);
+            if (g_active_channel < MAX_GROUP_CHANNELS)
+                g_channel_drafts[g_active_channel][0] = '\0';
         }
         lv_textarea_set_text(ta_compose, "");
     }
@@ -7100,6 +7113,24 @@ static void create_settings_contacts_screen() {
 // Settings screen
 // ============================================================================
 
+static void on_settings_drafts_tap(lv_event_t *e) {
+    LV_UNUSED(e);
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->save_drafts = (prefs->save_drafts != 0) ? 0 : 1;
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    if (lbl_set_drafts) {
+        lv_label_set_text(lbl_set_drafts,
+            prefs->save_drafts != 0 ? "On" : "Off");
+    }
+    printf("Settings: save drafts = %s\n",
+           prefs->save_drafts != 0 ? "On" : "Off");
+}
+
 static void create_settings_screen() {
     scr_settings = lv_obj_create(NULL);
     lock_screen_scroll(scr_settings);
@@ -7205,6 +7236,13 @@ static void create_settings_screen() {
         lv_obj_set_style_text_color(position_value_lbl,
             lv_palette_main(LV_PALETTE_GREY), 0);
     }
+    y += 65;
+
+    // Save Draft Messages: keep an unsent channel message in memory and
+    // restore it when you re-open that channel (cleared on send). In RAM
+    // only, not persisted across reboot.
+    create_settings_row(scroll, "Save Draft Messages",
+        &lbl_set_drafts, on_settings_drafts_tap, y);
     y += 65;
 
     // Backup to SD — manual force-write of every NVS blob to the SD card.
@@ -9431,8 +9469,25 @@ static void goto_dm_inbox(lv_event_t *e) {
 // Messages screen (lifted from old:908-1023)
 // ============================================================================
 
+// Capture the current channel draft when leaving the messages screen (any
+// exit path). In-RAM only; gated by prefs->save_drafts and channel mode.
+static void on_messages_screen_unload(lv_event_t *e) {
+    LV_UNUSED(e);
+    Meck* mesh = meck_get_instance();
+    P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : nullptr;
+    if (!prefs || prefs->save_drafts == 0) return;
+    if (g_in_dm_mode || g_active_channel >= MAX_GROUP_CHANNELS) return;
+    if (!ta_compose) return;
+    const char* t = lv_textarea_get_text(ta_compose);
+    strncpy(g_channel_drafts[g_active_channel], t ? t : "",
+            sizeof(g_channel_drafts[0]) - 1);
+    g_channel_drafts[g_active_channel][sizeof(g_channel_drafts[0]) - 1] = '\0';
+}
+
 static void create_messages_screen() {
     scr_messages = lv_obj_create(NULL);
+    lv_obj_add_event_cb(scr_messages, on_messages_screen_unload,
+                        LV_EVENT_SCREEN_UNLOAD_START, NULL);
     lock_screen_scroll(scr_messages);
     lv_obj_set_style_bg_color(scr_messages, lv_color_black(), 0);
     screen_attach_clock_battery(scr_messages, 4, &meck_montserrat_22, 30);
@@ -9597,7 +9652,13 @@ static void load_channel_view(uint8_t ch_idx) {
 
     rebuild_message_bubbles(ch_idx);
 
-    if (ta_compose) lv_textarea_set_text(ta_compose, "");
+    if (ta_compose) {
+        P4NodePrefs* dprefs = mesh ? mesh->getNodePrefs() : nullptr;
+        if (dprefs && dprefs->save_drafts != 0 && ch_idx < MAX_GROUP_CHANNELS)
+            lv_textarea_set_text(ta_compose, g_channel_drafts[ch_idx]);
+        else
+            lv_textarea_set_text(ta_compose, "");
+    }
     if (kb_compose) lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
     // Textarea was just cleared, so it'll be back at its min_height (50
     // px). meck_relayout_compose picks that up and sizes the message
