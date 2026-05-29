@@ -119,6 +119,16 @@ static volatile uint8_t g_eof_flag = 0;
  * ==========================================================================*/
 
 static const char *BOOKMARK_DIR = "/sdcard/audio/.bookmarks";
+static const char *AUDIOBOOK_PREFIX = "/sdcard/audio/audiobooks";
+
+// Bookmarks (resume position) are kept only for audiobooks. Music and other
+// audio under /sdcard/audio always start from the beginning, so finishing a
+// short track never leaves a near-end position that would make it jump to
+// EOF and skip on reopen.
+static bool path_is_audiobook(const char *path)
+{
+    return path && strncmp(path, AUDIOBOOK_PREFIX, strlen(AUDIOBOOK_PREFIX)) == 0;
+}
 
 static uint32_t fnv1a_hash(const char *s)
 {
@@ -148,6 +158,7 @@ static bool ensure_bookmark_dir(void)
 extern "C" uint32_t meck_audio_bookmark_load_sec(const char *path)
 {
     if (!path || !*path) return 0;
+    if (!path_is_audiobook(path)) return 0;   // music/other never resumes
     char bm[300];
     bookmark_path_for(path, bm, sizeof(bm));
     FILE *f = fopen(bm, "rb");
@@ -161,6 +172,7 @@ extern "C" uint32_t meck_audio_bookmark_load_sec(const char *path)
 static void bookmark_save_for(const char *path, uint32_t pos_sec)
 {
     if (!path || !*path) return;
+    if (!path_is_audiobook(path)) return;     // music/other never bookmarked
     if (!ensure_bookmark_dir()) return;
     char bm[300];
     bookmark_path_for(path, bm, sizeof(bm));

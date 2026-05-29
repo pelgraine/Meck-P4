@@ -257,7 +257,7 @@ static void add_entry_row(lv_obj_t* parent, const AudioEntry& e, int y) {
     lv_obj_t* ico = lv_label_create(row);
     lv_label_set_text(ico,
         e.is_dir            ? LV_SYMBOL_DIRECTORY
-        : e.has_bookmark    ? LV_SYMBOL_OK         /* "you have a saved position here" */
+        : e.has_bookmark    ? LV_SYMBOL_PLAY        /* in progress / resume here */
                             : LV_SYMBOL_AUDIO);
     lv_obj_set_style_text_color(ico,
         e.is_dir ? lv_palette_main(LV_PALETTE_AMBER)
