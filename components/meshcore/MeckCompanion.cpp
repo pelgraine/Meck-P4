@@ -95,6 +95,19 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 // ---- Additional commands ----
 #define CMD_SET_FLOOD_SCOPE_KEY       54
 
+// ---- Repeater admin commands (over-the-mesh login + status + session) ----
+#define CMD_SEND_LOGIN                26
+#define CMD_SEND_STATUS_REQ           27
+#define CMD_HAS_CONNECTION            28
+#define CMD_LOGOUT                    29
+#define CMD_SEND_BINARY_REQ           50
+
+// ---- Repeater admin push codes ----
+#define PUSH_CODE_LOGIN_SUCCESS       0x85
+#define PUSH_CODE_LOGIN_FAIL          0x86
+#define PUSH_CODE_STATUS_RESPONSE     0x87
+#define PUSH_CODE_BINARY_RESPONSE     0x8C
+
 // ---- Firmware identity ----
 // Must match MeckMesh.h / upstream FIRMWARE_VER_CODE so the app
 // negotiates the right protocol level.
@@ -789,6 +802,95 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         return;
     }
 
+    // ---- CMD_SEND_LOGIN (26) ---- repeater admin login
+    // App sends pub_key followed by password. We route to the mesh's
+    // sendLogin via a Meck wrapper that mirrors the on-device admin
+    // path (force-flood for the login itself, restore out_path after,
+    // reset sync_since for room contacts) but uses companion-side
+    // pending state so it doesn't disturb the device admin session.
+    if (cmd == CMD_SEND_LOGIN && len >= 1 + PUB_KEY_SIZE) {
+        uint8_t* pub_key = &_cmd[1];
+        char* password = (char*)&_cmd[1 + PUB_KEY_SIZE];
+        _cmd[len] = 0;  // ensure null-terminator on password
+        uint32_t est_timeout = 0;
+        uint8_t is_flood = 0;
+        if (_mesh->companionLoginToRepeater(pub_key, password, est_timeout, is_flood)) {
+            int i = 0;
+            _out[i++] = RESP_CODE_SENT;
+            _out[i++] = is_flood;
+            memcpy(&_out[i], pub_key, 4); i += 4;  // pending_login marker for the app
+            memcpy(&_out[i], &est_timeout, 4); i += 4;
+            _serial->writeFrame(_out, i);
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);
+        }
+        return;
+    }
+
+    // ---- CMD_SEND_STATUS_REQ (27) ---- repeater status query
+    // App sends pub_key. Routes to sendRequest(REQ_TYPE_GET_STATUS) via
+    // a Meck wrapper that records the response tag in companion-side
+    // pending state.
+    if (cmd == CMD_SEND_STATUS_REQ && len >= 1 + PUB_KEY_SIZE) {
+        uint8_t* pub_key = &_cmd[1];
+        uint32_t tag = 0, est_timeout = 0;
+        uint8_t is_flood = 0;
+        if (_mesh->companionSendStatusRequest(pub_key, tag, est_timeout, is_flood)) {
+            int i = 0;
+            _out[i++] = RESP_CODE_SENT;
+            _out[i++] = is_flood;
+            memcpy(&_out[i], &tag, 4); i += 4;
+            memcpy(&_out[i], &est_timeout, 4); i += 4;
+            _serial->writeFrame(_out, i);
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);
+        }
+        return;
+    }
+
+    // ---- CMD_HAS_CONNECTION (28) ---- query whether a keep-alive session
+    // is currently active for the given contact pub_key.
+    if (cmd == CMD_HAS_CONNECTION && len >= 1 + PUB_KEY_SIZE) {
+        if (_mesh->companionHasConnection(&_cmd[1])) {
+            writeOKFrame();
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);
+        }
+        return;
+    }
+
+    // ---- CMD_LOGOUT (29) ---- end the keep-alive session for a contact
+    if (cmd == CMD_LOGOUT && len >= 1 + PUB_KEY_SIZE) {
+        _mesh->companionLogout(&_cmd[1]);
+        writeOKFrame();
+        return;
+    }
+
+    // ---- CMD_SEND_BINARY_REQ (50) ---- generic binary request to a
+    // repeater (GET_NEIGHBOURS, ACL queries, owner info, etc). App
+    // packs the request type and parameters into req_data; we forward
+    // verbatim to sendRequest and record the response tag in companion
+    // pending state. Responses match by tag (4 bytes), not pub_key.
+    if (cmd == CMD_SEND_BINARY_REQ && len >= 2 + PUB_KEY_SIZE) {
+        uint8_t* pub_key = &_cmd[1];
+        uint8_t* req_data = &_cmd[1 + PUB_KEY_SIZE];
+        int req_data_len = (int)len - (1 + PUB_KEY_SIZE);
+        uint32_t tag = 0, est_timeout = 0;
+        uint8_t is_flood = 0;
+        if (_mesh->companionSendBinaryReq(pub_key, req_data, req_data_len,
+                                          tag, est_timeout, is_flood)) {
+            int i = 0;
+            _out[i++] = RESP_CODE_SENT;
+            _out[i++] = is_flood;
+            memcpy(&_out[i], &tag, 4); i += 4;
+            memcpy(&_out[i], &est_timeout, 4); i += 4;
+            _serial->writeFrame(_out, i);
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);
+        }
+        return;
+    }
+
     // ---- Unhandled command ----
     printf("Companion: unhandled cmd 0x%02X len=%d\n", cmd, (int)len);
     writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
@@ -925,4 +1027,72 @@ void MeckCompanion::pushPathUpdated(const uint8_t* pub_key) {
     _out[0] = PUSH_CODE_PATH_UPDATED;
     memcpy(&_out[1], pub_key, PUB_KEY_SIZE);
     _serial->writeFrame(_out, 1 + PUB_KEY_SIZE);
+}
+
+// ---------------------------------------------------------------------------
+// Repeater admin pushes
+// ---------------------------------------------------------------------------
+//
+// Frame layouts mirror upstream MyMesh::onContactResponse() byte-for-byte so
+// the app parses them with no protocol-version negotiation needed.
+
+void MeckCompanion::pushLoginSuccess(const uint8_t* pub_key, uint32_t server_clock,
+                                     uint8_t is_admin, uint8_t acl_permissions,
+                                     uint8_t fw_ver_level) {
+    if (!_serial || !_serial->isConnected()) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_LOGIN_SUCCESS;
+    _out[i++] = is_admin;                       // legacy is_admin / permissions byte
+    memcpy(&_out[i], pub_key, 6); i += 6;       // pub_key_prefix
+    memcpy(&_out[i], &server_clock, 4); i += 4; // server timestamp (response tag)
+    _out[i++] = acl_permissions;                // v7 ACL permissions byte
+    _out[i++] = fw_ver_level;                   // firmware version level
+    _serial->writeFrame(_out, i);
+}
+
+void MeckCompanion::pushLoginFail(const uint8_t* pub_key) {
+    if (!_serial || !_serial->isConnected()) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_LOGIN_FAIL;
+    _out[i++] = 0;                              // reserved
+    memcpy(&_out[i], pub_key, 6); i += 6;
+    _serial->writeFrame(_out, i);
+}
+
+void MeckCompanion::pushStatusResponse(const uint8_t* pub_key,
+                                       const uint8_t* payload, uint8_t payload_len) {
+    if (!_serial || !_serial->isConnected()) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_STATUS_RESPONSE;
+    _out[i++] = 0;                              // reserved
+    memcpy(&_out[i], pub_key, 6); i += 6;
+    if (payload_len > 0 && i + (int)payload_len <= MAX_FRAME_SIZE) {
+        memcpy(&_out[i], payload, payload_len);
+        i += payload_len;
+    }
+    _serial->writeFrame(_out, i);
+}
+
+void MeckCompanion::pushCliReply(const uint8_t* pub_key, uint8_t path_len,
+                                 uint32_t timestamp, int8_t snr_x4,
+                                 const char* text) {
+    // CLI replies travel to the app via the same offline-queue path used
+    // for ordinary contact messages, tagged with TXT_TYPE_CLI_DATA so the
+    // app routes them to its repeater admin view.
+    pushContactMessage(pub_key, path_len, TXT_TYPE_CLI_DATA,
+                       timestamp, snr_x4, nullptr, 0, text);
+}
+
+void MeckCompanion::pushBinaryResponse(uint32_t tag,
+                                       const uint8_t* payload, uint8_t payload_len) {
+    if (!_serial || !_serial->isConnected()) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_BINARY_RESPONSE;
+    _out[i++] = 0;                          // reserved
+    memcpy(&_out[i], &tag, 4); i += 4;      // app matches reply by tag
+    if (payload_len > 0 && i + (int)payload_len <= MAX_FRAME_SIZE) {
+        memcpy(&_out[i], payload, payload_len);
+        i += payload_len;
+    }
+    _serial->writeFrame(_out, i);
 }

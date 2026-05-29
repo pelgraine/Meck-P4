@@ -154,6 +154,55 @@ extern "C" void meck_companion_push_path_updated(const uint8_t* pub_key) {
     g_wifi_companion.pushPathUpdated(pub_key);
 }
 
+extern "C" void meck_companion_push_login_success(const uint8_t* pub_key,
+                                                   uint32_t server_clock,
+                                                   uint8_t is_admin,
+                                                   uint8_t acl_permissions,
+                                                   uint8_t fw_ver_level) {
+#if MECK_BLE_ENABLED
+    g_companion.pushLoginSuccess(pub_key, server_clock, is_admin,
+                                 acl_permissions, fw_ver_level);
+#endif
+    g_wifi_companion.pushLoginSuccess(pub_key, server_clock, is_admin,
+                                      acl_permissions, fw_ver_level);
+}
+
+extern "C" void meck_companion_push_login_fail(const uint8_t* pub_key) {
+#if MECK_BLE_ENABLED
+    g_companion.pushLoginFail(pub_key);
+#endif
+    g_wifi_companion.pushLoginFail(pub_key);
+}
+
+extern "C" void meck_companion_push_status_response(const uint8_t* pub_key,
+                                                     const uint8_t* payload,
+                                                     uint8_t payload_len) {
+#if MECK_BLE_ENABLED
+    g_companion.pushStatusResponse(pub_key, payload, payload_len);
+#endif
+    g_wifi_companion.pushStatusResponse(pub_key, payload, payload_len);
+}
+
+extern "C" void meck_companion_push_cli_reply(const uint8_t* pub_key,
+                                               uint8_t path_len,
+                                               uint32_t timestamp,
+                                               int8_t snr_x4,
+                                               const char* text) {
+#if MECK_BLE_ENABLED
+    g_companion.pushCliReply(pub_key, path_len, timestamp, snr_x4, text);
+#endif
+    g_wifi_companion.pushCliReply(pub_key, path_len, timestamp, snr_x4, text);
+}
+
+extern "C" void meck_companion_push_binary_response(uint32_t tag,
+                                                     const uint8_t* payload,
+                                                     uint8_t payload_len) {
+#if MECK_BLE_ENABLED
+    g_companion.pushBinaryResponse(tag, payload, payload_len);
+#endif
+    g_wifi_companion.pushBinaryResponse(tag, payload, payload_len);
+}
+
 #if MECK_BLE_ENABLED
 extern "C" void meck_ble_set_enabled(bool enabled) {
     g_ble_pending_action = enabled ? 1 : -1;

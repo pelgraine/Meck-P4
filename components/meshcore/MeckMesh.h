@@ -1165,6 +1165,141 @@ public:
         return true;
     }
 
+    // ------------------------------------------------------------------
+    // Companion-side repeater admin wrappers
+    // ------------------------------------------------------------------
+    //
+    // Called by MeckCompanion::handleCmdFrame for CMD_SEND_LOGIN,
+    // CMD_SEND_STATUS_REQ, CMD_HAS_CONNECTION, and CMD_LOGOUT. These
+    // mirror the on-device ui* methods but use companion-specific
+    // pending state (_companion_pending_*) so the app and device admin
+    // sessions can't capture each other's responses. They deliberately
+    // leave _admin_contact_idx, _pending_login_pk, _pending_status_tag,
+    // and _cli_response_pending untouched.
+
+    // Initiate a login to a repeater from the companion app. Forces
+    // flood routing for the login itself (out_path is temporarily
+    // blanked and restored after) per the same reasoning as
+    // uiLoginToRepeater. Resets sync_since for ADV_TYPE_ROOM contacts.
+    // Returns false on contact lookup failure or MSG_SEND_FAILED.
+    bool companionLoginToRepeater(const uint8_t* pub_key, const char* password,
+                                  uint32_t& est_timeout_ms, uint8_t& is_flood) {
+        if (!pub_key || !password) return false;
+        ContactInfo* recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: companionLogin pub_key lookup failed\n");
+            return false;
+        }
+
+        uint8_t save_out_path_len = recipient->out_path_len;
+        recipient->out_path_len = OUT_PATH_UNKNOWN;
+
+        if (recipient->type == ADV_TYPE_ROOM) {
+            recipient->sync_since = 0;
+        }
+
+        est_timeout_ms = 0;
+        int result = sendLogin(*recipient, password, est_timeout_ms);
+        recipient->out_path_len = save_out_path_len;
+
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: companionLogin to %s FAILED\n", recipient->name);
+            est_timeout_ms = 0;
+            return false;
+        }
+
+        is_flood = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
+        memcpy(&_companion_pending_login_pk, recipient->id.pub_key, 4);
+
+        printf("Meck: companionLogin to %s sent (%s), timeout=%ums, pending_pk=0x%08X\n",
+               recipient->name, is_flood ? "flood" : "direct",
+               (unsigned)est_timeout_ms, (unsigned)_companion_pending_login_pk);
+        return true;
+    }
+
+    // Request the repeater's status block on behalf of the companion.
+    // Returns the sendRequest tag in `tag` so the app can match it
+    // against the eventual PUSH_CODE_STATUS_RESPONSE frame.
+    bool companionSendStatusRequest(const uint8_t* pub_key, uint32_t& tag,
+                                    uint32_t& est_timeout_ms, uint8_t& is_flood) {
+        if (!pub_key) return false;
+        ContactInfo* recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: companionStatus pub_key lookup failed\n");
+            return false;
+        }
+
+        tag = 0;
+        est_timeout_ms = 0;
+        int result = sendRequest(*recipient, REQ_TYPE_GET_STATUS, tag, est_timeout_ms);
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: companionStatus to %s FAILED\n", recipient->name);
+            est_timeout_ms = 0;
+            return false;
+        }
+
+        is_flood = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
+        _companion_pending_status_tag = tag;
+
+        printf("Meck: companionStatus to %s (%s) tag=0x%08X timeout=%ums\n",
+               recipient->name, is_flood ? "flood" : "direct",
+               (unsigned)tag, (unsigned)est_timeout_ms);
+        return true;
+    }
+
+    // Query whether a keep-alive session is currently active for a
+    // given contact pub_key. Pure pass-through to BaseChatMesh.
+    bool companionHasConnection(const uint8_t* pub_key) {
+        if (!pub_key) return false;
+        return hasConnectionTo(pub_key);
+    }
+
+    // End the keep-alive session for a contact. Pure pass-through to
+    // BaseChatMesh.
+    void companionLogout(const uint8_t* pub_key) {
+        if (!pub_key) return;
+        stopConnection(pub_key);
+        printf("Meck: companionLogout\n");
+    }
+
+    // Send a raw binary request to a repeater on behalf of the companion
+    // app. The req_data buffer is whatever the app packed (e.g.
+    // REQ_TYPE_GET_NEIGHBOURS + prefix_len + offset + count). The
+    // returned tag is stored in _companion_pending_binary_tag so the
+    // response can be matched in onContactResponse and pushed to the
+    // app via PUSH_CODE_BINARY_RESPONSE.
+    bool companionSendBinaryReq(const uint8_t* pub_key,
+                                const uint8_t* req_data, int req_data_len,
+                                uint32_t& tag, uint32_t& est_timeout_ms,
+                                uint8_t& is_flood) {
+        if (!pub_key || !req_data || req_data_len <= 0) return false;
+        ContactInfo* recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+        if (!recipient) {
+            printf("Meck: companionBinaryReq pub_key lookup failed\n");
+            return false;
+        }
+
+        tag = 0;
+        est_timeout_ms = 0;
+        int result = sendRequest(*recipient, (uint8_t*)req_data, req_data_len,
+                                 tag, est_timeout_ms);
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: companionBinaryReq to %s FAILED\n", recipient->name);
+            est_timeout_ms = 0;
+            return false;
+        }
+
+        is_flood = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
+        _companion_pending_binary_tag = tag;
+
+        printf("Meck: companionBinaryReq to %s (%s) tag=0x%08X timeout=%ums "
+               "req_type=0x%02X req_len=%d\n",
+               recipient->name, is_flood ? "flood" : "direct",
+               (unsigned)tag, (unsigned)est_timeout_ms,
+               (unsigned)req_data[0], req_data_len);
+        return true;
+    }
+
     // Request the repeater's telemetry data (REQ_TYPE_GET_TELEMETRY_DATA).
     // Response payload is a CayenneLPP buffer — variable-length, parsed
     // by the UI side. Common fields: voltage (type 0x74), temperature
@@ -2722,6 +2857,19 @@ protected:
                (text && strlen(text) > 40) ? "..." : "",
                _admin_contact_idx, _cli_response_pending ? 1 : 0);
 
+        // ---- Companion (app) CLI reply ----
+        //
+        // Push every CLI text reply to the companion app via the offline
+        // queue, tagged TXT_TYPE_CLI_DATA. The app matches replies to
+        // whichever CLI command it sent (it doesn't share state with the
+        // device admin screen), and silently ignores unmatched ones. This
+        // mirrors upstream MyMesh::onCommandDataRecv() which queues every
+        // CLI reply regardless of who initiated it. We run this BEFORE
+        // the device-side discard logic so the app gets its reply even
+        // when no device admin session is active.
+        meck_companion_push_cli_reply(from.id.pub_key, /*path_len*/ 0,
+                                       sender_timestamp, /*snr_x4*/ 0, text);
+
         if (_admin_contact_idx < 0) {
             // No active admin session — discard. Could be a stale reply
             // from a session we tore down, or a CLI reply from a
@@ -2887,6 +3035,77 @@ protected:
 
         uint32_t tag;
         memcpy(&tag, data, 4);
+
+        // ---- Companion (app) admin path ----
+        //
+        // These branches run before the device branches and deliberately
+        // fall through (no `return`) so both sides can react to the same
+        // response if both happen to be awaiting one. Each clears its own
+        // pending state so a late retransmit can't re-dispatch.
+
+        // Companion login response: matched by contact pub_key prefix
+        // against _companion_pending_login_pk (sendLogin doesn't return a
+        // tag we can use). Payload bytes mirror what the device branch
+        // below reads: data[4]=status, data[5]=keep_alive*16, data[6]=is_admin,
+        // data[7]=ACL permissions, data[8..11]=uniqueness blob, data[12]=fw_ver.
+        if (_companion_pending_login_pk != 0 &&
+            memcmp(&_companion_pending_login_pk, contact.id.pub_key, 4) == 0) {
+            _companion_pending_login_pk = 0;
+
+            bool success = (len >= 5 && data[4] == RESP_SERVER_LOGIN_OK);
+            if (success) {
+                uint16_t keep_alive_secs = (len >= 6) ? ((uint16_t)data[5]) * 16 : 0;
+                uint8_t  is_admin        = (len >= 7) ? data[6]  : 0;
+                uint8_t  acl_perms       = (len >= 8) ? data[7]  : 0;
+                uint8_t  fw_ver_level    = (len >= 13) ? data[12] : 0;
+
+                if (keep_alive_secs > 0) {
+                    startConnection(contact, keep_alive_secs);
+                }
+
+                meck_companion_push_login_success(contact.id.pub_key, tag,
+                                                  is_admin, acl_perms, fw_ver_level);
+                printf("Meck: companion login OK from %s is_admin=%u acl=0x%02X fw=%u\n",
+                       contact.name, (unsigned)is_admin,
+                       (unsigned)acl_perms, (unsigned)fw_ver_level);
+            } else {
+                meck_companion_push_login_fail(contact.id.pub_key);
+                printf("Meck: companion login FAIL from %s\n", contact.name);
+            }
+            // fall through to device branches below
+        }
+
+        // Companion status response: matched by tag against
+        // _companion_pending_status_tag. Payload (after the 4-byte tag)
+        // is forwarded verbatim to the app, which knows how to parse
+        // RepeaterStats.
+        if (_companion_pending_status_tag != 0 && tag == _companion_pending_status_tag) {
+            _companion_pending_status_tag = 0;
+            uint8_t payload_len = (len > 4) ? (uint8_t)(len - 4) : 0;
+            meck_companion_push_status_response(contact.id.pub_key,
+                                                payload_len > 0 ? &data[4] : nullptr,
+                                                payload_len);
+            printf("Meck: companion status response from %s (%u bytes)\n",
+                   contact.name, (unsigned)payload_len);
+            // fall through to device branches below
+        }
+
+        // Companion binary response: matched by tag against
+        // _companion_pending_binary_tag. Used for GET_NEIGHBOURS, ACL
+        // queries, and any other generic binary request the app sends
+        // via CMD_SEND_BINARY_REQ. Payload (after the 4-byte tag) is
+        // forwarded verbatim; the app parses it according to whatever
+        // request type it sent.
+        if (_companion_pending_binary_tag != 0 && tag == _companion_pending_binary_tag) {
+            _companion_pending_binary_tag = 0;
+            uint8_t payload_len = (len > 4) ? (uint8_t)(len - 4) : 0;
+            meck_companion_push_binary_response(tag,
+                                                payload_len > 0 ? &data[4] : nullptr,
+                                                payload_len);
+            printf("Meck: companion binary response from %s tag=0x%08X (%u bytes)\n",
+                   contact.name, (unsigned)tag, (unsigned)payload_len);
+            // fall through to device branches below
+        }
 
         // ---- Login response ----
         // Matched by pub_key prefix. The 4-byte tag here is the
@@ -4202,6 +4421,19 @@ private:
     uint32_t _pending_login_pk      = 0;
     uint32_t _pending_status_tag    = 0;
     uint32_t _pending_telemetry_tag = 0;
+
+    // ---- Companion-side admin pending state ----
+    // Parallel to _pending_login_pk / _pending_status_tag, used exclusively
+    // for the companion app's repeater admin flow. Kept separate so the
+    // on-device Repeater Admin screen and the companion app each have
+    // their own independent session and neither one's responses can be
+    // captured by the other. _companion_pending_login_pk holds the 4-byte
+    // pub_key prefix during a login round-trip; _companion_pending_status_tag
+    // holds the sendRequest tag during a status round-trip. Both clear on
+    // dispatch in onContactResponse.
+    uint32_t _companion_pending_login_pk   = 0;
+    uint32_t _companion_pending_status_tag = 0;
+    uint32_t _companion_pending_binary_tag = 0;
 
     // ---- Neighbours pagination state ----
     // _pending_neighbours_tag matches REQ_TYPE_GET_NEIGHBOURS replies

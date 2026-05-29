@@ -35,7 +35,7 @@
 // Firmware identity -- single source of truth for UI and companion protocol.
 // Update MECK_FIRMWARE_VERSION here before each release.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.3.9"
+#define MECK_FIRMWARE_VERSION "0.4.1"
 
 #ifdef __cplusplus
 extern "C" {
@@ -139,6 +139,27 @@ void meck_companion_push_path_updated(const uint8_t* pub_key);
 // own sent messages and display "Heard X Repeats".
 void meck_companion_push_rx_log(int8_t snr_x4, int8_t rssi,
                                  const uint8_t* raw, int len);
+
+// Repeater admin pushes -- forwarded to PUSH_CODE_LOGIN_SUCCESS (0x85),
+// PUSH_CODE_LOGIN_FAIL (0x86), PUSH_CODE_STATUS_RESPONSE (0x87), and the
+// existing contact-message offline queue (TXT_TYPE_CLI_DATA) respectively.
+void meck_companion_push_login_success(const uint8_t* pub_key,
+                                        uint32_t server_clock,
+                                        uint8_t is_admin,
+                                        uint8_t acl_permissions,
+                                        uint8_t fw_ver_level);
+void meck_companion_push_login_fail(const uint8_t* pub_key);
+void meck_companion_push_status_response(const uint8_t* pub_key,
+                                          const uint8_t* payload,
+                                          uint8_t payload_len);
+void meck_companion_push_cli_reply(const uint8_t* pub_key,
+                                    uint8_t path_len,
+                                    uint32_t timestamp,
+                                    int8_t snr_x4,
+                                    const char* text);
+void meck_companion_push_binary_response(uint32_t tag,
+                                          const uint8_t* payload,
+                                          uint8_t payload_len);
 
 #ifdef __cplusplus
 }

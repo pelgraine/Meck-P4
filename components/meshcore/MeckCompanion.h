@@ -61,6 +61,29 @@ public:
     // Raw RX packet stream (SNR, RSSI, full frame) for app repeat analysis
     void pushRxLog(int8_t snr_x4, int8_t rssi, const uint8_t* raw, int len);
 
+    // Repeater admin -- login response (success path)
+    void pushLoginSuccess(const uint8_t* pub_key, uint32_t server_clock,
+                          uint8_t is_admin, uint8_t acl_permissions,
+                          uint8_t fw_ver_level);
+
+    // Repeater admin -- login response (failure path)
+    void pushLoginFail(const uint8_t* pub_key);
+
+    // Repeater admin -- status response (RepeaterStats payload)
+    void pushStatusResponse(const uint8_t* pub_key,
+                            const uint8_t* payload, uint8_t payload_len);
+
+    // Repeater admin -- CLI text reply (queued as a contact message with
+    // txt_type=TXT_TYPE_CLI_DATA so the app's existing sync flow picks it up)
+    void pushCliReply(const uint8_t* pub_key, uint8_t path_len,
+                      uint32_t timestamp, int8_t snr_x4, const char* text);
+
+    // Repeater admin -- binary request response (e.g. GET_NEIGHBOURS, ACL).
+    // Tag matched on the app side, not pub_key, so the frame carries the
+    // 4-byte response tag followed by the request-type-specific payload.
+    void pushBinaryResponse(uint32_t tag,
+                            const uint8_t* payload, uint8_t payload_len);
+
 private:
     void handleCmdFrame(size_t len);
 
