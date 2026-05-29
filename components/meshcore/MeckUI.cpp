@@ -815,6 +815,12 @@ static lv_obj_t *lbl_export_warn        = NULL;
 // ACK timeout from lookupDMAckStatus.
 static const uint32_t MECK_RETRY_CHANNEL_THRESHOLD_SEC = 18;
 
+// UTC second at which the active channel's earliest still-"Sending" sent
+// message flips to "Failed". The UI timer redraws once when this is reached,
+// instead of rebuilding the bubble list every tick (which runs lv_obj_clean()
+// and would tear down any in-progress long-press). 0 = nothing pending.
+static uint32_t g_chan_flip_deadline = 0;
+
 // Per-bubble retry context, attached as user_data on each sent bubble at
 // rebuild time and freed via LV_EVENT_DELETE when the bubble is destroyed
 // (next rebuild or screen unload).
@@ -2942,6 +2948,7 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
         lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
         meck_set_font(empty, &meck_montserrat_18, 0);
         lbl_messages_body = empty;  // keep dirty-flag gate happy
+        g_chan_flip_deadline = 0;   // no messages -> no time-based flip pending
         return;
     }
 
@@ -2957,6 +2964,11 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
 
     // getMessages returns newest-first. We want oldest at top, newest at
     // bottom (standard chat order), so iterate reverse.
+    // Soonest UTC second at which a still-"Sending" sent message will age past
+    // the retry threshold and flip to "Failed". Written to g_chan_flip_deadline
+    // after the loop so the UI timer can redraw exactly once when it is due.
+    uint32_t next_flip_deadline = 0;
+
     for (int i = n - 1; i >= 0; i--) {
         // Strip non-renderable Unicode from the raw text. After this step
         // we operate on a buffer that the font can actually display.
@@ -2982,6 +2994,17 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
 
         bool is_sent = (my_name_clean[0] != '\0' &&
                         strcmp(trim_sender, my_name_clean) == 0);
+
+        // A sent, un-echoed post still inside its retry window is the only
+        // thing that needs a future time-based redraw (to flip to "Failed").
+        if (is_sent && msgs[i].heard_count == 0 && msgs[i].timestamp > 0 &&
+            now_utc >= msgs[i].timestamp &&
+            (now_utc - msgs[i].timestamp) < MECK_RETRY_CHANNEL_THRESHOLD_SEC) {
+            uint32_t dl = msgs[i].timestamp + MECK_RETRY_CHANNEL_THRESHOLD_SEC;
+            if (next_flip_deadline == 0 || dl < next_flip_deadline) {
+                next_flip_deadline = dl;
+            }
+        }
 
         // Per-sender colour from sender_bubble_color() — hashes the name
         // (parsed sender for received, our own node name for sent) onto
@@ -3167,6 +3190,7 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
     // Hold a non-NULL pointer in lbl_messages_body so the timer callback's
     // dirty-check still gates correctly. We point it at the last bubble
     // (which gets cleaned along with everything else on next rebuild).
+    g_chan_flip_deadline = next_flip_deadline;
     lbl_messages_body = lv_obj_get_child(obj_msg_scroll, -1);
 
     lv_obj_scroll_to_y(obj_msg_scroll, LV_COORD_MAX, LV_ANIM_OFF);
@@ -11652,14 +11676,23 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         rebuild_dm_bubbles(g_active_dm_contact_idx);
     }
 
-    // Public channel live refresh. Mirror of the DM block above: scr_messages
-    // hosts both modes, but only DM was refreshed on the tick. Without this a
-    // sent channel post stays "Sending..." until the user leaves and returns,
-    // because isMessageDirty() only fires on new content, not on the elapsed
-    // retry threshold that flips an unheard post to "Failed".
+    // Public channel live refresh. The only time-based reason to redraw an
+    // otherwise-clean channel is to flip a sent, un-echoed post from
+    // "Sending..." to "Failed" once it passes the retry threshold; there is no
+    // dirty event for that, it is purely elapsed time. rebuild_message_bubbles
+    // records the soonest such flip in g_chan_flip_deadline, so we rebuild only
+    // when it is actually due rather than every tick; a full rebuild runs
+    // lv_obj_clean() and would tear down an in-progress long-press on a bubble.
+    // New content and heard-count changes set the dirty flag and are handled by
+    // the isMessageDirty() rebuild further below.
     if (!g_in_dm_mode && scr_messages && lv_screen_active() == scr_messages
-        && g_active_channel < MAX_GROUP_CHANNELS) {
-        rebuild_message_bubbles(g_active_channel);
+        && g_active_channel < MAX_GROUP_CHANNELS && mesh && g_chan_flip_deadline != 0) {
+        uint32_t now_utc = 0;
+        mesh::RTCClock* rtc = mesh->getRTCClock();
+        if (rtc) now_utc = rtc->getCurrentTime();
+        if (now_utc != 0 && now_utc >= g_chan_flip_deadline) {
+            rebuild_message_bubbles(g_active_channel);
+        }
     }
 
     // Home tiles: clock once per minute. Timer fires at 500ms so 120 ticks
