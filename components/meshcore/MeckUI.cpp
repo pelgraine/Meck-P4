@@ -5169,6 +5169,14 @@ static void goto_channel_n(lv_event_t *e) {
 // ============================================================================
 // Tile 0: Home
 
+// Tap on the ">>" now-playing indicator: jump straight back to the player
+// for whatever audio is currently loaded, without restarting it. Wired to
+// every audio indicator (home tiles, host screens, and the file explorers).
+static void on_now_playing_tap(lv_event_t *e) {
+    (void)e;
+    meck_audio_ui_show_player_current();
+}
+
 // Attach the clock + battery pair to a home tile and register them in the
 // per-tile arrays so ui_update_timer_cb can drive them. Called once from
 // each tile builder. The battery field is space-padded to 4 chars in the
@@ -5203,6 +5211,8 @@ static void home_attach_clock_battery(lv_obj_t *page, int tile_idx) {
     meck_set_font(aud, &meck_montserrat_24, 0);
     lv_obj_set_style_text_align(aud, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(aud, LV_ALIGN_TOP_RIGHT, -85, NOTCH_SAFE_Y);
+    lv_obj_add_flag(aud, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(aud, on_now_playing_tap, LV_EVENT_CLICKED, NULL);
     lbl_home_audio[tile_idx] = aud;
 }
 
@@ -5264,6 +5274,29 @@ static void screen_attach_clock_battery(lv_obj_t *parent, int slot,
     meck_set_font(aud, font, 0);
     lv_obj_set_style_text_align(aud, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(aud, LV_ALIGN_TOP_RIGHT, -85, y_offset);
+    lv_obj_add_flag(aud, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(aud, on_now_playing_tap, LV_EVENT_CLICKED, NULL);
+    lbl_screen_audio[slot] = aud;
+}
+
+// Attach only the tappable ">>" now-playing indicator to a screen that is
+// built outside the header-host system (the audio and reader file
+// explorers). Registers it in lbl_screen_audio[slot] so the existing UI
+// timer drives its visibility, and wires the same tap-to-return handler.
+// The caller supplies a free slot and the top-right x/y offsets.
+extern "C" void meck_ui_attach_audio_indicator(lv_obj_t *parent, int slot,
+                                               const lv_font_t *font,
+                                               int32_t x_ofs,
+                                               int32_t y_ofs) {
+    if (!parent || slot < 0 || slot >= MECK_SCREEN_HOST_COUNT) return;
+    lv_obj_t *aud = lv_label_create(parent);
+    lv_label_set_text(aud, "");
+    lv_obj_set_style_text_color(aud, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_style_text_font(aud, font, 0);
+    lv_obj_set_style_text_align(aud, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(aud, LV_ALIGN_TOP_RIGHT, x_ofs, y_ofs);
+    lv_obj_add_flag(aud, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(aud, on_now_playing_tap, LV_EVENT_CLICKED, NULL);
     lbl_screen_audio[slot] = aud;
 }
 // ============================================================================

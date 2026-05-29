@@ -32,6 +32,8 @@
 /* ----- borrowed from MeckUI.cpp -------------------------------------------*/
 extern "C" void lock_screen_scroll(lv_obj_t* scr);
 extern "C" void meck_ui_load_home_screen(void);
+extern "C" void meck_ui_attach_audio_indicator(lv_obj_t* parent, int slot,
+        const lv_font_t* font, int32_t x_ofs, int32_t y_ofs);
 extern "C" void meck_ui_set_font(lv_obj_t* obj, const lv_font_t* base,
                                  lv_style_selector_t part);
 
@@ -432,6 +434,11 @@ static void create_browser_screen(void) {
     lv_obj_set_style_border_width(list_container, 0, 0);
     lv_obj_set_style_pad_all(list_container, 0, 0);
     lv_obj_set_scroll_dir(list_container, LV_DIR_VER);
+
+    /* Now-playing ">>" indicator (slot 19), top-right, left of the Up
+     * button. Hidden until audio is playing; tap returns to the player. */
+    meck_ui_attach_audio_indicator(scr_reader_browser, 19,
+                                   &lv_font_montserrat_24, -85, 18);
 
     snprintf(g_browser_path, sizeof(g_browser_path), "%s", READER_ROOT);
 }

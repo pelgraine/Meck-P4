@@ -47,6 +47,12 @@ void meck_audio_ui_show_browser(void);
 /* Load the player screen. Called internally when a file is opened. */
 void meck_audio_ui_show_player(void);
 
+/* Return to the player for the currently-loaded track WITHOUT restarting
+ * it. Refreshes the title/subtitle/art for the live file and loads the
+ * player screen; the running playback and its position are untouched.
+ * No-op if nothing is loaded. Wired to the ">>" now-playing indicator. */
+void meck_audio_ui_show_player_current(void);
+
 #ifdef __cplusplus
 }
 #endif

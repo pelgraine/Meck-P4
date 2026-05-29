@@ -379,11 +379,11 @@ static void player_event_cb(audio_player_cb_ctx_t *ctx)
     switch (evt) {
         case AUDIO_PLAYER_CALLBACK_EVENT_IDLE:
             ESP_LOGI(TAG, "callback: IDLE (track ended or stopped)");
-            g_eof_flag = 1;
             if (g_state_mu && xSemaphoreTake(g_state_mu, pdMS_TO_TICKS(10))) {
                 /* Only flip to EOF if we were playing (not from an
                  * explicit stop, which sets state directly). */
                 if (g_state == MECK_AUDIO_STATE_PLAYING) {
+                    g_eof_flag = 1;
                     g_state = MECK_AUDIO_STATE_EOF;
                 }
                 xSemaphoreGive(g_state_mu);

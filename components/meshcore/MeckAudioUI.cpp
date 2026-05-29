@@ -422,6 +422,8 @@ static void on_file_row_clicked(lv_event_t* e) {
  * ==========================================================================*/
 
 extern "C" void lock_screen_scroll(lv_obj_t* scr);  /* from MeckUI.cpp */
+extern "C" void meck_ui_attach_audio_indicator(lv_obj_t* parent, int slot,
+        const lv_font_t* font, int32_t x_ofs, int32_t y_ofs);  /* MeckUI.cpp */
 
 static void create_browser_screen() {
     scr_audio_browser = lv_obj_create(NULL);
@@ -482,6 +484,11 @@ static void create_browser_screen() {
     lv_obj_set_style_border_width(list_container, 0, 0);
     lv_obj_set_style_pad_all(list_container, 0, 0);
     lv_obj_set_scroll_dir(list_container, LV_DIR_VER);
+
+    /* Now-playing ">>" indicator (slot 18), top-right, left of the Up
+     * button. Hidden until audio is playing; tap returns to the player. */
+    meck_ui_attach_audio_indicator(scr_audio_browser, 18,
+                                   &lv_font_montserrat_24, -85, 18);
 
     /* Start at AUDIO_ROOT. */
     snprintf(g_browser_path, sizeof(g_browser_path), "%s", AUDIO_ROOT);
@@ -1234,6 +1241,42 @@ extern "C" void meck_audio_ui_show_player(void) {
     uint32_t resume = meck_audio_bookmark_load_sec(g_current_file);
     printf("MeckAudioUI: opening file (resume=%u): %s\n", resume, g_current_file);
     meck_audio_play_file(g_current_file, resume);
+
+    lv_screen_load(scr_audio_player);
+}
+
+/* Return to the player for the track that's already loaded, without
+ * rebuilding the playlist or re-opening the file (which would restart it).
+ * Refreshes the now-playing display for the live file, then loads the
+ * player screen. Live position / progress / play-pause are driven by
+ * player_refresh_cb off the backend state. No-op if nothing is loaded. */
+extern "C" void meck_audio_ui_show_player_current(void) {
+    if (!scr_audio_player) return;
+    if (!g_current_file[0]) return;
+
+    g_player_mode = infer_library_mode(g_current_file);
+
+    if (lbl_player_title) {
+        char title[160];
+        file_title_from_path(g_current_file, title, sizeof(title));
+        lv_label_set_text(lbl_player_title, title);
+    }
+    if (lbl_player_subtitle) {
+        char sub[200];
+        build_subtitle(g_current_file, sub, sizeof(sub));
+        lv_label_set_text(lbl_player_subtitle, sub);
+    }
+    load_album_art(g_current_file);
+
+    /* Sleep-timer chip follows the library mode, same as the open path,
+     * but the running timer is left as-is (returning shouldn't cancel it). */
+    if (btn_sleep) {
+        if (g_player_mode == LIB_AUDIOBOOK) {
+            lv_obj_clear_flag(btn_sleep, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(btn_sleep, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 
     lv_screen_load(scr_audio_player);
 }
