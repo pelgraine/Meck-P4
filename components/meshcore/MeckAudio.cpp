@@ -111,6 +111,22 @@ static FILE *g_fp = nullptr;
 /* EOF flag — set in callback, drained by UI. */
 static volatile uint8_t g_eof_flag = 0;
 
+/* True when a file has been opened and positioned but NOT yet handed to
+ * chmorgan via audio_player_play(). In this state WE own g_fp and must
+ * fclose it ourselves if it is replaced before playback starts. Once
+ * playback starts the fp is handed off and g_prepared returns to false.
+ * This also distinguishes a prepared-but-unstarted file (state PAUSED)
+ * from a genuine mid-file pause (state PAUSED, g_prepared false) so the
+ * play button knows whether to start or resume. */
+static bool g_prepared = false;
+
+/* One-shot: set true immediately before an audio_player_stop() that we
+ * issue for a seek or an explicit stop, so the resulting IDLE callback is
+ * not mistaken for end-of-track (which would auto-advance the playlist).
+ * Cleared when the IDLE callback consumes it. Only armed while the player
+ * is actually PLAYING/PAUSED, so it cannot leak onto a later real EOF. */
+static volatile bool g_suppress_eof = false;
+
 /* ============================================================================
  * Bookmark store (FNV-1a hash of path → /sdcard/audio/.bookmarks/<hex>.bm)
  *
@@ -378,6 +394,14 @@ static void player_event_cb(audio_player_cb_ctx_t *ctx)
 
     switch (evt) {
         case AUDIO_PLAYER_CALLBACK_EVENT_IDLE:
+            if (g_suppress_eof) {
+                /* This IDLE came from a stop we issued for a seek or an
+                 * explicit stop, not from a track ending. Consume the
+                 * one-shot and do not raise the EOF/auto-advance flag. */
+                g_suppress_eof = false;
+                ESP_LOGI(TAG, "callback: IDLE (suppressed: stop/seek)");
+                break;
+            }
             ESP_LOGI(TAG, "callback: IDLE (track ended or stopped)");
             if (g_state_mu && xSemaphoreTake(g_state_mu, pdMS_TO_TICKS(10))) {
                 /* Only flip to EOF if we were playing (not from an
@@ -442,14 +466,35 @@ static void forget_current_file(void)
 }
 
 /*
- * Open file, fseek to target seconds, stash duration/bitrate in state,
- * and hand the FILE* to chmorgan. Returns true if play started.
+ * Close a file we opened but never handed to chmorgan (a "prepared"
+ * file that the user opened or seeked-while-paused but did not start).
+ * We own this fp, so we must fclose it ourselves. Safe to call when
+ * nothing is prepared. Never call this on a fp already handed to
+ * chmorgan: use forget_current_file() for that.
  */
-static bool open_and_play(const char *path, uint32_t target_sec)
+static void release_prepared_fp(void)
 {
-    /* Old fp (if any) belongs to chmorgan now and will be closed by its
-     * task when the new PLAY event preempts it. Just drop our reference. */
-    forget_current_file();
+    if (g_prepared && g_fp) {
+        fclose(g_fp);
+        g_fp = nullptr;
+    }
+    g_prepared = false;
+}
+
+/*
+ * Open a file and position it at target_sec, stash duration/bitrate in
+ * state, but do NOT hand it to chmorgan. Leaves the player in PAUSED with
+ * g_prepared = true: we own the open, positioned fp, ready for
+ * start_prepared_playback() when the user presses play. The codec is left
+ * as-is (not woken) so opening a file makes no sound.
+ *
+ * Any previously-prepared fp we still own is closed first. A file already
+ * handed to chmorgan is NOT touched here; the caller is responsible for
+ * stopping/forgetting it before calling this.
+ */
+static bool open_and_prepare(const char *path, uint32_t target_sec)
+{
+    release_prepared_fp();
     meck_audio_i2s_reset_counter();
     g_seek_start_sec = 0;
 
@@ -478,7 +523,7 @@ static bool open_and_play(const char *path, uint32_t target_sec)
                 fseek(g_fp, w.data_offset, SEEK_SET);
             }
         } else {
-            ESP_LOGW(TAG, "WAV header parse failed; playing from start");
+            ESP_LOGW(TAG, "WAV header parse failed; will play from start");
             rewind(g_fp);
         }
     } else if (ft == FT_MP3) {
@@ -504,15 +549,39 @@ static bool open_and_play(const char *path, uint32_t target_sec)
         xSemaphoreGive(g_state_mu);
     }
 
+    /* Ready, but not handed to chmorgan yet. */
+    g_prepared = true;
+    set_state(MECK_AUDIO_STATE_PAUSED);
+    return true;
+}
+
+/*
+ * Hand the prepared (open, positioned) fp to chmorgan and begin playback.
+ * Wakes the codec here, not at open time, so opening a file stays silent
+ * until the user presses play. After a successful hand-off chmorgan owns
+ * the fp and g_prepared returns to false. Returns true if play started.
+ */
+static bool start_prepared_playback(void)
+{
+    if (!g_prepared || !g_fp) return false;
+
+    /* Wake the ES8311 codec (may have been powered down to save ~5-10mA). */
+    meck_audio_codec_wake();
+
     esp_err_t err = audio_player_play(g_fp);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "audio_player_play failed: %s", esp_err_to_name(err));
-        /* audio_player_play returned non-OK: ownership did NOT transfer
-         * to chmorgan. We still own this fp, so we close it here. */
+        /* Ownership did NOT transfer to chmorgan; we still own this fp. */
         if (g_fp) { fclose(g_fp); g_fp = nullptr; }
+        g_prepared = false;
         set_state(MECK_AUDIO_STATE_ERROR);
         return false;
     }
+
+    /* chmorgan owns the fp now. */
+    g_prepared = false;
+    meck_audio_es8311_set_volume(g_volume_pct);
+    set_state(MECK_AUDIO_STATE_PLAYING);
     return true;
 }
 
@@ -582,28 +651,41 @@ extern "C" bool meck_audio_play_file(const char *path, uint32_t resume_sec)
     if (!path || !*path) return false;
     if (!g_inited && !meck_audio_init()) return false;
 
-    /* Wake the ES8311 codec (may have been powered down to save ~5-10mA). */
-    meck_audio_codec_wake();
-
-    /* Save bookmark for the outgoing track if we were playing. */
-    if (g_fp && g_current_path[0]) {
+    /* Save bookmark for the outgoing track if one was actually playing or
+     * paused mid-file (i.e. handed to chmorgan, not merely prepared). */
+    if (g_fp && !g_prepared && g_current_path[0]) {
         uint32_t cur = meck_audio_get_position_sec();
         if (cur > 5) bookmark_save_for(g_current_path, cur);
     }
 
-    audio_player_stop();
+    /* Tear down whatever is current before opening the new file. */
+    if (g_prepared) {
+        /* A prepared-but-unstarted file we own: close it ourselves. */
+        release_prepared_fp();
+    } else if (g_fp) {
+        /* Handed to chmorgan. Only an active PLAYING/PAUSED player will
+         * emit an IDLE we must suppress; if it already ended, the stop is
+         * a no-op and we must not arm suppression (it would swallow a
+         * later real EOF). Either way drop our reference. */
+        MeckAudioState s = meck_audio_get_state();
+        if (s == MECK_AUDIO_STATE_PLAYING || s == MECK_AUDIO_STATE_PAUSED) {
+            g_suppress_eof = true;
+            audio_player_stop();
+        }
+        forget_current_file();
+    }
+
     set_state(MECK_AUDIO_STATE_LOADING);
 
     /* Use rewind-3-seconds for context, like the previous version. */
     uint32_t target = (resume_sec > 3) ? (resume_sec - 3) : 0;
-    if (!open_and_play(path, target)) {
+    if (!open_and_prepare(path, target)) {
         return false;
     }
 
-    /* Apply current volume (codec may have lost it during a reconfig). */
-    meck_audio_es8311_set_volume(g_volume_pct);
-
-    ESP_LOGI(TAG, "playing '%s' from %us (bookmark resume=%us)",
+    /* Prepared and positioned, left PAUSED. Playback does NOT start until
+     * the user presses play (meck_audio_resume). */
+    ESP_LOGI(TAG, "prepared '%s' at %us (bookmark resume=%us), awaiting play",
              path, (unsigned)target, (unsigned)resume_sec);
     return true;
 }
@@ -619,6 +701,13 @@ extern "C" void meck_audio_pause(void)
 extern "C" void meck_audio_resume(void)
 {
     if (!g_inited) return;
+    if (g_prepared) {
+        /* A freshly-prepared file that has never been handed to chmorgan:
+         * pressing play starts it from the prepared position. */
+        start_prepared_playback();
+        return;
+    }
+    /* A genuine mid-file pause: resume chmorgan from where it paused. */
     audio_player_resume();
     set_state(MECK_AUDIO_STATE_PLAYING);
 }
@@ -635,10 +724,25 @@ extern "C" void meck_audio_stop(void)
     if (!g_inited) return;
     uint32_t cur = meck_audio_get_position_sec();
     if (g_current_path[0] && cur > 5) bookmark_save_for(g_current_path, cur);
-    audio_player_stop();
-    /* chmorgan's audio_task will fclose the fp when it processes the
-     * STOP event. We just drop our reference. */
-    forget_current_file();
+
+    if (g_prepared) {
+        /* Prepared-but-unstarted file we own: close it ourselves. No
+         * chmorgan stop needed (it never received this file). */
+        release_prepared_fp();
+    } else if (g_fp) {
+        /* Handed to chmorgan. Suppress the IDLE from this stop so it is
+         * not read as end-of-track, but only while actually playing or
+         * paused (an already-ended player emits no IDLE). */
+        MeckAudioState s = meck_audio_get_state();
+        if (s == MECK_AUDIO_STATE_PLAYING || s == MECK_AUDIO_STATE_PAUSED) {
+            g_suppress_eof = true;
+        }
+        audio_player_stop();
+        /* chmorgan's audio_task will fclose the fp when it processes the
+         * STOP event. We just drop our reference. */
+        forget_current_file();
+    }
+
     meck_audio_i2s_reset_counter();
     g_seek_start_sec = 0;
     set_state(MECK_AUDIO_STATE_IDLE);
@@ -648,9 +752,11 @@ extern "C" void meck_audio_stop(void)
 }
 
 /*
- * Seek = stop → reopen file → fseek → replay. Brief audible blip; this
- * is the documented chmorgan-friendly seek pattern. We re-use the
- * open_and_play() path so all the same WAV/MP3 logic applies.
+ * Seek to an absolute second offset. Reopens the file positioned at the
+ * target. If a track was playing it continues playing from the target; if
+ * it was paused or freshly prepared it stays paused at the target, so the
+ * next play starts there. Re-uses open_and_prepare() so the same WAV/MP3
+ * positioning logic applies.
  */
 static void seek_to_absolute_locked(uint32_t target_sec)
 {
@@ -661,11 +767,25 @@ static void seek_to_absolute_locked(uint32_t target_sec)
     strncpy(path, g_current_path, sizeof(path));
     path[sizeof(path) - 1] = '\0';
 
-    audio_player_stop();
-    /* Don't save bookmark here — the seek is user-driven, not a
-     * pause/stop event. */
-    open_and_play(path, target_sec);
-    meck_audio_es8311_set_volume(g_volume_pct);
+    MeckAudioState s = meck_audio_get_state();
+    bool was_playing = (s == MECK_AUDIO_STATE_PLAYING);
+
+    if (!g_prepared && g_fp &&
+        (s == MECK_AUDIO_STATE_PLAYING || s == MECK_AUDIO_STATE_PAUSED)) {
+        /* Active in chmorgan: stop it (suppress the resulting IDLE so the
+         * seek is not mistaken for end-of-track), then drop our ref. */
+        g_suppress_eof = true;
+        audio_player_stop();
+        forget_current_file();
+    }
+
+    /* Reopen positioned at the target. Leaves the player PAUSED/prepared. */
+    if (!open_and_prepare(path, target_sec)) return;
+
+    /* Continue playing from the target only if we were playing before. */
+    if (was_playing) {
+        start_prepared_playback();
+    }
 }
 
 extern "C" void meck_audio_seek_relative(int32_t seconds)

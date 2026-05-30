@@ -634,11 +634,13 @@ static void on_play_pause_clicked(lv_event_t* e) {
     } else if (s == MECK_AUDIO_STATE_PAUSED) {
         meck_audio_resume();
     } else if (s == MECK_AUDIO_STATE_IDLE || s == MECK_AUDIO_STATE_EOF) {
-        /* Re-open the current file (e.g. user finished a track, taps play
-         * to replay). Backend re-opens at last bookmark. */
+        /* Track finished or nothing started yet: prepare the current file
+         * and start it so a single tap plays. (Opening a file only
+         * prepares it now; play is an explicit action.) */
         if (g_current_file[0]) {
             uint32_t resume = meck_audio_bookmark_load_sec(g_current_file);
             meck_audio_play_file(g_current_file, resume);
+            meck_audio_resume();
         }
     }
 }
@@ -770,6 +772,10 @@ static void player_refresh_cb(lv_timer_t* t) {
             g_current_file[sizeof(g_current_file) - 1] = '\0';
             uint32_t resume = meck_audio_bookmark_load_sec(g_current_file);
             meck_audio_play_file(g_current_file, resume);
+            /* Continuous playback through a folder: the previous track was
+             * already playing, so keep playing into the next one. (Manual
+             * file open only prepares; auto-advance plays.) */
+            meck_audio_resume();
 
             /* Update title labels for the new track. */
             if (lbl_player_title) {
