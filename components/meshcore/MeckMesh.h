@@ -3571,7 +3571,15 @@ protected:
         if (is_new) {
             printf("Meck: new contact '%s' [%02X%02X] hops=%d\n",
                    contact.name, contact.id.pub_key[0], contact.id.pub_key[1], path_len);
-            scheduleLazyContactSave();
+            // Only persist when the node is actually in contacts[]. The base
+            // class also fires this with is_new=true on its no-add paths
+            // (auto-add disabled for the type, or contacts[] full), passing a
+            // stack copy that was never added to our list. Scheduling a save
+            // there re-persists the unchanged set on every advert from a
+            // non-contact node.
+            if (lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE) != NULL) {
+                scheduleLazyContactSave();
+            }
         }
     }
 

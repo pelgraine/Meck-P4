@@ -5932,8 +5932,10 @@ static void on_debug_log_start_tap(lv_event_t *e) {
     g_debug_log_fp = fp;
     g_debug_log_active = true;
     g_debug_export_path[0] = '\0';   // clear stale export label from prior session
-    fprintf(g_debug_log_fp, "==== Meck debug log started ts=%lu ====\n",
-            (unsigned long)now);
+    fprintf(g_debug_log_fp, "==== Meck debug log started ts=%lu fw=\"%s\" v%s screen=%s ====\n",
+            (unsigned long)now,
+            MECK_FIRMWARE_NAME, MECK_FIRMWARE_VERSION,
+            MECK_IS_AMOLED ? "AMOLED" : "non-AMOLED");
     fflush(g_debug_log_fp);
     xSemaphoreGiveRecursive(g_debug_log_mutex);
 
