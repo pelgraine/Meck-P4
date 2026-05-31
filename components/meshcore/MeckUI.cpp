@@ -5826,6 +5826,24 @@ extern "C" int meck_debug_log_printf(const char* fmt, ...) {
     return n;
 }
 
+// ESP-IDF log hook (registered in meck_ui_init via esp_log_set_vprintf).
+// ESP_LOGx output bypasses printf and the meck_log.h redirection, so this
+// captures it into the SD session log. Mirrors meck_debug_log_printf: SD only
+// while active, vprintf (UART) when inactive.
+extern "C" int meck_debug_log_vprintf(const char* fmt, va_list args) {
+    if (g_debug_log_active && g_debug_log_mutex) {
+        xSemaphoreTakeRecursive(g_debug_log_mutex, portMAX_DELAY);
+        if (g_debug_log_active && g_debug_log_fp) {
+            int n = vfprintf(g_debug_log_fp, fmt, args);
+            fflush(g_debug_log_fp);
+            xSemaphoreGiveRecursive(g_debug_log_mutex);
+            return n;
+        }
+        xSemaphoreGiveRecursive(g_debug_log_mutex);
+    }
+    return vprintf(fmt, args);
+}
+
 // Refresh the button enable states + status label based on
 // g_debug_log_active and whether a file/export exists.
 static void debug_log_update_status() {
@@ -15565,6 +15583,10 @@ extern "C" void meck_ui_init() {
     // brightness write goes via panel register 0x51, not LEDC). Logging
     // the error each tap is just noise.
     esp_log_level_set("ledc", ESP_LOG_NONE);
+
+    // Route ESP_LOGx output through the debug-log hook so it is captured to
+    // the SD session log when logging is active (ESP_LOGx bypasses printf).
+    esp_log_set_vprintf(meck_debug_log_vprintf);
 
     _lock_acquire(&lvgl_api_lock);
 

@@ -6,6 +6,7 @@ static const char *TAG = "mp3";
 
 bool is_mp3(FILE *fp) {
     bool is_mp3_file = false;
+    long resume_pos = ftell(fp);
 
     fseek(fp, 0, SEEK_SET);
 
@@ -42,7 +43,7 @@ bool is_mp3(FILE *fp) {
 
     // seek back to the start of the file to avoid
     // missing frames upon decode
-    fseek(fp, 0, SEEK_SET);
+    fseek(fp, resume_pos, SEEK_SET);
 
     return is_mp3_file;
 }
