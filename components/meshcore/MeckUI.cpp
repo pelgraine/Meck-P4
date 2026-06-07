@@ -15690,9 +15690,12 @@ static lv_timer_t  *g_cardkb_timer = NULL;
 // The textarea the user is currently typing into belongs to whichever composer
 // keyboard is visible. Returns that keyboard, or NULL if no composer is open.
 static lv_obj_t *meck_cardkb_active_kb(void) {
-    if (kb_compose && !lv_obj_has_flag(kb_compose, LV_OBJ_FLAG_HIDDEN))
+    // Active composer = the one whose textarea currently has focus. Keyed on
+    // focus rather than on-screen-keyboard visibility, so CardKB routing keeps
+    // working after the keyboard is auto-dismissed on the first CardKB key.
+    if (ta_compose && lv_obj_has_state(ta_compose, LV_STATE_FOCUSED))
         return kb_compose;
-    if (kb_room_compose && !lv_obj_has_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN))
+    if (ta_room_compose && lv_obj_has_state(ta_room_compose, LV_STATE_FOCUSED))
         return kb_room_compose;
     return NULL;
 }
@@ -15703,9 +15706,19 @@ static void meck_cardkb_poll(lv_timer_t *t) {
     if (key == 0) return;
 
     lv_obj_t *kb = meck_cardkb_active_kb();
-    if (!kb) return;                                // no composer open (nav is 4A)
+    if (!kb) return;                                // no composer focused
     lv_obj_t *ta = lv_keyboard_get_textarea(kb);
     if (!ta) return;
+
+    // First CardKB keypress dismisses the on-screen keyboard so the message
+    // list reclaims its space; the textarea keeps focus so CardKB entry
+    // continues. Re-show the touch keyboard by tapping away and back into the
+    // field (the existing focus handler brings it up again). Reuses the same
+    // hide/relayout the keyboard's own close button uses.
+    if (!lv_obj_has_flag(kb, LV_OBJ_FLAG_HIDDEN)) {
+        if (kb == kb_compose)           on_compose_defocused(NULL);
+        else if (kb == kb_room_compose) on_room_compose_defocused(NULL);
+    }
 
     switch (key) {
         case LV_KEY_ENTER:                          // replay the keyboard OK button
