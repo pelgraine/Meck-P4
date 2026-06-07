@@ -41,6 +41,11 @@ extern "C" {
  */
 void meck_audio_ui_init(void);
 
+/* Tear down the audio screens + player refresh timer and reset the init
+ * guard so a subsequent meck_audio_ui_init() rebuilds them. Playback is
+ * untouched. Used by the live screen-orientation rebuild. */
+void meck_audio_ui_teardown(void);
+
 /* Load the browser screen. Wired to the home grid's Audio tile. */
 void meck_audio_ui_show_browser(void);
 

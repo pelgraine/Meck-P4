@@ -31,6 +31,21 @@
 #include "esp_log.h"
 #include "t_display_p4_driver.h"
 
+// Orientation-aware logical dimensions (mirrors MeckUI.cpp). The panel can be
+// rotated at runtime; when rotated, LVGL reports a swapped logical resolution.
+// t_display_p4_driver.h's SCREEN_WIDTH/SCREEN_HEIGHT are the fixed *physical*
+// panel size, so without this the map would lay out into the portrait-width
+// left strip when the screen is landscape. Redefine them within this TU to the
+// live logical resolution so the viewport, container, and toolbar fill the
+// screen at either orientation. Every use here is in a function body, so a
+// function-valued macro is safe.
+#undef SCREEN_WIDTH
+#undef SCREEN_HEIGHT
+static inline int32_t meck_logical_w() { return lv_display_get_horizontal_resolution(lv_display_get_default()); }
+static inline int32_t meck_logical_h() { return lv_display_get_vertical_resolution(lv_display_get_default()); }
+#define SCREEN_WIDTH  (meck_logical_w())
+#define SCREEN_HEIGHT (meck_logical_h())
+
 #include "target.h"
 #include "MeckMesh.h"
 #include "MeckDataStore.h"
@@ -1329,6 +1344,39 @@ void meck_map_ui_init(void) {
     create_map_screen();
     g_map_inited = true;
     printf("MeckMapScreen: init complete\n");
+}
+
+// Tear down the map screen and reset all state so a later meck_map_ui_init()
+// rebuilds it cleanly (used by the live orientation rebuild). Deleting scr_map
+// frees every child (tile container, toolbar, tiles, markers, GPS dot, filter
+// modal), so we must null every pointer and zero every pool counter that
+// referenced those children, and reset the lazy flags so the next show
+// re-detects zoom range, reloads persisted state, and re-renders into the
+// freshly-built container.
+void meck_map_ui_teardown(void) {
+    if (g_gps_timer) { lv_timer_delete(g_gps_timer); g_gps_timer = NULL; }
+    if (scr_map) { lv_obj_delete(scr_map); scr_map = NULL; }
+
+    obj_map_tiles_container = NULL;
+    lbl_map_status          = NULL;
+    btn_map_back = btn_map_recenter = btn_map_zoom_out = btn_map_zoom_in = btn_map_filter = NULL;
+    g_gps_dot = NULL;
+    g_filter_backdrop = NULL;
+    g_filter_card     = NULL;
+    for (int i = 0; i < 4; i++) g_filter_switches[i] = NULL;
+
+    for (int i = 0; i < MECK_MAP_MAX_TILE_WIDGETS; i++) g_tile_widgets[i] = NULL;
+    g_tile_widget_count = 0;
+    for (int i = 0; i < MECK_MAP_MAX_MARKERS; i++) {
+        g_marker_circles[i] = NULL;
+        g_marker_labels[i]  = NULL;
+    }
+    g_marker_count = 0;
+
+    g_map_first_show = true;
+    g_map_dirty      = false;
+    g_drag_active    = false;
+    g_map_inited     = false;
 }
 
 void meck_map_ui_show(void) {

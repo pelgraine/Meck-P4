@@ -34,6 +34,11 @@ extern "C" {
  */
 void meck_reader_ui_init(void);
 
+/* Tear down the reader screens (frees child widgets) and reset the init
+ * guard so a subsequent meck_reader_ui_init() rebuilds them. Used by the
+ * live screen-orientation rebuild. */
+void meck_reader_ui_teardown(void);
+
 /* Load the browser screen. Wired to the home grid's Reader tile. */
 void meck_reader_ui_show_browser(void);
 

@@ -83,7 +83,6 @@ extern "C" int meck_voice_send_get_status(void);
 #include <climits>
 #include <cstdarg>   // va_list, va_start, va_end (meck_debug_log_printf)
 #include <cerrno>    // errno (Debug Logs fopen error reporting)
-#include "esp_system.h"  // esp_restart (orientation change reboot-apply)
 
 // ----------------------------------------------------------------------------
 // Orientation-aware logical dimensions
@@ -1386,6 +1385,10 @@ static void on_settings_ble_tap(lv_event_t *e);
 #endif
 static void on_settings_drafts_tap(lv_event_t *e);
 static void on_settings_orientation_tap(lv_event_t *e);
+// Screen build / teardown / live orientation rebuild (orientation applies live).
+static void meck_ui_build_screens();
+static void meck_ui_teardown_screens();
+static void meck_ui_apply_orientation_rebuild(void *unused);
 static void goto_settings_wifi(lv_event_t *e);
 static void create_settings_wifi_screen();
 static void on_gps_tile_long_press(lv_event_t *e);
@@ -5499,11 +5502,13 @@ static void create_page_home(lv_obj_t *page) {
     meck_set_font(lbl_home_ble_pin, &meck_montserrat_14, 0);
     // Portrait stacks this as the 3rd left-column line (y=95). Landscape has a
     // wide, mostly-empty header row, so lift it up to the battery's level and
-    // drop it into the open centre space instead. This also shortens the left
+    // right-align it into the gap just left of the battery %. Anchoring to the
+    // right edge keeps it clear of the clock, which sits centre for short node
+    // names and under the battery for long ones. This also shortens the left
     // column to two lines, letting the tile grid move up (see create_tile_button).
     if (SCREEN_WIDTH > SCREEN_HEIGHT) {
-        lv_obj_set_style_text_align(lbl_home_ble_pin, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_align(lbl_home_ble_pin, LV_ALIGN_TOP_MID, 0, NOTCH_SAFE_Y);
+        lv_obj_set_style_text_align(lbl_home_ble_pin, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(lbl_home_ble_pin, LV_ALIGN_TOP_RIGHT, -160, NOTCH_SAFE_Y);
     } else {
         lv_obj_align(lbl_home_ble_pin, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 95);
     }
@@ -7371,12 +7376,13 @@ static void on_settings_orientation_tap(lv_event_t *e) {
     prefs->orientation = (prefs->orientation != 0) ? 0 : 1;
     mesh->getDataStore()->savePrefs(*prefs);
 
-    // The whole UI is built once with the orientation baked into every
-    // screen's layout, so the change is applied by rebooting and letting
-    // meck_ui_init read the saved pref.
-    printf("Settings: orientation = %s — rebooting to apply\n",
+    // Apply live. Defer the rebuild to after this click event completes (via
+    // lv_async_call) so we don't delete scr_settings from inside its own
+    // handler. The async callback tears down every screen, switches the
+    // rotation, and rebuilds at the new orientation.
+    printf("Settings: orientation = %s — rebuilding live\n",
            prefs->orientation != 0 ? "Landscape" : "Portrait");
-    esp_restart();
+    lv_async_call(meck_ui_apply_orientation_rebuild, NULL);
 }
 
 static void create_settings_screen() {
@@ -7609,10 +7615,10 @@ static void create_settings_screen() {
         &lbl_set_font_scale, on_settings_font_scale_tap, y);
     y += 65;
 
-    // Screen orientation — Portrait / Landscape. Unlike the toggles above,
-    // the layout is baked into every screen at build time, so this one saves
-    // the pref and reboots to apply (see on_settings_orientation_tap).
-    create_settings_row(scroll, "Orientation (tap to flip, reboots)",
+    // Screen orientation — Portrait / Landscape. The layout is baked into
+    // every screen at build time, so this tears down and rebuilds all screens
+    // live at the new orientation (see on_settings_orientation_tap).
+    create_settings_row(scroll, "Orientation (tap to flip)",
         &lbl_set_orientation, on_settings_orientation_tap, y);
     y += 65;
 
@@ -15848,37 +15854,12 @@ static void meck_cardkb_init(void) {
 
 #endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4 && MECK_CARDKB
 
-extern "C" void meck_ui_init() {
-    // Apply the saved screen orientation before any screen is built, so the
-    // layout reads the correct logical dimensions from the start. 0 =
-    // portrait (default), 1 = landscape. The Settings > Orientation toggle
-    // saves this pref and reboots, so this read is the single apply point.
-    {
-        Meck* mesh = meck_get_instance();
-        P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : nullptr;
-        lv_display_set_rotation(lv_display_get_default(),
-            (prefs && prefs->orientation == 1)
-                ? LV_DISPLAY_ROTATION_90
-                : LV_DISPLAY_ROTATION_0);
-    }
-
-    printf("MeckUI: building home screen\n");
-
-    // Silence the LEDC fade-install error spam. cpp_bus_driver re-installs
-    // the LEDC fade ISR on every set_rm69a10_brightness call; ESP-IDF
-    // returns ESP_ERR_INVALID_STATE which the driver ignores (the actual
-    // brightness write goes via panel register 0x51, not LEDC). Logging
-    // the error each tap is just noise.
-    esp_log_level_set("ledc", ESP_LOG_NONE);
-
-    // Route ESP_LOGx output through the debug-log hook so it is captured to
-    // the SD session log when logging is active (ESP_LOGx bypasses printf).
-    esp_log_set_vprintf(meck_debug_log_vprintf);
-
-    _lock_acquire(&lvgl_api_lock);
-
-    meck_emoji_init();
-
+// Build every screen: the home tileview and its pages, all sub-screens, and
+// the audio/map/reader modules. Split out of meck_ui_init so the live
+// orientation rebuild can recreate them after a teardown. Assumes the caller
+// holds lvgl_api_lock and that the desired display rotation is already set, so
+// SCREEN_WIDTH/SCREEN_HEIGHT report the right logical dimensions during layout.
+static void meck_ui_build_screens() {
     scr_home = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_home, lv_color_black(), 0);
 
@@ -15931,6 +15912,100 @@ extern "C" void meck_ui_init() {
     meck_audio_ui_init();
     meck_reader_ui_init();
     meck_map_ui_init();
+}
+
+// Delete every screen and null its global, then tear down the audio/map/reader
+// modules. Deleting a screen frees all its child widgets, so the per-screen
+// lbl_*/btn_*/ta_*/kb_* globals are freed here and reassigned when
+// meck_ui_build_screens() recreates each screen. g_tileview is a child of
+// scr_home and dies with it. Screens that were never created (lazily-built
+// admin sub-tabs the user never opened) are NULL and skipped — they rebuild on
+// next navigation at the current orientation.
+static void meck_ui_teardown_screens() {
+    lv_obj_t** screens[] = {
+        &scr_home, &scr_settings, &scr_debug_logs, &scr_not_implemented,
+        &scr_settings_wifi, &scr_settings_channels, &scr_channel_detail,
+        &scr_settings_position, &scr_voice_landing, &scr_voice_inbox, &scr_voice,
+        &scr_radio_picker, &scr_channel_picker, &scr_dm_inbox, &scr_messages,
+        &scr_contacts, &scr_contact_detail, &scr_trace, &scr_path_editor,
+        &scr_settings_contacts, &scr_discover, &scr_admin_login, &scr_admin_home,
+        &scr_room_messages, &scr_admin_status, &scr_admin_cmd, &scr_admin_settings,
+        &scr_admin_send_advert, &scr_admin_setting_placeholder, &scr_admin_fw_info,
+        &scr_admin_neighbours,
+    };
+    for (size_t i = 0; i < sizeof(screens) / sizeof(screens[0]); i++) {
+        if (*screens[i]) { lv_obj_delete(*screens[i]); *screens[i] = NULL; }
+    }
+    g_tileview = NULL;   // was a child of scr_home, already freed above
+
+    meck_audio_ui_teardown();
+    meck_reader_ui_teardown();
+    meck_map_ui_teardown();
+}
+
+// Live screen-orientation rebuild. Invoked via lv_async_call from the Settings
+// toggle so it runs between input events (not inside the toggle's own click
+// handler, which would delete scr_settings out from under its event) and while
+// the LVGL lock is held, so no timer interleaves with the teardown/rebuild.
+// Parks on a throwaway blank screen so the screen being deleted is never the
+// active one, switches rotation, rebuilds, and loads home.
+static void meck_ui_apply_orientation_rebuild(void *unused) {
+    (void)unused;
+    Meck* mesh = meck_get_instance();
+    P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : nullptr;
+
+    lv_obj_t* blank = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(blank, lv_color_black(), 0);
+    lv_screen_load(blank);
+
+    meck_ui_teardown_screens();
+
+    lv_display_set_rotation(lv_display_get_default(),
+        (prefs && prefs->orientation == 1)
+            ? LV_DISPLAY_ROTATION_90
+            : LV_DISPLAY_ROTATION_0);
+
+    meck_ui_build_screens();
+
+    lv_screen_load(scr_home);
+    lv_obj_delete(blank);
+
+    printf("MeckUI: rebuilt for %s\n",
+        (prefs && prefs->orientation == 1) ? "landscape" : "portrait");
+}
+
+extern "C" void meck_ui_init() {
+    // Apply the saved screen orientation before any screen is built, so the
+    // layout reads the correct logical dimensions from the start. 0 =
+    // portrait (default), 1 = landscape. The Settings > Orientation toggle
+    // saves this pref and rebuilds live; this read is the boot-time apply.
+    {
+        Meck* mesh = meck_get_instance();
+        P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : nullptr;
+        lv_display_set_rotation(lv_display_get_default(),
+            (prefs && prefs->orientation == 1)
+                ? LV_DISPLAY_ROTATION_90
+                : LV_DISPLAY_ROTATION_0);
+    }
+
+    printf("MeckUI: building home screen\n");
+
+    // Silence the LEDC fade-install error spam. cpp_bus_driver re-installs
+    // the LEDC fade ISR on every set_rm69a10_brightness call; ESP-IDF
+    // returns ESP_ERR_INVALID_STATE which the driver ignores (the actual
+    // brightness write goes via panel register 0x51, not LEDC). Logging
+    // the error each tap is just noise.
+    esp_log_level_set("ledc", ESP_LOG_NONE);
+
+    // Route ESP_LOGx output through the debug-log hook so it is captured to
+    // the SD session log when logging is active (ESP_LOGx bypasses printf).
+    esp_log_set_vprintf(meck_debug_log_vprintf);
+
+    _lock_acquire(&lvgl_api_lock);
+
+    meck_emoji_init();
+
+    meck_ui_build_screens();
 
     lv_timer_create(ui_update_timer_cb, 500, NULL);
 

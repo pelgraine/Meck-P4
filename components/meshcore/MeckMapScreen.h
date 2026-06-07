@@ -36,6 +36,13 @@ extern "C" {
 void meck_map_ui_init(void);
 
 /*
+ * Tear down the map screen and reset its state (pools, lazy flags, GPS
+ * timer) so a subsequent meck_map_ui_init() rebuilds it. Used by the live
+ * screen-orientation rebuild.
+ */
+void meck_map_ui_teardown(void);
+
+/*
  * Load the map screen. Wired to the home grid's Maps tile.
  * On first call: detects available zoom range from SD, loads
  * persisted center from prefs (or Sydney CBD fallback), renders

@@ -16,6 +16,21 @@
 #include "lvgl.h"
 #include "t_display_p4_driver.h"
 
+// Orientation-aware logical dimensions (mirrors MeckUI.cpp). The panel can be
+// rotated at runtime; when rotated, LVGL reports a swapped logical resolution.
+// t_display_p4_driver.h's SCREEN_WIDTH/SCREEN_HEIGHT are the fixed *physical*
+// panel size, so without this the reader would lay out into the portrait-width
+// left strip when the screen is landscape. Redefine them within this TU to the
+// live logical resolution so the page area, list, and rows fill the screen at
+// either orientation. Every use here is in a function body, so a
+// function-valued macro is safe.
+#undef SCREEN_WIDTH
+#undef SCREEN_HEIGHT
+static inline int32_t meck_logical_w() { return lv_display_get_horizontal_resolution(lv_display_get_default()); }
+static inline int32_t meck_logical_h() { return lv_display_get_vertical_resolution(lv_display_get_default()); }
+#define SCREEN_WIDTH  (meck_logical_w())
+#define SCREEN_HEIGHT (meck_logical_h())
+
 #include <dirent.h>
 #include <sys/stat.h>
 #include <ctype.h>
@@ -83,6 +98,7 @@ static std::vector<ReaderEntry> g_entries;
 
 static lv_obj_t* scr_reader_browser = NULL;
 static lv_obj_t* scr_reader_view    = NULL;
+static bool      g_reader_ui_inited = false;
 
 /* Browser widgets updated on path change. */
 static lv_obj_t* lbl_browser_path = NULL;   /* breadcrumb */
@@ -544,14 +560,22 @@ static void create_reader_view_screen(void) {
  * ==========================================================================*/
 
 extern "C" void meck_reader_ui_init(void) {
-    static bool inited = false;
-    if (inited) return;
+    if (g_reader_ui_inited) return;
 
     create_browser_screen();
     create_reader_view_screen();
     browser_repopulate();
 
-    inited = true;
+    g_reader_ui_inited = true;
+}
+
+// Delete the reader screens and clear the init guard so a later
+// meck_reader_ui_init() rebuilds them (used by the live orientation
+// rebuild). Deleting each screen frees all its child widgets.
+extern "C" void meck_reader_ui_teardown(void) {
+    if (scr_reader_browser) { lv_obj_delete(scr_reader_browser); scr_reader_browser = NULL; }
+    if (scr_reader_view)    { lv_obj_delete(scr_reader_view);    scr_reader_view    = NULL; }
+    g_reader_ui_inited = false;
 }
 
 extern "C" void meck_reader_ui_show_browser(void) {

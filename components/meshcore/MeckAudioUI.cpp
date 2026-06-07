@@ -72,6 +72,7 @@ static std::vector<AudioEntry> g_entries;
 
 static lv_obj_t* scr_audio_browser = NULL;
 static lv_obj_t* scr_audio_player  = NULL;
+static bool      g_audio_ui_inited = false;
 
 /* Browser-screen widgets we need to update on path change. */
 static lv_obj_t* lbl_browser_path = NULL;   /* breadcrumb */
@@ -1169,16 +1170,27 @@ static void ensure_audio_dirs(void) {
 }
 
 extern "C" void meck_audio_ui_init(void) {
-    static bool inited = false;
-    if (inited) return;
+    if (g_audio_ui_inited) return;
 
     ensure_audio_dirs();   /* TEMP DISABLED for audio-hang debugging */
     create_browser_screen();
     create_player_screen();
     browser_repopulate();
 
-    inited = true;
+    g_audio_ui_inited = true;
     printf("MeckAudioUI: browser + player screens built\n");
+}
+
+// Delete the audio screens + the player refresh timer and clear the init
+// guard so a later meck_audio_ui_init() rebuilds them (used by the live
+// orientation rebuild). Playback (MeckAudio backend) is untouched — only
+// the UI is torn down; the rebuilt player picks the live state back up on
+// its next refresh. Deleting each screen frees all its child widgets.
+extern "C" void meck_audio_ui_teardown(void) {
+    if (player_refresh_timer) { lv_timer_delete(player_refresh_timer); player_refresh_timer = NULL; }
+    if (scr_audio_browser) { lv_obj_delete(scr_audio_browser); scr_audio_browser = NULL; }
+    if (scr_audio_player)  { lv_obj_delete(scr_audio_player);  scr_audio_player  = NULL; }
+    g_audio_ui_inited = false;
 }
 
 extern "C" void meck_audio_ui_show_browser(void) {
