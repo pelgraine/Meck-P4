@@ -83,6 +83,41 @@ extern "C" int meck_voice_send_get_status(void);
 #include <climits>
 #include <cstdarg>   // va_list, va_start, va_end (meck_debug_log_printf)
 #include <cerrno>    // errno (Debug Logs fopen error reporting)
+#include "esp_system.h"  // esp_restart (orientation change reboot-apply)
+
+// ----------------------------------------------------------------------------
+// Orientation-aware logical dimensions
+// ----------------------------------------------------------------------------
+// The display can be rotated at runtime: lv_display_set_rotation() drives the
+// PPA in main.cpp's flush callback, and when rotated 90/270 LVGL reports a
+// swapped logical resolution. The UI here is laid out proportionally from
+// SCREEN_WIDTH / SCREEN_HEIGHT, so within THIS translation unit we redefine
+// them to read the live logical resolution instead of the fixed panel macros
+// from t_display_p4_driver.h. At the default 0deg rotation these return the
+// same 568x1232, so portrait layout is byte-for-byte unchanged; rotating swaps
+// them and every proportional site adapts.
+//
+// Scope note: this only affects MeckUI.cpp. main.cpp keeps the physical macros
+// for draw-buffer/PPA sizing (correct), and the other UI translation units
+// (audio/map/reader) still use the fixed macros until they adopt the same
+// accessor via a shared header. All SCREEN_WIDTH/SCREEN_HEIGHT uses here are in
+// function bodies, so a function-valued macro is safe.
+static inline int32_t meck_disp_w() {
+    return lv_display_get_horizontal_resolution(lv_display_get_default());
+}
+static inline int32_t meck_disp_h() {
+    return lv_display_get_vertical_resolution(lv_display_get_default());
+}
+// Keyboard height stays proportional to the screen (portrait baseline was
+// 560 px on the 1232-tall panel) so it remains usable when rotated to
+// landscape (where a fixed 560 would swallow the whole screen).
+static inline int32_t meck_kb_height() {
+    return 560 * meck_disp_h() / 1232;
+}
+#undef SCREEN_WIDTH
+#undef SCREEN_HEIGHT
+#define SCREEN_WIDTH  (meck_disp_w())
+#define SCREEN_HEIGHT (meck_disp_h())
 
 extern _lock_t lvgl_api_lock;
 
@@ -454,6 +489,7 @@ static lv_obj_t *lbl_set_font_scale  = NULL;
 static lv_obj_t *lbl_set_ble         = NULL;
 #endif
 static lv_obj_t *lbl_set_drafts      = NULL;
+static lv_obj_t *lbl_set_orientation = NULL;
 
 // WiFi settings sub-screen (Settings > WiFi Companion)
 static lv_obj_t *scr_settings_wifi        = NULL;
@@ -1349,6 +1385,7 @@ static void on_settings_font_scale_tap(lv_event_t *e);
 static void on_settings_ble_tap(lv_event_t *e);
 #endif
 static void on_settings_drafts_tap(lv_event_t *e);
+static void on_settings_orientation_tap(lv_event_t *e);
 static void goto_settings_wifi(lv_event_t *e);
 static void create_settings_wifi_screen();
 static void on_gps_tile_long_press(lv_event_t *e);
@@ -1489,17 +1526,30 @@ extern "C" void lock_screen_scroll(lv_obj_t *scr) {
 
 static lv_obj_t* create_tile_button(lv_obj_t *parent, const char *label,
                                     lv_event_cb_t cb, int col, int row) {
-    // 2-column grid (was 3). With margins of 20 px each side and a 10 px
-    // gap between cols, tile width is (SCREEN_WIDTH - 50) / 2.
-    int tileW = (SCREEN_WIDTH - 50) / 2;
-    int tileH = 168;          // 5 rows fill the AMOLED height (gridY + 5*168 + 4*10 = 1020)
+    // Grid is orientation-aware. Portrait: 2 columns x 5 rows (unchanged).
+    // Landscape: 5 columns x 2 rows. The call sites pass (col,row) in the
+    // portrait 2-column convention; we fold that to a linear index and
+    // re-derive the cell for the current column count, so the same 10 tiles
+    // reflow without touching any call site.
     int gapX  = 10;
     int gapY  = 10;
     int gridX = 20;
-    int gridY = 140;
+    bool landscape = (SCREEN_WIDTH > SCREEN_HEIGHT);
+    // Landscape header is now two lines (IP lifted up to the battery row), so
+    // the grid starts higher; portrait keeps the original 140.
+    int gridY = landscape ? 110 : 140;
+    int cols  = landscape ? 5 : 2;
+    int tileW = (SCREEN_WIDTH - 2 * gridX - (cols - 1) * gapX) / cols;
+    // Portrait keeps the original fixed 168 (5 rows fill the 1232 panel).
+    // Landscape fits 2 rows into the height below the header, reserving 55 px
+    // at the bottom so the swipe hint and the tileview scrollbar stay clear.
+    int tileH = landscape ? ((SCREEN_HEIGHT - gridY - 55 - gapY) / 2) : 168;
 
-    int x = gridX + col * (tileW + gapX);
-    int y = gridY + row * (tileH + gapY);
+    int idx = row * 2 + col;   // linear order from the portrait 2-col call sites
+    int c   = idx % cols;
+    int r   = idx / cols;
+    int x = gridX + c * (tileW + gapX);
+    int y = gridY + r * (tileH + gapY);
 
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_size(btn, tileW, tileH);
@@ -1578,7 +1628,7 @@ static lv_obj_t* create_settings_row(lv_obj_t *parent, const char *label,
 // Anything positioned relative to the keyboard top (textarea, send
 // button, message scroll height) reads MECK_KB_HEIGHT so layout stays
 // consistent if the value changes later.
-#define MECK_KB_HEIGHT 560
+#define MECK_KB_HEIGHT (meck_kb_height())
 
 // LVGL 9 + C++20: OR'ing a part constant with a state constant is between
 // two different anonymous enums, which triggers
@@ -2470,6 +2520,10 @@ static void settings_update_labels() {
     if (lbl_set_drafts) {
         lv_label_set_text(lbl_set_drafts,
             prefs->save_drafts != 0 ? "On" : "Off");
+    }
+    if (lbl_set_orientation) {
+        lv_label_set_text(lbl_set_orientation,
+            prefs->orientation != 0 ? "Landscape" : "Portrait");
     }
 }
 
@@ -5443,7 +5497,16 @@ static void create_page_home(lv_obj_t *page) {
     lv_obj_set_style_text_color(lbl_home_ble_pin,
         lv_palette_main(LV_PALETTE_CYAN), 0);
     meck_set_font(lbl_home_ble_pin, &meck_montserrat_14, 0);
-    lv_obj_align(lbl_home_ble_pin, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 95);
+    // Portrait stacks this as the 3rd left-column line (y=95). Landscape has a
+    // wide, mostly-empty header row, so lift it up to the battery's level and
+    // drop it into the open centre space instead. This also shortens the left
+    // column to two lines, letting the tile grid move up (see create_tile_button).
+    if (SCREEN_WIDTH > SCREEN_HEIGHT) {
+        lv_obj_set_style_text_align(lbl_home_ble_pin, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(lbl_home_ble_pin, LV_ALIGN_TOP_MID, 0, NOTCH_SAFE_Y);
+    } else {
+        lv_obj_align(lbl_home_ble_pin, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 95);
+    }
     lv_obj_add_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
 
     // Navigation grid: 10 tiles in 2 columns × 5 rows. First two rows are
@@ -7298,6 +7361,24 @@ static void on_settings_drafts_tap(lv_event_t *e) {
            prefs->save_drafts != 0 ? "On" : "Off");
 }
 
+static void on_settings_orientation_tap(lv_event_t *e) {
+    LV_UNUSED(e);
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->orientation = (prefs->orientation != 0) ? 0 : 1;
+    mesh->getDataStore()->savePrefs(*prefs);
+
+    // The whole UI is built once with the orientation baked into every
+    // screen's layout, so the change is applied by rebooting and letting
+    // meck_ui_init read the saved pref.
+    printf("Settings: orientation = %s — rebooting to apply\n",
+           prefs->orientation != 0 ? "Landscape" : "Portrait");
+    esp_restart();
+}
+
 static void create_settings_screen() {
     scr_settings = lv_obj_create(NULL);
     lock_screen_scroll(scr_settings);
@@ -7526,6 +7607,13 @@ static void create_settings_screen() {
     // reboot or screen rebuild.
     create_settings_row(scroll, "Font Size (tap to cycle)",
         &lbl_set_font_scale, on_settings_font_scale_tap, y);
+    y += 65;
+
+    // Screen orientation — Portrait / Landscape. Unlike the toggles above,
+    // the layout is baked into every screen at build time, so this one saves
+    // the pref and reboots to apply (see on_settings_orientation_tap).
+    create_settings_row(scroll, "Orientation (tap to flip, reboots)",
+        &lbl_set_orientation, on_settings_orientation_tap, y);
     y += 65;
 
     lv_obj_t *id_row = lv_obj_create(scroll);
@@ -15761,6 +15849,19 @@ static void meck_cardkb_init(void) {
 #endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4 && MECK_CARDKB
 
 extern "C" void meck_ui_init() {
+    // Apply the saved screen orientation before any screen is built, so the
+    // layout reads the correct logical dimensions from the start. 0 =
+    // portrait (default), 1 = landscape. The Settings > Orientation toggle
+    // saves this pref and reboots, so this read is the single apply point.
+    {
+        Meck* mesh = meck_get_instance();
+        P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : nullptr;
+        lv_display_set_rotation(lv_display_get_default(),
+            (prefs && prefs->orientation == 1)
+                ? LV_DISPLAY_ROTATION_90
+                : LV_DISPLAY_ROTATION_0);
+    }
+
     printf("MeckUI: building home screen\n");
 
     // Silence the LEDC fade-install error spam. cpp_bus_driver re-installs

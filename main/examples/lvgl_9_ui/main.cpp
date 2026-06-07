@@ -4183,10 +4183,17 @@ void Lvgl_Init(void)
 
                                     // 计算实际需要的缓冲区大小
                                     size_t output_buffer_size = output_img_width * output_img_height * (SCREEN_BITS_PER_PIXEL / 8);
-                                    uint8_t *output_buffer = (uint8_t *)heap_caps_malloc(output_buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+                                    // Meck: the PPA requires the output buffer to be aligned to the
+                                    // PSRAM cache line (and at least the aligned size handed to it
+                                    // below). A plain heap_caps_malloc address is not guaranteed
+                                    // aligned, which is what made ppa_do_scale_rotate_mirror return
+                                    // ESP_ERR_INVALID_ARG. Allocate aligned, at the aligned size.
+                                    size_t output_buffer_alloc = ALIGN_UP(output_buffer_size, data_cache_line_size_2);
+                                    uint8_t *output_buffer = (uint8_t *)heap_caps_aligned_alloc(data_cache_line_size_2, output_buffer_alloc, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
                                     if (output_buffer == NULL)
                                     {
                                         printf("failed to allocate rotated buffer\n");
+                                        lv_display_flush_ready(disp);   // Meck: never leave LVGL waiting
                                         return;
                                     }
 
@@ -4257,6 +4264,7 @@ void Lvgl_Init(void)
                                     {
                                         printf("ppa_do_scale_rotate_mirror fail (error code: 0x%X)\n", ret);
                                         heap_caps_free(output_buffer);
+                                        lv_display_flush_ready(disp);   // Meck: never leave LVGL waiting
                                         return;
                                     }
 
@@ -5191,7 +5199,7 @@ bool App_Video_Init(void)
     return true;
 }
 
-#if (CONFIG_ENABLE_PPA_SCREEN_ROTATION == true) && (!defined SCREEN_ROTATION_DIRECTION_0)
+#if (CONFIG_ENABLE_PPA_SCREEN_ROTATION == true)
 bool Ppa_Screen_Rotation_Init(void)
 {
     ppa_client_config_t ppa_srm_config =
@@ -5853,7 +5861,7 @@ extern "C" void app_main(void)
     Sys_Status.camera.init_flag = false;
     printf("Camera: init deferred (lazy on first camera UI open)\n");
 
-#if (CONFIG_ENABLE_PPA_SCREEN_ROTATION == true) && (!defined SCREEN_ROTATION_DIRECTION_0)
+#if (CONFIG_ENABLE_PPA_SCREEN_ROTATION == true)
     if (Ppa_Screen_Rotation_Init() == false)
     {
         printf("Ppa_Screen_Rotation_init fail\n");

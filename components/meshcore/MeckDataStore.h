@@ -174,6 +174,12 @@ struct P4NodePrefs {
     // tolerates short reads, so existing blobs come up with it off.
     uint8_t save_drafts;             // 0=off (default), 1=on
 
+    // Screen orientation. 0 = portrait (default), 1 = landscape. Appending
+    // here is safe — loadPrefs memsets to zero and tolerates short reads, so
+    // existing NVS blobs come up as 0 = portrait. Applied at boot in
+    // meck_ui_init; the Settings toggle saves this and reboots to apply.
+    uint8_t orientation;             // 0=portrait (default), 1=landscape
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -211,6 +217,7 @@ struct P4NodePrefs {
         memset(wifi_ssid, 0, sizeof(wifi_ssid));
         memset(wifi_password, 0, sizeof(wifi_password));
         save_drafts = 0;        // off by default
+        orientation = 0;        // portrait by default
     }
 };
 
