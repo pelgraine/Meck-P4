@@ -1,26 +1,26 @@
 dependencies:
   lvgl/lvgl:
-    version: "9.3.0"
+    version: 9.3.0
 
   espressif/esp_tinyusb:
-    version: "^1"
+    version: ^1
 
   # esp_video:
   #   version: "0.9.*"
 
   espressif/esp-sr:
-    version: "^2.1.3"
+    version: ^2.1.3
 
   espressif/esp_hosted:
-    version: "2.0.17"
+    version: 2.0.17
 
   espressif/esp_wifi_remote:
-    version: "^1.1"
+    version: ^1.1
 
   espressif/esp_lcd_usb_display:
-    version: "^1.0.0"
+    version: ^1.0.0
     matches:
-      - if: "$CONFIG{ENABLE_USB_DISPLAY} == True"
+    - if: $CONFIG{ENABLE_USB_DISPLAY} == True
 
   # Audio backend (Meck).
   # chmorgan/esp-audio-player pulls in chmorgan/esp-libhelix-mp3
@@ -32,3 +32,4 @@ dependencies:
 
   # ES8311 codec register driver — used by components/meshcore/meck_es8311.c
   # to configure the codec at runtime.
+  espressif/zlib: ^1.3.1

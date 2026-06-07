@@ -3322,43 +3322,20 @@ extern "C" void meck_screen_off()
     //    rather than dereference freed memory.
     lv_display_set_user_data(display, NULL);
 
-    // 5. Tell the panel chip to power down: DISPOFF then SLPIN.
+    // 5. Blank the panel: DISPOFF only. We deliberately do NOT delete the
+    //    panel or tear down the DSI bus. The teardown/rebuild only ever
+    //    existed to release the dsi_phy NO_LIGHT_SLEEP lock so light sleep
+    //    could engage; light sleep is disabled (it can't run safely with the
+    //    always-on radio), so the teardown buys nothing and the runtime
+    //    DSI-bus delete/rebuild is what was hanging the device on P4. On this
+    //    AMOLED, brightness-0 + DISPOFF already removes almost all panel
+    //    power, and leaving the bus up makes wake instant and reliable.
     if (Screen_Mipi_Dpi_Panel) {
         esp_lcd_panel_disp_on_off(Screen_Mipi_Dpi_Panel, false);  // 0x28 DISPOFF
-        esp_lcd_panel_disp_sleep(Screen_Mipi_Dpi_Panel, true);    // 0x10 SLPIN
-
-        // 6. Destroy the panel. This releases the dsi_dpi CPU_FREQ_MAX
-        //    PM lock (confirmed by v0.3.5 testing — the lock dump showed
-        //    dsi_dpi disappeared after del). It does NOT release
-        //    dsi_phy NO_LIGHT_SLEEP, which is held by the underlying
-        //    DSI bus (a separate handle owned by Mipi_Dsi_Init).
-        esp_lcd_panel_del(Screen_Mipi_Dpi_Panel);
-        Screen_Mipi_Dpi_Panel = NULL;
-
-        // 7. Destroy the DSI bus. This releases dsi_phy and is the step
-        //    that actually enables light sleep to engage on this hardware.
-        //    The bus handle was captured by Screen_Init into a file-scope
-        //    static inside t_display_p4_driver.cpp (see v0.3.6 changes
-        //    in that file). Symbol-table evidence from LilyGo's deep_sleep
-        //    binary (esp_lcd_del_dsi_bus is present) suggests this is the
-        //    sanctioned cleanup path; the public ESP-IDF API mirrors the
-        //    esp_lcd_new_dsi_bus creator. If it fails for any reason we
-        //    log and continue — worst case is dsi_phy stays held and we
-        //    get the same outcome as v0.3.5 (no power gain), not a crash.
-        esp_lcd_dsi_bus_handle_t bus = Screen_Get_Mipi_Dsi_Bus_Handle();
-        if (bus) {
-            esp_err_t err = esp_lcd_del_dsi_bus(bus);
-            if (err != ESP_OK) {
-                printf("meck_screen_off: esp_lcd_del_dsi_bus failed (%s) — dsi_phy may remain held\n",
-                       esp_err_to_name(err));
-            }
-        } else {
-            printf("meck_screen_off: no captured DSI bus handle — was Screen_Init called?\n");
-        }
     }
 
     meck_screen_state_off = true;
-    printf("meck_screen_off: panel down, DSI bus torn down, light sleep should now engage\n");
+    printf("meck_screen_off: panel blanked (DISPOFF), DSI bus left up\n");
 }
 
 extern "C" void meck_screen_on()
@@ -3371,44 +3348,19 @@ extern "C" void meck_screen_on()
         return;
     }
 
-    // 1. Rebuild the DSI bus + panel from scratch. Screen_Init creates a
-    //    new MIPI-DSI bus (which re-acquires dsi_phy/dsi_dpi locks) and a
-    //    fresh panel handle. esp_lcd_panel_init replays the HI8561 vendor
-    //    init sequence including SLPOUT and DISPON internally — total
-    //    around 200 ms of vendor commands + their inter-command delays.
-    if (Screen_Init(&Screen_Mipi_Dpi_Panel) == false) {
-        printf("meck_screen_on: Screen_Init failed\n");
+    // 1. Wake the existing panel. We no longer tear the DSI bus down in
+    //    meck_screen_off, so there is nothing to rebuild: the panel handle
+    //    and DSI bus are still live. Just undo the DISPOFF with a DISPON.
+    if (Screen_Mipi_Dpi_Panel) {
+        esp_lcd_panel_disp_on_off(Screen_Mipi_Dpi_Panel, true);   // 0x29 DISPON
+    } else {
+        printf("meck_screen_on: no panel handle, aborting\n");
         return;
     }
-    esp_err_t err = esp_lcd_panel_init(Screen_Mipi_Dpi_Panel);
-    if (err != ESP_OK) {
-        printf("meck_screen_on: esp_lcd_panel_init failed (%s)\n", esp_err_to_name(err));
-        return;
-    }
-
-    // 2. Re-register the DPI event callback. The original registration in
-    //    Lvgl_Init referenced the previous panel handle which we destroyed.
-    //    The callback bodies are identical to the originals — duplication
-    //    is deliberate to avoid promoting them to file scope just for this.
-#if CONFIG_ENABLE_USB_DISPLAY != true
-    esp_lcd_dpi_panel_event_callbacks_t cbs = {
-        .on_color_trans_done = [](esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) -> bool
-        {
-            lv_display_t *disp = (lv_display_t *)user_ctx;
-            lv_display_flush_ready(disp);
-            return false;
-        },
-        .on_refresh_done = [](esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) -> bool
-        {
-            return false;
-        },
-    };
-    ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(Screen_Mipi_Dpi_Panel, &cbs, display));
-#endif
 
     // 3. Restore the LVGL display's panel handle so the flush callback at
     //    line 3893 (set in Lvgl_Init via lv_display_set_flush_cb) can find
-    //    the new panel via lv_display_get_user_data.
+    //    the panel via lv_display_get_user_data.
     lv_display_set_user_data(display, Screen_Mipi_Dpi_Panel);
 
     // 4. Resume timers — display refresh first, then touch indev. From this
@@ -3444,7 +3396,7 @@ extern "C" void meck_screen_on()
     //    are already in scope.
 
     meck_screen_state_off = false;
-    printf("meck_screen_on: panel up, DSI bus rebuilt (caller will restore brightness)\n");
+    printf("meck_screen_on: panel woken (DISPON), caller will restore brightness\n");
 }
 
 // GPS power gate. Switching to OFF puts the L76K into standby (~25 mA
@@ -5750,7 +5702,7 @@ extern "C" void app_main(void)
         esp_pm_config_t pm_config = {
             .max_freq_mhz = 360,
             .min_freq_mhz = 40,
-            .light_sleep_enable = true,
+            .light_sleep_enable = false,
         };
         esp_err_t pm_err = esp_pm_configure(&pm_config);
         if (pm_err != ESP_OK) {

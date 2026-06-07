@@ -12,6 +12,7 @@
 
 #include "MeckReaderUI.h"
 #include "MeckReader.h"
+#include "Epubprocessor.h"
 
 #include "lvgl.h"
 #include "t_display_p4_driver.h"
@@ -39,6 +40,8 @@ static inline int32_t meck_logical_h() { return lv_display_get_vertical_resoluti
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+
+#include "esp_heap_caps.h"   /* TEMP DIAGNOSTIC: heap_caps_check_integrity_all */
 
 #include <vector>
 #include <string>
@@ -98,7 +101,11 @@ static std::vector<ReaderEntry> g_entries;
 
 static lv_obj_t* scr_reader_browser = NULL;
 static lv_obj_t* scr_reader_view    = NULL;
+static lv_obj_t* scr_reader_converting = NULL;
 static bool      g_reader_ui_inited = false;
+
+/* Converting-screen widget (shown while an .epub is converted to .txt). */
+static lv_obj_t* lbl_converting = NULL;
 
 /* Browser widgets updated on path change. */
 static lv_obj_t* lbl_browser_path = NULL;   /* breadcrumb */
@@ -121,6 +128,7 @@ static void on_browser_back_clicked(lv_event_t* e);
 static void on_browser_up_clicked(lv_event_t* e);
 static void on_dir_row_clicked(lv_event_t* e);
 static void on_file_row_clicked(lv_event_t* e);
+static void reader_show_converting(const char* epub_name);
 static void reader_render_current(void);
 static void on_reader_prev_tap(lv_event_t* e);
 static void on_reader_next_tap(lv_event_t* e);
@@ -140,6 +148,10 @@ static std::string to_lower_ext(const char* name) {
 
 static bool is_txt_ext(const std::string& ext) {
     return ext == "txt";
+}
+
+static bool is_epub_ext(const std::string& ext) {
+    return ext == "epub";
 }
 
 /* Strip the last path component. Returns true if a strip happened; false if
@@ -196,7 +208,8 @@ static void scan_current_dir(void) {
             }
             if (!e.is_dir) {
                 e.ext = to_lower_ext(e.name.c_str());
-                if (!is_txt_ext(e.ext)) continue;   /* only folders + .txt */
+                if (!is_txt_ext(e.ext) && !is_epub_ext(e.ext))
+                    continue;   /* only folders + .txt + .epub */
 
                 char full[PATH_MAX_LEN];
                 snprintf(full, sizeof(full), "%s/%s", g_browser_path, de->d_name);
@@ -383,6 +396,48 @@ static void on_file_row_clicked(lv_event_t* e) {
     const char* name = (const char*)lv_event_get_user_data(e);
     if (!name) return;
 
+    /* .epub: resolve (or build) the cached .txt, then open that. The cache
+     * lives in a hidden .epub_cache subfolder, so it never shows in the
+     * browser; the user only ever sees and taps the .epub itself. */
+    if (is_epub_ext(to_lower_ext(name))) {
+        /* TEMP DIAGNOSTIC: is the PSRAM heap already corrupt before we touch
+         * the epub? If this first check fails, the damage is pre-existing and
+         * the epub feature is only the canary. true = print details on error. */
+        printf("EpubDiag: heap integrity BEFORE epub work: %s\n",
+               heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
+
+        char epub_path[PATH_MAX_LEN];
+        snprintf(epub_path, sizeof(epub_path), "%s/%s", g_browser_path, name);
+
+        char cache_path[PATH_MAX_LEN];
+        EpubProcessor::buildCachePath(epub_path, cache_path, sizeof(cache_path));
+
+        struct stat st;
+        if (stat(cache_path, &st) != 0) {
+            /* Not cached: show the converting screen and force one paint
+             * before the blocking conversion, or it never gets drawn. */
+            reader_show_converting(name);
+            lv_refr_now(NULL);
+            bool conv_ok = EpubProcessor::processToText(epub_path, cache_path);
+            /* TEMP DIAGNOSTIC: did the conversion corrupt the heap? */
+            printf("EpubDiag: heap integrity AFTER convert: %s\n",
+                   heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
+            if (!conv_ok) {
+                meck_reader_ui_show_browser();
+                return;
+            }
+        }
+
+        snprintf(g_current_file, sizeof(g_current_file), "%s", cache_path);
+        if (!meck_reader_open(g_current_file)) {
+            meck_reader_ui_show_browser();
+            return;
+        }
+        meck_reader_ui_show_reader();
+        reader_render_current();
+        return;
+    }
+
     snprintf(g_current_file, sizeof(g_current_file),
              "%s/%s", g_browser_path, name);
     if (!meck_reader_open(g_current_file)) return;
@@ -556,6 +611,33 @@ static void create_reader_view_screen(void) {
 }
 
 /* ============================================================================
+ * Converting screen (shown while an .epub is decoded to a cached .txt)
+ * ==========================================================================*/
+
+static void create_converting_screen(void) {
+    scr_reader_converting = lv_obj_create(NULL);
+    lock_screen_scroll(scr_reader_converting);
+    lv_obj_set_style_bg_color(scr_reader_converting, lv_color_black(), 0);
+
+    lbl_converting = lv_label_create(scr_reader_converting);
+    lv_label_set_long_mode(lbl_converting, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_converting, SCREEN_WIDTH - 60);
+    lv_obj_set_style_text_color(lbl_converting, lv_color_white(), 0);
+    lv_obj_set_style_text_align(lbl_converting, LV_TEXT_ALIGN_CENTER, 0);
+    meck_ui_set_font(lbl_converting, &meck_montserrat_22, 0);
+    lv_label_set_text(lbl_converting, "");
+    lv_obj_center(lbl_converting);
+}
+
+static void reader_show_converting(const char* epub_name) {
+    if (!scr_reader_converting || !lbl_converting) return;
+    char msg[PATH_MAX_LEN + 64];
+    snprintf(msg, sizeof(msg), "Converting %s to txt\n\nPlease wait...", epub_name);
+    lv_label_set_text(lbl_converting, msg);
+    lv_screen_load(scr_reader_converting);
+}
+
+/* ============================================================================
  * Public API
  * ==========================================================================*/
 
@@ -564,6 +646,7 @@ extern "C" void meck_reader_ui_init(void) {
 
     create_browser_screen();
     create_reader_view_screen();
+    create_converting_screen();
     browser_repopulate();
 
     g_reader_ui_inited = true;
@@ -575,6 +658,11 @@ extern "C" void meck_reader_ui_init(void) {
 extern "C" void meck_reader_ui_teardown(void) {
     if (scr_reader_browser) { lv_obj_delete(scr_reader_browser); scr_reader_browser = NULL; }
     if (scr_reader_view)    { lv_obj_delete(scr_reader_view);    scr_reader_view    = NULL; }
+    if (scr_reader_converting) {
+        lv_obj_delete(scr_reader_converting);
+        scr_reader_converting = NULL;
+        lbl_converting = NULL;
+    }
     g_reader_ui_inited = false;
 }
 
