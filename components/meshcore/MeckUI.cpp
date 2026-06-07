@@ -39,6 +39,7 @@
 #include "MeckDataStore.h"
 #include "MeckAudioUI.h"
 #include "MeckReaderUI.h"
+#include "MeckNotesUI.h"
 #include "MeckAudio.h"
 #include "MeckVoice.h"
 
@@ -1408,7 +1409,7 @@ static void show_not_implemented(const char* feature_name) {
     if (scr_not_implemented) lv_screen_load(scr_not_implemented);
 }
 static void cb_todo_reader(lv_event_t* e)   { meck_reader_ui_show_browser(); }
-static void cb_todo_notes(lv_event_t* e)    { show_not_implemented("Notes"); }
+static void cb_todo_notes(lv_event_t* e)    { (void)e; meck_notes_ui_show_browser(); }
 static void cb_todo_discover(lv_event_t* e) {
     // Wired to the Discover tile on the home grid. Mirrors Meck T-Deck
     // Pro's F-key Discover: shows nearby repeaters from the same heard-
@@ -2372,6 +2373,30 @@ static void meck_style_keyboard(lv_obj_t *kb) {
         lv_obj_remove_local_style_prop(kb, LV_STYLE_BORDER_COLOR, LV_PART_ITEMS);
         lv_obj_remove_local_style_prop(kb, LV_STYLE_BORDER_WIDTH, LV_PART_ITEMS);
     }
+}
+
+// Exposed for other UI modules (the notes editor) so their on-screen keyboard
+// matches the composer's styling and honours the layout preference. Styles at
+// call time; if the layout pref changes later, the keyboard re-styles on the
+// next orientation rebuild (it isn't in the live restyle-all list).
+extern "C" void meck_ui_style_keyboard(lv_obj_t* kb) {
+    meck_style_keyboard(kb);
+}
+
+// Current LOCAL epoch (mesh RTC UTC plus the user's UTC offset), or 0 if the
+// clock isn't synced yet. Exposed so modules can build timestamped filenames
+// (e.g. notes) without reaching into the mesh themselves.
+extern "C" uint32_t meck_ui_local_epoch(void) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return 0;
+    mesh::RTCClock* rtc = mesh->getRTCClock();
+    if (!rtc) return 0;
+    uint32_t utc = rtc->getCurrentTime();
+    if (utc < 1750000000u) return 0;   // not yet synced
+    int off = 0;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (prefs) off = prefs->utc_offset_hours;
+    return (uint32_t)((int64_t)utc + (int64_t)off * 3600);
 }
 
 // Re-apply theme + layout to every active Meck keyboard. Called from the
@@ -15911,6 +15936,7 @@ static void meck_ui_build_screens() {
     create_room_messages_screen();
     meck_audio_ui_init();
     meck_reader_ui_init();
+    meck_notes_ui_init();
     meck_map_ui_init();
 }
 
@@ -15940,6 +15966,7 @@ static void meck_ui_teardown_screens() {
 
     meck_audio_ui_teardown();
     meck_reader_ui_teardown();
+    meck_notes_ui_teardown();
     meck_map_ui_teardown();
 }
 
