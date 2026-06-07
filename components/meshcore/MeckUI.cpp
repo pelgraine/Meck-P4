@@ -414,6 +414,14 @@ static lv_obj_t *lbl_home_clock[MECK_HOME_PAGE_COUNT]   = {};
 static lv_obj_t *lbl_home_battery[MECK_HOME_PAGE_COUNT] = {};
 static lv_obj_t *lbl_home_audio[MECK_HOME_PAGE_COUNT]   = {};
 
+// Header refresh counters for ui_update_timer_cb (500ms/tick): the clock fills
+// once a minute (120 ticks), the battery once every five minutes (600 ticks).
+// File-scope so the orientation rebuild can reset them to their period and have
+// the next tick repopulate the freshly-rebuilt (empty) labels immediately,
+// instead of leaving them blank until the next wrap.
+static int clock_ticks   = 120;
+static int battery_ticks = 600;
+
 // Clock + battery labels for every non-home screen and modal. Slot 0..7
 // reserved for full screens (Settings, Settings/Contacts, Radio Picker,
 // Channel Picker, Messages, Contacts, Contact Detail, Discover); slot
@@ -11933,7 +11941,6 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // clock isn't synced (epoch < 1750000000) the labels stay empty. The
     // same string is mirrored to every home tile so the header is
     // consistent across the tileview.
-    static int clock_ticks = 120;
     if (++clock_ticks >= 120) {
         clock_ticks = 0;
         uint32_t now_utc = 0;
@@ -11965,7 +11972,6 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // Home tiles: battery % every 5 minutes (600 ticks at 500ms). Colour-
     // coded: green ≥70, orange 40-69, yellow 20-39, red <20. Mirrored to
     // every home tile.
-    static int battery_ticks = 600;
     if (++battery_ticks >= 600) {
         battery_ticks = 0;
         bool available = meck_battery_available();
@@ -15993,6 +15999,13 @@ static void meck_ui_apply_orientation_rebuild(void *unused) {
             : LV_DISPLAY_ROTATION_0);
 
     meck_ui_build_screens();
+
+    // The rebuilt clock/battery labels start empty. Reset their refresh
+    // counters to the period so the next ui_update_timer_cb tick (<=500ms)
+    // refills them, rather than leaving them blank until the next wrap (up to
+    // 1 min for the clock, 5 min for the battery).
+    clock_ticks   = 120;
+    battery_ticks = 600;
 
     lv_screen_load(scr_home);
     lv_obj_delete(blank);
