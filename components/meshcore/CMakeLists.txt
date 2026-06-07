@@ -48,7 +48,6 @@ idf_component_register(
         "MeckReaderUI.cpp"
         "MeckNotes.cpp"
         "MeckNotesUI.cpp"
-        "miniz/miniz_tinfl.c"
         "es8311.cpp" 
         "meck_montserrat_14.c"
         "meck_montserrat_16.c"
@@ -71,7 +70,6 @@ idf_component_register(
         "meck_emoji_32.c"
     INCLUDE_DIRS
         "."
-        "miniz"
         "meshcore_src"
         "meshcore_src/helpers"
         "meshcore_src/ed25519"
@@ -111,22 +109,6 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DMAX_CONTACTS=2000
     -DHAVE_CODEC2=1
     -DMECK_CARDKB=1
-)
-
-# Vendored miniz is used for EPUB DEFLATE only (decompression). Trim it to the
-# inflate path so it pulls no stdio/time and emits no deflate/zip/zlib code.
-# Scoped to the one compiled miniz source; the headers carry the same trim via
-# EpubZipReader.h for any consumer translation unit.
-set_source_files_properties("miniz/miniz_tinfl.c" PROPERTIES COMPILE_DEFINITIONS
-    "MINIZ_NO_STDIO;MINIZ_NO_TIME;MINIZ_NO_DEFLATE_APIS;MINIZ_NO_ARCHIVE_APIS;MINIZ_NO_ZLIB_APIS"
-)
-
-# tinfl_decompress is provably correct as source (host ASAN, every opt level,
-# 32-bit and 64-bit) but overruns its scratch struct only on the RISC-V target,
-# which points to a code-generation issue at the project optimization level.
-# Force this one file to -O0 as a scoped workaround / test.
-set_source_files_properties("miniz/miniz_tinfl.c" PROPERTIES COMPILE_OPTIONS
-    "-O0"
 )
 
 # Capture the actual UTC build epoch and inject it into the firmware so

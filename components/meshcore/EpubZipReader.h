@@ -4,12 +4,11 @@
 //
 // Parses ZIP archives from the SD card using POSIX stdio (fopen/fread), so it
 // runs on the P4's mounted /sdcard without any Arduino FS dependency. DEFLATE
-// is handled by a vendored miniz tinfl (third_party/miniz), since the P4 is
-// RISC-V and has no ROM miniz the way the ESP32-S3 did.
+// is handled by zlib (espressif/zlib managed component) using raw inflate.
 //
 // Supports:
 //   - STORED   (method 0) entries - direct copy
-//   - DEFLATED (method 8) entries - vendored tinfl
+//   - DEFLATED (method 8) entries - zlib raw inflate
 //   - ZIP64 is NOT supported (EPUBs don't need it)
 //
 // Memory: extraction buffers and the entry table prefer PSRAM on device
@@ -24,23 +23,6 @@
 #include <strings.h>
 #include <stdint.h>
 
-// Trim miniz to inflate only before pulling the header in, so no consumer TU
-// drags in its deflate, zip-archive, zlib-wrapper, stdio or time code.
-#ifndef MINIZ_NO_STDIO
-#define MINIZ_NO_STDIO
-#endif
-#ifndef MINIZ_NO_TIME
-#define MINIZ_NO_TIME
-#endif
-#ifndef MINIZ_NO_DEFLATE_APIS
-#define MINIZ_NO_DEFLATE_APIS
-#endif
-#ifndef MINIZ_NO_ARCHIVE_APIS
-#define MINIZ_NO_ARCHIVE_APIS
-#endif
-#ifndef MINIZ_NO_ZLIB_APIS
-#define MINIZ_NO_ZLIB_APIS
-#endif
 #include <zlib.h>
 
 #if defined(ESP_PLATFORM)
@@ -289,12 +271,6 @@ public:
 
     const ZipEntry& entry = _entries[index];
 
-#if defined(ESP_PLATFORM)
-    // TEMP DIAGNOSTIC: heap state before extracting this entry.
-    printf("EpubDiag: extractEntry[%d] '%s' TOP heap=%s\n", index, entry.filename,
-           heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-#endif
-
     // Local header: 30 fixed bytes + variable filename + extra field. The
     // local header's own filename/extra lengths give the true data offset.
     uint8_t localHeader[30];
@@ -310,23 +286,16 @@ public:
     uint16_t localExtraLen = zipRead16(&localHeader[28]);
     uint32_t dataOffset = entry.localHeaderOffset + 30 + localFnLen + localExtraLen;
 
-    uint8_t* result = nullptr;
     if (entry.compressionMethod == ZIP_METHOD_STORED) {
-      result = _extractStored(dataOffset, entry.uncompressedSize, outSize);
+      return _extractStored(dataOffset, entry.uncompressedSize, outSize);
     } else if (entry.compressionMethod == ZIP_METHOD_DEFLATED) {
-      result = _extractDeflated(dataOffset, entry.compressedSize,
-                                entry.uncompressedSize, outSize);
+      return _extractDeflated(dataOffset, entry.compressedSize,
+                              entry.uncompressedSize, outSize);
     } else {
       MECK_EPUB_LOG("ZipReader: unsupported method %d for %s\n",
                     entry.compressionMethod, entry.filename);
       return nullptr;
     }
-#if defined(ESP_PLATFORM)
-    // TEMP DIAGNOSTIC: heap state after extracting this entry.
-    printf("EpubDiag: extractEntry[%d] '%s' BOTTOM heap=%s\n", index, entry.filename,
-           heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-#endif
-    return result;
   }
 
   uint8_t* extractByName(const char* filename, uint32_t* outSize) {
@@ -406,23 +375,12 @@ private:
       free(compBuf);
       return nullptr;
     }
-#if defined(ESP_PLATFORM)
-    printf("EpubDiag: comp=%p out=%p (compSize=%u uncompSize=%u)\n",
-           (void*)compBuf, (void*)outBuf, (unsigned)compSize, (unsigned)uncompSize);
-    printf("EpubDiag:   A after allocs: heap=%s\n",
-           heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-#endif
 
     if (!_readAt(dataOffset, compBuf, compSize)) {
       MECK_EPUB_LOG("ZipReader: failed to read compressed data\n");
       free(compBuf); free(outBuf);
       return nullptr;
     }
-
-#if defined(ESP_PLATFORM)
-    printf("EpubDiag:   B after _readAt: heap=%s\n",
-           heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-#endif
 
     // ZIP entries store raw DEFLATE (no zlib/gzip header). Decompress with
     // zlib in raw mode (negative windowBits). zlib owns its own state and
@@ -443,17 +401,7 @@ private:
     uint32_t outBytes = (uint32_t)strm.total_out;
     inflateEnd(&strm);
 
-#if defined(ESP_PLATFORM)
-    printf("EpubDiag:   C after inflate: heap=%s\n",
-           heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-#endif
-
     free(compBuf);
-
-#if defined(ESP_PLATFORM)
-    printf("EpubDiag:   D after frees: heap=%s\n",
-           heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-#endif
 
     if (zret != Z_STREAM_END) {
       MECK_EPUB_LOG("ZipReader: DEFLATE failed (zlib %d)\n", zret);

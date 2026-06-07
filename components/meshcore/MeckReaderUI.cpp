@@ -41,8 +41,6 @@ static inline int32_t meck_logical_h() { return lv_display_get_vertical_resoluti
 #include <stdio.h>
 #include <stdint.h>
 
-#include "esp_heap_caps.h"   /* TEMP DIAGNOSTIC: heap_caps_check_integrity_all */
-
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -400,12 +398,6 @@ static void on_file_row_clicked(lv_event_t* e) {
      * lives in a hidden .epub_cache subfolder, so it never shows in the
      * browser; the user only ever sees and taps the .epub itself. */
     if (is_epub_ext(to_lower_ext(name))) {
-        /* TEMP DIAGNOSTIC: is the PSRAM heap already corrupt before we touch
-         * the epub? If this first check fails, the damage is pre-existing and
-         * the epub feature is only the canary. true = print details on error. */
-        printf("EpubDiag: heap integrity BEFORE epub work: %s\n",
-               heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-
         char epub_path[PATH_MAX_LEN];
         snprintf(epub_path, sizeof(epub_path), "%s/%s", g_browser_path, name);
 
@@ -418,11 +410,7 @@ static void on_file_row_clicked(lv_event_t* e) {
              * before the blocking conversion, or it never gets drawn. */
             reader_show_converting(name);
             lv_refr_now(NULL);
-            bool conv_ok = EpubProcessor::processToText(epub_path, cache_path);
-            /* TEMP DIAGNOSTIC: did the conversion corrupt the heap? */
-            printf("EpubDiag: heap integrity AFTER convert: %s\n",
-                   heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
-            if (!conv_ok) {
+            if (!EpubProcessor::processToText(epub_path, cache_path)) {
                 meck_reader_ui_show_browser();
                 return;
             }
