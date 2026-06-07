@@ -63,6 +63,8 @@ extern "C" int meck_voice_send_get_status(void);
 #include "MeckEmojiPicker.h"
 #include "MeckEmoji.h"
 #include "t_display_p4_driver.h"
+#include "sdkconfig.h"
+#include "MeckCardKB.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -1828,6 +1830,68 @@ static const char *meck_kb_map_uc_qwertz_em[] = {
 
 // QWERTZ composer maps reuse meck_kb_ctrl_em (same cell shape as QWERTY).
 
+// ----------------------------------------------------------------------------
+// Cyrillic ЙЦУКЕН layout (kb_layout == 3). Standard Russian arrangement, which
+// Bulgarian users also commonly use. Cyrillic has more letters than Latin, so
+// the alpha rows are 12/12/12 cells and it needs its own ctrl_map. The control
+// keys stay Latin ("ABC"/"abc"/"1#") because lv_keyboard matches those exact
+// labels to switch case/number modes. The alpha-row "," is dropped (still on
+// the 1# map) to make room for ё.
+//
+// Note: Ukrainian (і ї є ґ) and Serbian (ђ ј љ њ ћ џ) use different letter sets
+// and would each need their own layout; this one is Russian/Bulgarian.
+// ----------------------------------------------------------------------------
+static const char *meck_kb_map_lc_cyr[] = {
+    "й","ц","у","к","е","н","г","ш","щ","з","х","ъ",                        "\n",
+    "ф","ы","в","а","п","р","о","л","д","ж","э",    LV_SYMBOL_BACKSPACE,    "\n",
+    "я","ч","с","м","и","т","ь","б","ю","ё",".",    LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "ABC", " ", "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+static const char *meck_kb_map_uc_cyr[] = {
+    "Й","Ц","У","К","Е","Н","Г","Ш","Щ","З","Х","Ъ",                        "\n",
+    "Ф","Ы","В","А","П","Р","О","Л","Д","Ж","Э",    LV_SYMBOL_BACKSPACE,    "\n",
+    "Я","Ч","С","М","И","Т","Ь","Б","Ю","Ё",".",    LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "abc", " ", "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+// Cyrillic widths: 12 letters/row at 7; backspace 14, '.' 5, enter 7. Row 4
+// matches QWERTY. Each row fills the keyboard width independently, so the
+// wider letter rows just render slightly narrower cells than the Latin layouts.
+static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_cyr[] = {
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(14),
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB_NR(7),
+    MKB(2), MKB_NR(3), MKB_NR(4), MKB(10), MKB_NR(3), MKB(2)
+};
+
+// Cyrillic composer maps: row 4 gains the emoji key (space shrinks), matching
+// the Latin _em variants. Rows 1-3 are unchanged from the base Cyrillic maps.
+static const char *meck_kb_map_lc_cyr_em[] = {
+    "й","ц","у","к","е","н","г","ш","щ","з","х","ъ",                        "\n",
+    "ф","ы","в","а","п","р","о","л","д","ж","э",    LV_SYMBOL_BACKSPACE,    "\n",
+    "я","ч","с","м","и","т","ь","б","ю","ё",".",    LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "ABC", " ", MECK_EMOJI_KEY, "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+static const char *meck_kb_map_uc_cyr_em[] = {
+    "Й","Ц","У","К","Е","Н","Г","Ш","Щ","З","Х","Ъ",                        "\n",
+    "Ф","Ы","В","А","П","Р","О","Л","Д","Ж","Э",    LV_SYMBOL_BACKSPACE,    "\n",
+    "Я","Ч","С","М","И","Т","Ь","Б","Ю","Ё",".",    LV_SYMBOL_NEW_LINE,     "\n",
+    LV_SYMBOL_LEFT, "-", "abc", " ", MECK_EMOJI_KEY, "1#", LV_SYMBOL_RIGHT,
+    ""
+};
+
+static const lv_buttonmatrix_ctrl_t meck_kb_ctrl_cyr_em[] = {
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7),
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB_NR(14),
+    MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(7), MKB(5), MKB_NR(7),
+    MKB(2), MKB_NR(3), MKB_NR(4), MKB(7), MKB_NR(3), MKB_NR(3), MKB(2)
+};
+
 static const char *meck_kb_map_special_em[] = {
     "1","2","3","4","5","6","7","8","9","0",            LV_SYMBOL_BACKSPACE,  "\n",
     "abc","@","#","$","%","&","*","(",")","\"",         LV_SYMBOL_NEW_LINE,   "\n",
@@ -2185,6 +2249,11 @@ static void meck_style_keyboard(lv_obj_t *kb) {
             map_uc = meck_kb_map_uc_qwertz;
             // ctrl stays as meck_kb_ctrl_lc — same shape as QWERTY.
             break;
+        case 3:  // Cyrillic ЙЦУКЕН
+            map_lc = meck_kb_map_lc_cyr;
+            map_uc = meck_kb_map_uc_cyr;
+            ctrl   = meck_kb_ctrl_cyr;
+            break;
         default: // 0 = QWERTY, also the fallback for any future value
             break;
     }
@@ -2204,6 +2273,10 @@ static void meck_style_keyboard(lv_obj_t *kb) {
             map_lc = meck_kb_map_lc_qwertz_em;
             map_uc = meck_kb_map_uc_qwertz_em;
             ctrl   = meck_kb_ctrl_em;
+        } else if (map_lc == meck_kb_map_lc_cyr) {
+            map_lc = meck_kb_map_lc_cyr_em;
+            map_uc = meck_kb_map_uc_cyr_em;
+            ctrl   = meck_kb_ctrl_cyr_em;
         } else {
             map_lc = meck_kb_map_lc_em;
             map_uc = meck_kb_map_uc_em;
@@ -2380,6 +2453,7 @@ static void settings_update_labels() {
             case 0:  name = "QWERTY"; break;
             case 1:  name = "AZERTY"; break;
             case 2:  name = "QWERTZ"; break;
+            case 3:  name = "ЙЦУКЕН"; break;
             default: name = "?";       break;
         }
         lv_label_set_text(lbl_set_kb_layout, name);
@@ -2471,7 +2545,13 @@ extern "C" void strip_unrenderable(const char *src, char *dst, size_t dst_sz) {
             // 2-byte UTF-8: codepoint U+0080..U+07FF
             if ((p[1] & 0xC0) != 0x80) { p++; continue; }  // malformed, skip
             uint32_t cp = ((b & 0x1F) << 6) | (p[1] & 0x3F);
-            if (cp <= 0x00FF && di + 2 < dst_sz) {
+            // Keep Latin-1 and the Cyrillic block the fonts cover (U+0400..
+            // U+045F plus Ґ/ґ at U+0490..U+0491). Other 2-byte codepoints
+            // have no glyph, so drop them to avoid tofu boxes.
+            bool keep = (cp <= 0x00FF) ||
+                        (cp >= 0x0400 && cp <= 0x045F) ||
+                        (cp == 0x0490 || cp == 0x0491);
+            if (keep && di + 2 < dst_sz) {
                 dst[di++] = (char)p[0];
                 dst[di++] = (char)p[1];
             }
@@ -6703,7 +6783,7 @@ static void on_settings_kb_layout_tap(lv_event_t *e) {
     P4NodePrefs* prefs = mesh->getNodePrefs();
     if (!prefs) return;
 
-    prefs->kb_layout = (uint8_t)((prefs->kb_layout + 1) % 3);
+    prefs->kb_layout = (uint8_t)((prefs->kb_layout + 1) % 4);
     mesh->getDataStore()->savePrefs(*prefs);
 
     const char* name = "?";
@@ -6711,6 +6791,7 @@ static void on_settings_kb_layout_tap(lv_event_t *e) {
         case 0: name = "QWERTY"; break;
         case 1: name = "AZERTY"; break;
         case 2: name = "QWERTZ"; break;
+        case 3: name = "ЙЦУКЕН"; break;
     }
     if (lbl_set_kb_layout) lv_label_set_text(lbl_set_kb_layout, name);
     meck_kb_restyle_all();
@@ -9961,20 +10042,32 @@ static void refresh_contacts_list() {
         lv_obj_set_style_border_color(row,
             (ci.flags & 0x01) ? lv_palette_main(LV_PALETTE_YELLOW)
                               : lv_color_make(50, 50, 60), 0);
-        // Tap → detail screen, long-press → toggle favourite in place.
+        // Tap row → detail screen. Favouriting moved to the star button
+        // below (a tap, not a long-press) so it can't collide with list
+        // scrolling: LVGL suppresses CLICKED once a press becomes a scroll,
+        // whereas LONG_PRESSED could fire mid-swipe and favourite by accident.
         lv_obj_add_event_cb(row, on_contact_tap,
                             LV_EVENT_CLICKED,    (void*)(intptr_t)i);
-        lv_obj_add_event_cb(row, on_contact_long_press,
-                            LV_EVENT_LONG_PRESSED, (void*)(intptr_t)i);
 
-        // Star icon (yellow if favourited, dim grey otherwise).
-        lv_obj_t *star = lv_label_create(row);
-        lv_label_set_text(star, (ci.flags & 0x01) ? "*" : " ");
-        lv_obj_set_style_text_color(star,
+        // Star button (yellow if favourited, dim grey otherwise). Transparent
+        // hit area around the glyph; CLICKED toggles favourite for this row.
+        // Kept narrow (ends ~x=28) so it clears the name label at +28.
+        lv_obj_t *star = lv_button_create(row);
+        lv_obj_set_size(star, 26, 48);
+        lv_obj_align(star, LV_ALIGN_LEFT_MID, 2, 0);
+        lv_obj_set_style_bg_opa(star, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(star, 0, 0);
+        lv_obj_set_style_shadow_width(star, 0, 0);
+        lv_obj_set_style_pad_all(star, 0, 0);
+        lv_obj_add_event_cb(star, on_contact_long_press,
+                            LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        lv_obj_t *star_lbl = lv_label_create(star);
+        lv_label_set_text(star_lbl, (ci.flags & 0x01) ? "*" : " ");
+        lv_obj_set_style_text_color(star_lbl,
             (ci.flags & 0x01) ? lv_palette_main(LV_PALETTE_YELLOW)
                               : lv_color_make(70, 70, 80), 0);
-        meck_set_font(star, &meck_montserrat_22, 0);
-        lv_obj_align(star, LV_ALIGN_LEFT_MID, 8, 0);
+        meck_set_font(star_lbl, &meck_montserrat_22, 0);
+        lv_obj_center(star_lbl);
 
         // Name. Strip emoji / higher-plane Unicode so they don't render
         // as tofu boxes (Montserrat covers Latin-1 only).
@@ -15574,6 +15667,86 @@ static void create_room_messages_screen() {
                         LV_EVENT_PRESSED, NULL);
 }
 
+// ============================================================================
+// CardKB (M5Stack I2C keyboard) input — direct-write into the active composer
+//
+// 4B integration: when a message composer is open, CardKB keystrokes are written
+// straight into its textarea, and Enter/Esc are replayed as the same
+// LV_EVENT_READY / LV_EVENT_CANCEL the on-screen keyboard's OK/close buttons
+// emit, so the existing send/cancel logic in on_kb_event / on_room_kb_event runs
+// unchanged. Whole-device navigation (arrow keys moving focus across the UI) is
+// deferred to 4A and needs an lv_group; here the arrows only move the textarea
+// cursor and non-composer keys are ignored.
+//
+// Runs as an lv_timer, i.e. in the LVGL task context (LVGL is not thread-safe,
+// so this must not be polled from a separate task). The I2C read is one
+// throttled byte per tick.
+// ============================================================================
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4) && defined(MECK_CARDKB)
+
+static MeckCardKB   g_cardkb;
+static lv_timer_t  *g_cardkb_timer = NULL;
+
+// The textarea the user is currently typing into belongs to whichever composer
+// keyboard is visible. Returns that keyboard, or NULL if no composer is open.
+static lv_obj_t *meck_cardkb_active_kb(void) {
+    if (kb_compose && !lv_obj_has_flag(kb_compose, LV_OBJ_FLAG_HIDDEN))
+        return kb_compose;
+    if (kb_room_compose && !lv_obj_has_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN))
+        return kb_room_compose;
+    return NULL;
+}
+
+static void meck_cardkb_poll(lv_timer_t *t) {
+    (void)t;
+    uint32_t key = g_cardkb.read_key();
+    if (key == 0) return;
+
+    lv_obj_t *kb = meck_cardkb_active_kb();
+    if (!kb) return;                                // no composer open (nav is 4A)
+    lv_obj_t *ta = lv_keyboard_get_textarea(kb);
+    if (!ta) return;
+
+    switch (key) {
+        case LV_KEY_ENTER:                          // replay the keyboard OK button
+            lv_obj_send_event(kb, LV_EVENT_READY, NULL);
+            break;
+        case LV_KEY_ESC:                            // replay the keyboard close button
+            lv_obj_send_event(kb, LV_EVENT_CANCEL, NULL);
+            break;
+        case LV_KEY_BACKSPACE:
+            lv_textarea_delete_char(ta);
+            break;
+        case LV_KEY_LEFT:
+            lv_textarea_cursor_left(ta);
+            break;
+        case LV_KEY_RIGHT:
+            lv_textarea_cursor_right(ta);
+            break;
+        // LV_KEY_NEXT / LV_KEY_PREV (Tab and up/down) are deliberately ignored
+        // here; whole-UI focus movement comes in 4A.
+        default:
+            if (key >= 0x20 && key <= 0x7E) {
+                char s[2] = { (char)key, 0 };
+                lv_textarea_add_text(ta, s);
+            }
+            break;
+    }
+}
+
+// Probe for a CardKB and, if present, start the poll timer. Called from the end
+// of meck_ui_init() while the LVGL lock is held.
+static void meck_cardkb_init(void) {
+    if (g_cardkb.begin()) {
+        g_cardkb_timer = lv_timer_create(meck_cardkb_poll, 30, NULL);
+        printf("MeckUI: CardKB poll timer started\n");
+    } else {
+        printf("MeckUI: no CardKB found at 0x%02X\n", CARDKB_IIC_ADDRESS);
+    }
+}
+
+#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4 && MECK_CARDKB
+
 extern "C" void meck_ui_init() {
     printf("MeckUI: building home screen\n");
 
@@ -15704,6 +15877,10 @@ extern "C" void meck_ui_init() {
     // /sdcard/meshcore/posts.bin before any LVGL events can reach
     // room_messages_screen_enter.
     load_persisted_posts_into_rings();
+
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4) && defined(MECK_CARDKB)
+    meck_cardkb_init();
+#endif
 
     _lock_release(&lvgl_api_lock);
 

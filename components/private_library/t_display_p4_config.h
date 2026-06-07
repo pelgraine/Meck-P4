@@ -152,12 +152,20 @@
 #define EXT_1X4P_2_IO_45 45
 #define EXT_1X4P_2_IO_46 46
 
+// CardKB (optional M5Stack I2C keyboard). Confirmed by I2C bus scan to sit on
+// the P1 connector (EXT_1X4P_1) with SDA=48, SCL=47, answering at 0x5F.
+#define CARDKB_SDA EXT_1X4P_1_IO_48
+#define CARDKB_SCL EXT_1X4P_1_IO_47
+
 ////////////////////////////////////////////////// gpio config //////////////////////////////////////////////////
 
 ////////////////////////////////////////////////// other define config //////////////////////////////////////////////////
 
 // XL9535
 #define XL9535_IIC_ADDRESS 0x20
+
+// CardKB (optional M5Stack I2C keyboard)
+#define CARDKB_IIC_ADDRESS 0x5F
 
 // ES8311
 #define ES8311_IIC_ADDRESS 0x18
