@@ -180,6 +180,11 @@ struct P4NodePrefs {
     // meck_ui_init; the Settings toggle saves this and reboots to apply.
     uint8_t orientation;             // 0=portrait (default), 1=landscape
 
+    // External BLE keyboard (HID-over-GATT via the C6). Address of the last
+    // paired keyboard, lowercase "aa:bb:cc:dd:ee:ff", or "" if none. Appended
+    // at the end for NVS compatibility (short reads tolerated by loadPrefs).
+    char kbd_addr[18];
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -218,6 +223,7 @@ struct P4NodePrefs {
         memset(wifi_password, 0, sizeof(wifi_password));
         save_drafts = 0;        // off by default
         orientation = 0;        // portrait by default
+        memset(kbd_addr, 0, sizeof(kbd_addr));   // no keyboard paired yet
     }
 };
 

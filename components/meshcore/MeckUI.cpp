@@ -501,6 +501,14 @@ static lv_obj_t *lbl_set_orientation = NULL;
 
 // WiFi settings sub-screen (Settings > WiFi Companion)
 static lv_obj_t *scr_settings_wifi        = NULL;
+// BLE keyboard pairing sub-screen (Settings > BLE Keyboard)
+#if MECK_BLE_KEYBOARD_ENABLED
+static lv_obj_t   *scr_settings_keyboard  = NULL;
+static lv_obj_t   *lbl_set_kbd_toggle     = NULL;
+static lv_obj_t   *lbl_set_kbd_status     = NULL;
+static lv_obj_t   *obj_kbd_scan_scroll    = NULL;
+static lv_timer_t *g_kbd_scan_timer       = NULL;
+#endif
 static lv_obj_t *lbl_set_wifi_toggle      = NULL;
 static lv_obj_t *lbl_set_wifi_ssid        = NULL;
 static lv_obj_t *lbl_set_wifi_pass        = NULL;
@@ -1400,6 +1408,11 @@ static void meck_ui_teardown_screens();
 static void meck_ui_apply_orientation_rebuild(void *unused);
 static void goto_settings_wifi(lv_event_t *e);
 static void create_settings_wifi_screen();
+#if MECK_BLE_KEYBOARD_ENABLED
+static void goto_settings_keyboard(lv_event_t *e);
+static void goto_settings_from_keyboard(lv_event_t *e);
+static void create_settings_keyboard_screen();
+#endif
 static void on_gps_tile_long_press(lv_event_t *e);
 
 static void on_ch_delete(lv_event_t *e);
@@ -7053,6 +7066,208 @@ static void on_settings_wifi_pass_tap(lv_event_t *e) {
     }
 }
 
+#if MECK_BLE_KEYBOARD_ENABLED
+// ============================================================================
+// BLE keyboard pairing sub-screen (Settings > BLE Keyboard)
+// ============================================================================
+
+static const char* kbd_state_text() {
+    if (meck_kbd_is_connected()) return "Connected";
+    switch (meck_kbd_state()) {
+        case 0:  return "Off";
+        case 1:  return "Idle";
+        case 2:  return "Searching...";
+        case 3:  return "Reconnecting...";
+        case 4:  return "Connecting...";
+        case 5:  return "Pairing...";
+        case 6:
+        case 7:  return "Setting up...";
+        case 8:  return "Connected";
+        default: return "...";
+    }
+}
+
+static void settings_kbd_update_labels() {
+    if (lbl_set_kbd_toggle)
+        lv_label_set_text(lbl_set_kbd_toggle, meck_kbd_is_enabled() ? "On" : "Off");
+    if (lbl_set_kbd_status)
+        lv_label_set_text(lbl_set_kbd_status, kbd_state_text());
+}
+
+// Tap a discovered keyboard -> persist its address and connect.
+static void on_kbd_scan_pick(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    char addr[18] = {0}, name[24] = {0}; int8_t rssi = 0;
+    if (!meck_kbd_get_scan(idx, addr, name, &rssi)) return;
+
+    Meck* mesh = meck_get_instance();
+    if (mesh) {
+        P4NodePrefs* prefs = mesh->getNodePrefs();
+        if (prefs) {
+            strncpy(prefs->kbd_addr, addr, sizeof(prefs->kbd_addr) - 1);
+            prefs->kbd_addr[sizeof(prefs->kbd_addr) - 1] = '\0';
+            mesh->getDataStore()->savePrefs(*prefs);
+        }
+    }
+    meck_kbd_stop_browse();
+    meck_kbd_connect(addr);
+    settings_kbd_update_labels();
+}
+
+static void refresh_kbd_scan_list() {
+    if (!obj_kbd_scan_scroll) return;
+    lv_obj_clean(obj_kbd_scan_scroll);
+
+    int n = meck_kbd_scan_count();
+    int y = 5;
+    if (n == 0) {
+        lv_obj_t *empty = lv_label_create(obj_kbd_scan_scroll);
+        lv_label_set_text(empty, meck_kbd_state() == 2 ? "Searching..."
+                                                       : "Tap Scan to search");
+        lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(empty, &meck_montserrat_16, 0);
+        lv_obj_set_pos(empty, 10, y);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        char addr[18] = {0}, name[24] = {0}; int8_t rssi = 0;
+        if (!meck_kbd_get_scan(i, addr, name, &rssi)) continue;
+
+        lv_obj_t *btn = lv_button_create(obj_kbd_scan_scroll);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 60, 60);
+        lv_obj_set_pos(btn, 0, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_palette_main(LV_PALETTE_CYAN), 0);
+        lv_obj_add_event_cb(btn, on_kbd_scan_pick, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, name[0] ? name : addr);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_18, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 8, -10);
+
+        lv_obj_t *sub = lv_label_create(btn);
+        lv_label_set_text_fmt(sub, "%s  (%d dBm)", addr, (int)rssi);
+        lv_obj_set_style_text_color(sub, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(sub, &meck_montserrat_14, 0);
+        lv_obj_align(sub, LV_ALIGN_LEFT_MID, 8, 12);
+
+        y += 70;
+    }
+}
+
+static void kbd_scan_timer_cb(lv_timer_t *t) {
+    (void)t;
+    refresh_kbd_scan_list();
+    settings_kbd_update_labels();
+}
+
+static void on_settings_kbd_toggle_tap(lv_event_t *e) {
+    (void)e;
+    bool now = !meck_kbd_is_enabled();
+    if (now) {
+        // Mutual exclusivity: drop the WiFi companion (pref + runtime).
+        Meck* mesh = meck_get_instance();
+        if (mesh) {
+            P4NodePrefs* prefs = mesh->getNodePrefs();
+            if (prefs && prefs->wifi_enabled) {
+                prefs->wifi_enabled = 0;
+                mesh->getDataStore()->savePrefs(*prefs);
+            }
+        }
+        meck_wifi_set_enabled(false);
+    }
+    meck_kbd_set_enabled(now);
+    settings_kbd_update_labels();
+    printf("Settings: BLE keyboard = %s\n", now ? "On" : "Off");
+}
+
+static void on_settings_kbd_scan_tap(lv_event_t *e) {
+    if (!meck_kbd_is_enabled()) on_settings_kbd_toggle_tap(NULL);  // turn on first
+    meck_kbd_start_browse();
+    settings_kbd_update_labels();
+}
+
+static void goto_settings_from_keyboard(lv_event_t *e) {
+    (void)e;
+    meck_kbd_stop_browse();
+    if (g_kbd_scan_timer) { lv_timer_del(g_kbd_scan_timer); g_kbd_scan_timer = NULL; }
+    if (scr_settings) lv_screen_load(scr_settings);
+}
+
+static void goto_settings_keyboard(lv_event_t *e) {
+    (void)e;
+    settings_kbd_update_labels();
+    refresh_kbd_scan_list();
+    if (!g_kbd_scan_timer)
+        g_kbd_scan_timer = lv_timer_create(kbd_scan_timer_cb, 500, NULL);
+    if (scr_settings_keyboard) lv_screen_load(scr_settings_keyboard);
+}
+
+static void create_settings_keyboard_screen() {
+    scr_settings_keyboard = lv_obj_create(NULL);
+    lock_screen_scroll(scr_settings_keyboard);
+    lv_obj_set_style_bg_color(scr_settings_keyboard, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr_settings_keyboard, LV_OPA_COVER, 0);
+    screen_attach_clock_battery(scr_settings_keyboard, 1, &meck_montserrat_24, 30);
+    if (lbl_screen_clock[1]) {
+        lv_obj_set_style_text_align(lbl_screen_clock[1], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(lbl_screen_clock[1], LV_ALIGN_TOP_RIGHT, -15, 55);
+    }
+
+    lv_obj_t *btn_back = lv_button_create(scr_settings_keyboard);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, goto_settings_from_keyboard, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_settings_keyboard);
+    lv_label_set_text(title, "BLE Keyboard");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_CYAN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Toggle + status rows sit above the (scrollable) results list. Absolute Y
+    // below the 90px header, matching the WiFi screen's header offset.
+    create_settings_row(scr_settings_keyboard, "Keyboard (tap to toggle)",
+        &lbl_set_kbd_toggle, on_settings_kbd_toggle_tap, 95);
+    create_settings_row(scr_settings_keyboard, "Status",
+        &lbl_set_kbd_status, NULL, 160);
+
+    lv_obj_t *btn_scan = lv_button_create(scr_settings_keyboard);
+    lv_obj_set_size(btn_scan, SCREEN_WIDTH - 40, 55);
+    lv_obj_set_pos(btn_scan, 20, 225);
+    lv_obj_set_style_bg_color(btn_scan, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_scan, 10, 0);
+    lv_obj_t *scan_lbl = lv_label_create(btn_scan);
+    lv_label_set_text(scan_lbl, "Scan for keyboards");
+    lv_obj_set_style_text_color(scan_lbl, lv_color_black(), 0);
+    meck_set_font(scan_lbl, &meck_montserrat_18, 0);
+    lv_obj_center(scan_lbl);
+    lv_obj_add_event_cb(btn_scan, on_settings_kbd_scan_tap, LV_EVENT_CLICKED, NULL);
+
+    // Results list (scrollable).
+    obj_kbd_scan_scroll = lv_obj_create(scr_settings_keyboard);
+    lv_obj_set_size(obj_kbd_scan_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 295);
+    lv_obj_set_pos(obj_kbd_scan_scroll, 0, 290);
+    lv_obj_set_style_bg_color(obj_kbd_scan_scroll, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(obj_kbd_scan_scroll, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(obj_kbd_scan_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_kbd_scan_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_kbd_scan_scroll, LV_DIR_VER);
+
+    settings_kbd_update_labels();
+}
+#endif // MECK_BLE_KEYBOARD_ENABLED
+
 static void goto_settings_from_wifi(lv_event_t *e) {
     // Update main settings labels (BLE may have changed via mutual exclusivity)
     settings_update_labels();
@@ -7457,6 +7672,28 @@ static void create_settings_screen() {
             lv_palette_main(LV_PALETTE_GREY), 0);
     }
     y += 65;
+
+    // BLE Keyboard navigation row → opens the pairing sub-screen.
+    // Hidden from users: the row is skipped at RUNTIME, not compiled out. The
+    // keyboard code stays compiled in (MECK_BLE_KEYBOARD_ENABLED=1) so the
+    // binary layout matches the build that boots — compiling it out shifts
+    // memory and trips an early-boot watchdog loop. show_ble_kbd_row is
+    // volatile so the compiler/linker can't dead-strip the row code (and the
+    // functions it references), which would shift the layout the same way.
+#if MECK_BLE_KEYBOARD_ENABLED
+    volatile bool show_ble_kbd_row = false;
+    if (show_ble_kbd_row) {
+        lv_obj_t *kbd_value_lbl = NULL;
+        create_settings_row(scroll, "BLE Keyboard",
+            &kbd_value_lbl, goto_settings_keyboard, y);
+        if (kbd_value_lbl) {
+            lv_label_set_text(kbd_value_lbl, LV_SYMBOL_RIGHT);
+            lv_obj_set_style_text_color(kbd_value_lbl,
+                lv_palette_main(LV_PALETTE_GREY), 0);
+        }
+        y += 65;
+    }
+#endif
 
     create_settings_row(scroll, "Node Name",                 &lbl_set_name,    on_settings_name_tap,    y);
     y += 65;
@@ -15872,6 +16109,41 @@ static void meck_cardkb_poll(lv_timer_t *t) {
     }
 }
 
+// External BLE keyboard -> active composer. Same routing as meck_cardkb_poll;
+// reads keys from the C6 BLE central via meck_kbd_read_key() and reuses the
+// existing meck_cardkb_active_kb() composer lookup.
+#if MECK_BLE_KEYBOARD_ENABLED
+static void meck_blekbd_poll(lv_timer_t *t) {
+    (void)t;
+    uint32_t key = meck_kbd_read_key();
+    if (key == 0) return;
+
+    lv_obj_t *kb = meck_cardkb_active_kb();
+    if (!kb) return;
+    lv_obj_t *ta = lv_keyboard_get_textarea(kb);
+    if (!ta) return;
+
+    if (!lv_obj_has_flag(kb, LV_OBJ_FLAG_HIDDEN)) {
+        if (kb == kb_compose)           on_compose_defocused(NULL);
+        else if (kb == kb_room_compose) on_room_compose_defocused(NULL);
+    }
+
+    switch (key) {
+        case LV_KEY_ENTER:     lv_obj_send_event(kb, LV_EVENT_READY,  NULL); break;
+        case LV_KEY_ESC:       lv_obj_send_event(kb, LV_EVENT_CANCEL, NULL); break;
+        case LV_KEY_BACKSPACE: lv_textarea_delete_char(ta);                 break;
+        case LV_KEY_LEFT:      lv_textarea_cursor_left(ta);                 break;
+        case LV_KEY_RIGHT:     lv_textarea_cursor_right(ta);                break;
+        default:
+            if (key >= 0x20 && key <= 0x7E) {
+                char s[2] = { (char)key, 0 };
+                lv_textarea_add_text(ta, s);
+            }
+            break;
+    }
+}
+#endif // MECK_BLE_KEYBOARD_ENABLED
+
 // Probe for a CardKB and, if present, start the poll timer. Called from the end
 // of meck_ui_init() while the LVGL lock is held.
 static void meck_cardkb_init(void) {
@@ -15918,6 +16190,9 @@ static void meck_ui_build_screens() {
     create_debug_logs_screen();
     create_settings_contacts_screen();
     create_settings_wifi_screen();
+#if MECK_BLE_KEYBOARD_ENABLED
+    create_settings_keyboard_screen();
+#endif
     create_settings_channels_screen();
     create_channel_detail_screen();
     create_settings_position_screen();
@@ -16109,6 +16384,12 @@ extern "C" void meck_ui_init() {
 
 #if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4) && defined(MECK_CARDKB)
     meck_cardkb_init();
+#endif
+
+    // External BLE keyboard: route decoded keys into the active composer. Cheap
+    // (just drains the C6 keyboard's key ring); always running.
+#if MECK_BLE_KEYBOARD_ENABLED
+    lv_timer_create(meck_blekbd_poll, 30, NULL);
 #endif
 
     _lock_release(&lvgl_api_lock);

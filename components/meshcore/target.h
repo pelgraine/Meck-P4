@@ -391,3 +391,34 @@ extern "C" {
     };
     void meck_gps_get_snapshot(MeckGpsSnapshot *out);
 }
+
+// ---- External BLE keyboard (C6 BLE central, HID-over-GATT) ----
+// The transport (SerialC6BLEInterface) reaches pairing, GATT discovery and
+// decoded keystrokes, but the link is unreliable over the C6's ESP-AT firmware,
+// so the feature is hidden from users. It is hidden at RUNTIME (the settings
+// row is skipped — see show_ble_kbd_row in MeckUI.cpp), NOT compiled out.
+//
+// IMPORTANT: keep this at 1. Setting it to 0 compiles the BLE-keyboard blocks
+// out, which shifts the binary's memory layout and tripped a deterministic
+// early-boot watchdog reboot (HP_SYS_HP_WDT_RESET in cross-core IPC, before
+// app_main). The code stays compiled in; only the UI entry point is gated off.
+#ifndef MECK_BLE_KEYBOARD_ENABLED
+#define MECK_BLE_KEYBOARD_ENABLED 1
+#endif
+
+// Defined in meck_app.cpp. SDIO-touching ops (set_enabled / browse / connect)
+// are deferred to meck_task; the read-only accessors are safe from the UI task.
+// meck_kbd_state() returns C6BleKeyboard::State as an int:
+//   0 OFF, 1 IDLE, 2 BROWSING, 3 SCANNING, 4 CONNECTING, 5 SECURING,
+//   6 DISCOVERING, 7 SUBSCRIBING, 8 READY.
+extern "C" void        meck_kbd_set_enabled(bool en);
+extern "C" bool        meck_kbd_is_enabled();
+extern "C" bool        meck_kbd_is_connected();
+extern "C" int         meck_kbd_state();
+extern "C" const char* meck_kbd_paired_addr();
+extern "C" void        meck_kbd_start_browse();
+extern "C" void        meck_kbd_stop_browse();
+extern "C" int         meck_kbd_scan_count();
+extern "C" bool        meck_kbd_get_scan(int i, char* addr, char* name, int8_t* rssi);
+extern "C" void        meck_kbd_connect(const char* addr);
+extern "C" uint32_t    meck_kbd_read_key();

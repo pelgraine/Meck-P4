@@ -67,6 +67,17 @@ static MeckCompanion g_companion;
 static SerialC6WiFiInterface g_wifi_interface;
 static MeckCompanion g_wifi_companion;
 
+// ---- External BLE keyboard host via ESP32-C6 BLE central ----
+// Repurposed SerialC6BLEInterface.h now declares C6BleKeyboard. Wired in
+// unconditionally (independent of the compiled-out MECK_BLE_ENABLED companion).
+static C6BleKeyboard g_blekbd;
+
+// Deferred control (UI task -> meck_task; all C6/SDIO ops run on meck_task).
+static volatile int  g_kbd_pending_action  = 0;   // +1 enable, -1 disable
+static volatile int  g_kbd_pending_browse  = 0;   // +1 start, -1 stop
+static volatile bool g_kbd_pending_connect = false;
+static char          g_kbd_pending_addr[18] = {0};
+
 #if MECK_BLE_ENABLED
 // Deferred BLE enable/disable
 static volatile int g_ble_pending_action = 0;
@@ -285,6 +296,66 @@ static void meck_apply_pending_wifi() {
     }
 }
 
+// ---- External BLE keyboard host (declared in target.h) ----
+// UI-task entry points queue work; the SDIO-touching ops run on meck_task via
+// meck_apply_pending_kbd(). read_key / scan accessors / state are read-only and
+// safe to call from the UI task directly.
+extern "C" void meck_kbd_set_enabled(bool en) { g_kbd_pending_action = en ? 1 : -1; }
+extern "C" bool meck_kbd_is_enabled()   { return g_blekbd.isEnabled(); }
+extern "C" bool meck_kbd_is_connected() { return g_blekbd.isConnected(); }
+extern "C" int  meck_kbd_state()        { return (int)g_blekbd.state(); }
+extern "C" const char* meck_kbd_paired_addr() { return g_blekbd.pairedAddr(); }
+extern "C" void meck_kbd_start_browse() { g_kbd_pending_browse = 1; }
+extern "C" void meck_kbd_stop_browse()  { g_kbd_pending_browse = -1; }
+extern "C" int  meck_kbd_scan_count()   { return g_blekbd.scanCount(); }
+
+extern "C" bool meck_kbd_get_scan(int i, char* addr, char* name, int8_t* rssi) {
+    C6BleKeyboard::ScanDev d;
+    if (!g_blekbd.getScan(i, &d)) return false;
+    if (addr) strcpy(addr, d.addr);
+    if (name) strcpy(name, d.name);
+    if (rssi) *rssi = d.rssi;
+    return true;
+}
+
+extern "C" void meck_kbd_connect(const char* addr) {
+    if (!addr) return;
+    strncpy(g_kbd_pending_addr, addr, sizeof(g_kbd_pending_addr) - 1);
+    g_kbd_pending_addr[sizeof(g_kbd_pending_addr) - 1] = '\0';
+    g_kbd_pending_connect = true;
+}
+
+extern "C" uint32_t meck_kbd_read_key() { return g_blekbd.read_key(); }
+
+#if MECK_BLE_KEYBOARD_ENABLED
+static void meck_apply_pending_kbd() {
+    if (!g_c6_at) return;
+
+    if (g_kbd_pending_action > 0 && !g_blekbd.isEnabled()) {
+        g_kbd_pending_action = 0;
+        if (g_wifi_interface.isEnabled()) {            // mutual exclusivity
+            g_wifi_interface.disable();
+            printf("meck_apply_pending_kbd: disabled WiFi (mutual excl)\n");
+        }
+        g_blekbd.setTargetAddr(g_node_prefs.kbd_addr); // reconnect saved keyboard
+        g_blekbd.enable();
+    } else if (g_kbd_pending_action < 0 && g_blekbd.isEnabled()) {
+        g_kbd_pending_action = 0;
+        g_blekbd.disable();
+    } else {
+        g_kbd_pending_action = 0;
+    }
+
+    if (g_kbd_pending_browse > 0)      { g_kbd_pending_browse = 0; g_blekbd.startBrowse(); }
+    else if (g_kbd_pending_browse < 0) { g_kbd_pending_browse = 0; g_blekbd.stopBrowse(); }
+
+    if (g_kbd_pending_connect) {
+        g_kbd_pending_connect = false;
+        g_blekbd.connectTo(g_kbd_pending_addr);
+    }
+}
+#endif // MECK_BLE_KEYBOARD_ENABLED
+
 // ---- Internal accessor (declared in target.h) ----
 Meck* meck_get_instance() { return g_the_mesh; }
 
@@ -411,6 +482,12 @@ extern "C" bool meck_app_init() {
         } else {
             printf("meck_app_init: WiFi companion OFF (pref)\n");
         }
+
+        // 9. Bind the external BLE keyboard host to the C6. Left OFF at boot;
+        //    the user turns it on in Settings > BLE Keyboard.
+#if MECK_BLE_KEYBOARD_ENABLED
+        g_blekbd.begin(g_c6_at);
+#endif
     } else {
         printf("meck_app_init: WARNING — meck_ble_bind not called, BLE disabled\n");
     }
@@ -449,6 +526,14 @@ static void meck_task(void* arg) {
 #endif
         // WiFi companion protocol: same, via TCP
         g_wifi_companion.check();
+
+        // External BLE keyboard host: apply queued UI requests, then drive the
+        // C6 (SDIO poll + connect/discover state machine + report decode).
+#if MECK_BLE_KEYBOARD_ENABLED
+        meck_apply_pending_kbd();
+        g_blekbd.poll();
+#endif
+
         if (g_the_mesh) {
             g_the_mesh->loop();
         }
