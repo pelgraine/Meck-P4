@@ -405,6 +405,17 @@ static int       tile_button_count = 0;
 static lv_obj_t *scr_home          = NULL;
 static lv_obj_t *g_tileview        = NULL;
 
+// Web reader browser screen (Stage 3)
+static lv_obj_t   *scr_web          = NULL;
+static lv_obj_t   *lbl_web_content  = NULL;
+static lv_obj_t   *lbl_web_status   = NULL;
+static lv_timer_t *g_web_poll_timer = NULL;
+static char        g_web_current_url[256] = {0};
+static lv_obj_t   *btn_web_links       = NULL;
+static lv_obj_t   *lbl_web_links       = NULL;
+static lv_obj_t   *obj_web_link_panel  = NULL;
+static lv_obj_t   *obj_web_link_scroll = NULL;
+
 // Home tile header labels
 static lv_obj_t *lbl_home_title    = NULL;
 // Clock + battery labels are mirrored on every tileview page (7 pages in the
@@ -1408,6 +1419,8 @@ static void meck_ui_teardown_screens();
 static void meck_ui_apply_orientation_rebuild(void *unused);
 static void goto_settings_wifi(lv_event_t *e);
 static void create_settings_wifi_screen();
+static void create_web_screen();
+static void cb_open_web(lv_event_t *e);
 #if MECK_BLE_KEYBOARD_ENABLED
 static void goto_settings_keyboard(lv_event_t *e);
 static void goto_settings_from_keyboard(lv_event_t *e);
@@ -5574,7 +5587,7 @@ static void create_page_home(lv_obj_t *page) {
     create_tile_button(page, LV_SYMBOL_IMAGE    "\nMaps",     cb_todo_maps,        1, 3);
     create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
     create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    goto_audio_browser,  0, 4);
-    create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_todo_web,         1, 4);
+    create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_open_web,         1, 4);
     // Voice and Camera tiles hidden until implementation is ready
     // create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    cb_todo_voice,       0, 5);
     // lv_obj_t *cam_btn = create_tile_button(page, LV_SYMBOL_IMAGE "\nCamera", cb_todo_camera, 1, 5);
@@ -7001,6 +7014,14 @@ static void on_settings_wifi_toggle_tap(lv_event_t *e) {
            prefs->wifi_enabled != 0 ? "On" : "Off");
 }
 
+// Stage 1 web reader plumbing test. Queues a one-shot fetch of a hardcoded
+// plain-http page; the fetch runs on meck_task (see meck_web_fetch_test).
+// Watch the debug log for the "WebFetch:" lines and the raw response.
+static void on_settings_wifi_fetchtest_tap(lv_event_t *e) {
+    meck_web_fetch_test();
+    printf("Settings: web fetch test queued\n");
+}
+
 static void on_wifi_edit_save(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!mesh) return;
@@ -7279,6 +7300,246 @@ static void goto_settings_wifi(lv_event_t *e) {
     if (scr_settings_wifi) lv_screen_load(scr_settings_wifi);
 }
 
+// ---- Web reader browser screen (Stage 3) -----------------------------------
+// The fetch runs on meck_task; this screen posts a request via
+// meck_web_request() and polls meck_web_result_ready() on an LVGL timer,
+// rendering the reader-mode text once it arrives. Links are listed in an
+// overlay (the [n] markers in the text correspond to the numbered rows);
+// tapping one navigates to it. Back walks a URL history stack, exiting to the
+// home screen when the stack is empty.
+
+#define WEB_HISTORY_MAX 16
+static char g_web_history[WEB_HISTORY_MAX][256];
+static int  g_web_history_depth = 0;
+
+// Kick off a fetch of url and show the "Loading" state. Does not touch
+// history; callers decide whether to push the current page first.
+static void web_load_url(const char *url) {
+    strncpy(g_web_current_url, url, sizeof(g_web_current_url) - 1);
+    g_web_current_url[sizeof(g_web_current_url) - 1] = '\0';
+    if (lbl_web_content) lv_label_set_text(lbl_web_content, "Loading...");
+    if (lbl_web_status)  lv_label_set_text(lbl_web_status, g_web_current_url);
+    if (btn_web_links)   lv_obj_add_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
+    meck_web_request(g_web_current_url);
+}
+
+static void web_poll_cb(lv_timer_t *t) {
+    (void)t;
+    if (!meck_web_result_ready()) return;
+    if (meck_web_ok()) {
+        if (lbl_web_content) lv_label_set_text(lbl_web_content, meck_web_text());
+        int n = meck_web_link_count();
+        if (lbl_web_status) {
+            char st[80];
+            snprintf(st, sizeof(st), "%s   (%d links)", g_web_current_url, n);
+            lv_label_set_text(lbl_web_status, st);
+        }
+        if (btn_web_links) {
+            if (lbl_web_links) {
+                char lt[24];
+                snprintf(lt, sizeof(lt), "Links (%d)", n);
+                lv_label_set_text(lbl_web_links, lt);
+            }
+            if (n > 0) lv_obj_remove_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
+            else       lv_obj_add_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        if (lbl_web_content)
+            lv_label_set_text(lbl_web_content, "Fetch failed (see debug log).");
+        if (lbl_web_status) lv_label_set_text(lbl_web_status, g_web_current_url);
+        if (btn_web_links)  lv_obj_add_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
+    }
+    meck_web_ack_result();
+}
+
+static void web_navigate_back(lv_event_t *e) {
+    (void)e;
+    if (g_web_history_depth > 0) {
+        g_web_history_depth--;
+        web_load_url(g_web_history[g_web_history_depth]);
+        return;
+    }
+    // History empty: leave the browser. Drop the poll timer on the way out.
+    if (g_web_poll_timer) { lv_timer_delete(g_web_poll_timer); g_web_poll_timer = NULL; }
+    if (scr_home) lv_screen_load(scr_home);
+}
+
+static void on_web_link_tap(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    const char *u = meck_web_link_url(idx);
+    if (!u || !u[0]) return;
+    char next[256];
+    strncpy(next, u, sizeof(next) - 1);
+    next[sizeof(next) - 1] = '\0';
+    // Push the current page so Back returns to it.
+    if (g_web_history_depth < WEB_HISTORY_MAX) {
+        strncpy(g_web_history[g_web_history_depth], g_web_current_url, 255);
+        g_web_history[g_web_history_depth][255] = '\0';
+        g_web_history_depth++;
+    }
+    if (obj_web_link_panel) lv_obj_add_flag(obj_web_link_panel, LV_OBJ_FLAG_HIDDEN);
+    web_load_url(next);
+}
+
+static void web_links_rebuild() {
+    if (!obj_web_link_scroll) return;
+    lv_obj_clean(obj_web_link_scroll);
+    int n = meck_web_link_count();
+    int y = 5;
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *btn = lv_button_create(obj_web_link_scroll);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 60, 60);
+        lv_obj_set_pos(btn, 10, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
+        lv_obj_add_event_cb(btn, on_web_link_tap, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+
+        const char *t = meck_web_link_text(i);
+        if (!t[0]) t = meck_web_link_url(i);
+        char rowtxt[96];
+        snprintf(rowtxt, sizeof(rowtxt), "[%d] %s", i + 1, t);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, rowtxt);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_16, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, SCREEN_WIDTH - 90);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
+
+        y += 70;
+    }
+}
+
+static void on_web_links_btn(lv_event_t *e) {
+    (void)e;
+    if (meck_web_link_count() <= 0) return;
+    web_links_rebuild();
+    if (obj_web_link_panel) lv_obj_remove_flag(obj_web_link_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_web_link_panel_close(lv_event_t *e) {
+    (void)e;
+    if (obj_web_link_panel) lv_obj_add_flag(obj_web_link_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void cb_open_web(lv_event_t *e) {
+    (void)e;
+    if (!scr_web) return;
+    g_web_history_depth = 0;
+    if (obj_web_link_panel) lv_obj_add_flag(obj_web_link_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_screen_load(scr_web);
+    web_load_url("http://example.com");
+    if (!g_web_poll_timer)
+        g_web_poll_timer = lv_timer_create(web_poll_cb, 200, NULL);
+}
+
+static void create_web_screen() {
+    scr_web = lv_obj_create(NULL);
+    lock_screen_scroll(scr_web);
+    lv_obj_set_style_bg_color(scr_web, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr_web, LV_OPA_COVER, 0);
+    screen_attach_clock_battery(scr_web, 1, &meck_montserrat_24, 30);
+    if (lbl_screen_clock[1]) {
+        lv_obj_set_style_text_align(lbl_screen_clock[1], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(lbl_screen_clock[1], LV_ALIGN_TOP_RIGHT, -15, 55);
+    }
+
+    lv_obj_t *btn_back = lv_button_create(scr_web);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, web_navigate_back, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_web);
+    lv_label_set_text(title, "Web");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 25);
+
+    lbl_web_status = lv_label_create(scr_web);
+    lv_label_set_text(lbl_web_status, "");
+    lv_obj_set_style_text_color(lbl_web_status, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(lbl_web_status, &meck_montserrat_14, 0);
+    lv_obj_align(lbl_web_status, LV_ALIGN_TOP_LEFT, 120, 62);
+
+    lv_obj_t *scroll = lv_obj_create(scr_web);
+    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 95);
+    lv_obj_set_pos(scroll, 0, 95);
+    lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 10, 0);
+    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+
+    lbl_web_content = lv_label_create(scroll);
+    lv_label_set_long_mode(lbl_web_content, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_web_content, SCREEN_WIDTH - 30);
+    lv_obj_set_pos(lbl_web_content, 0, 0);
+    lv_obj_set_style_text_color(lbl_web_content, lv_color_white(), 0);
+    meck_set_font(lbl_web_content, &meck_montserrat_18, 0);
+    lv_label_set_text(lbl_web_content, "Loading...");
+
+    // Floating "Links (N)" button (shown after a fetch that found links).
+    btn_web_links = lv_button_create(scr_web);
+    lv_obj_set_size(btn_web_links, 150, 55);
+    lv_obj_align(btn_web_links, LV_ALIGN_BOTTOM_RIGHT, -12, -12);
+    lv_obj_set_style_bg_color(btn_web_links, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_web_links, 10, 0);
+    lv_obj_add_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(btn_web_links, on_web_links_btn, LV_EVENT_CLICKED, NULL);
+    lbl_web_links = lv_label_create(btn_web_links);
+    lv_label_set_text(lbl_web_links, "Links (0)");
+    lv_obj_set_style_text_color(lbl_web_links, lv_color_black(), 0);
+    meck_set_font(lbl_web_links, &meck_montserrat_16, 0);
+    lv_obj_center(lbl_web_links);
+
+    // Link overlay panel (hidden; populated on demand by web_links_rebuild).
+    obj_web_link_panel = lv_obj_create(scr_web);
+    lv_obj_set_size(obj_web_link_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_web_link_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_web_link_panel, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(obj_web_link_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(obj_web_link_panel, 0, 0);
+    lv_obj_add_flag(obj_web_link_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_web_link_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_web_link_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *ov_title = lv_label_create(obj_web_link_panel);
+    lv_label_set_text(ov_title, "Links");
+    lv_obj_set_style_text_color(ov_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(ov_title, &meck_montserrat_24, 0);
+    lv_obj_align(ov_title, LV_ALIGN_TOP_LEFT, 20, 25);
+
+    lv_obj_t *ov_close = lv_button_create(obj_web_link_panel);
+    lv_obj_set_size(ov_close, 110, 60);
+    lv_obj_align(ov_close, LV_ALIGN_TOP_RIGHT, -12, 18);
+    lv_obj_set_style_bg_color(ov_close, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(ov_close, 8, 0);
+    lv_obj_add_event_cb(ov_close, on_web_link_panel_close, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cl = lv_label_create(ov_close);
+    lv_label_set_text(cl, LV_SYMBOL_CLOSE " Close");
+    lv_obj_set_style_text_color(cl, lv_color_white(), 0);
+    meck_set_font(cl, &meck_montserrat_16, 0);
+    lv_obj_center(cl);
+
+    obj_web_link_scroll = lv_obj_create(obj_web_link_panel);
+    lv_obj_set_size(obj_web_link_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 100);
+    lv_obj_set_pos(obj_web_link_scroll, 0, 100);
+    lv_obj_set_style_bg_color(obj_web_link_scroll, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(obj_web_link_scroll, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(obj_web_link_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_web_link_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_web_link_scroll, LV_DIR_VER);
+}
+
 static void create_settings_wifi_screen() {
     scr_settings_wifi = lv_obj_create(NULL);
     lock_screen_scroll(scr_settings_wifi);
@@ -7331,6 +7592,12 @@ static void create_settings_wifi_screen() {
     y += 65;
     create_settings_row(scroll, "IP Address",
         &lbl_set_wifi_ip, NULL, y);
+    y += 65;
+
+    // Stage 1: temporary web reader plumbing test. Fetches a hardcoded
+    // plain-http page; watch the debug log for the result.
+    create_settings_row(scroll, "Fetch test page (Stage 1)",
+        NULL, on_settings_wifi_fetchtest_tap, y);
     y += 65;
 
     // Hint text
@@ -16190,6 +16457,7 @@ static void meck_ui_build_screens() {
     create_debug_logs_screen();
     create_settings_contacts_screen();
     create_settings_wifi_screen();
+    create_web_screen();
 #if MECK_BLE_KEYBOARD_ENABLED
     create_settings_keyboard_screen();
 #endif

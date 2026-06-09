@@ -64,6 +64,8 @@ static MeckCompanion g_companion;
 
 // ---- WiFi companion transport via ESP32-C6 AT over SDIO ----
 #include "SerialC6WiFiInterface.h"
+#include "MeckWebFetch.h"
+#include "esp_heap_caps.h"           // PSRAM alloc for the web reader buffers
 static SerialC6WiFiInterface g_wifi_interface;
 static MeckCompanion g_wifi_companion;
 
@@ -296,6 +298,121 @@ static void meck_apply_pending_wifi() {
     }
 }
 
+// ---- Web reader: cross-task fetch + parsed result (Stage 3) ----
+// The UI (LVGL task) posts a fetch request via meck_web_request(); the
+// SDIO-touching work runs here on meck_task. We switch off any active
+// companion to free the C6, drive a plain-http GET + reader-mode parse via
+// MeckWebFetch into shared PSRAM buffers, and expose the result to the UI
+// through the meck_web_* getters. The UI polls meck_web_result_ready() on an
+// LVGL timer. Everything is left off afterwards (re-enable a companion
+// manually).
+
+// Shared browser buffers (PSRAM, allocated on first request). The response is
+// capped at WEBFETCH_RESP_CAP, so extracted text cannot exceed it.
+#define MECK_WEB_TEXT_CAP   8192
+#define MECK_WEB_MAX_LINKS  32
+#define MECK_WEB_MAX_FORMS  4
+
+static char     g_web_req_url[256]   = {0};
+static char*    g_web_text           = nullptr;
+static WebLink* g_web_links          = nullptr;
+static WebForm* g_web_forms          = nullptr;
+static volatile bool g_web_req_pending  = false;  // UI -> meck_task
+static volatile bool g_web_result_ready = false;  // meck_task -> UI
+static volatile bool g_web_busy         = false;  // fetch in flight
+static volatile bool g_web_ok           = false;  // last fetch succeeded
+static int g_web_text_len   = 0;
+static int g_web_link_count = 0;
+
+extern "C" void meck_web_request(const char* url) {
+    if (!url) return;
+    strncpy(g_web_req_url, url, sizeof(g_web_req_url) - 1);
+    g_web_req_url[sizeof(g_web_req_url) - 1] = '\0';
+    g_web_result_ready = false;
+    g_web_req_pending = true;
+    printf("meck_web_request: queued %s\n", g_web_req_url);
+}
+
+// Back-compat trigger (Settings > WiFi "Fetch test page"): request example.com.
+extern "C" void meck_web_fetch_test() {
+    meck_web_request("http://example.com");
+}
+
+extern "C" bool meck_web_busy(void)         { return g_web_busy; }
+extern "C" bool meck_web_result_ready(void) { return g_web_result_ready; }
+extern "C" bool meck_web_ok(void)           { return g_web_ok; }
+extern "C" int  meck_web_link_count(void)   { return g_web_link_count; }
+extern "C" const char* meck_web_text(void)  { return g_web_text ? g_web_text : ""; }
+extern "C" const char* meck_web_link_url(int i) {
+    if (!g_web_links || i < 0 || i >= g_web_link_count) return "";
+    return g_web_links[i].url;
+}
+extern "C" const char* meck_web_link_text(int i) {
+    if (!g_web_links || i < 0 || i >= g_web_link_count) return "";
+    return g_web_links[i].text;
+}
+extern "C" void meck_web_ack_result(void)   { g_web_result_ready = false; }
+
+static void meck_apply_pending_webfetch() {
+    if (!g_web_req_pending) return;
+    g_web_req_pending = false;
+
+    if (!g_c6_at) {
+        printf("meck_apply_pending_webfetch: no C6 AT pointer\n");
+        return;
+    }
+
+    // Allocate the shared buffers once (PSRAM).
+    if (!g_web_text)  g_web_text  = (char*)heap_caps_malloc(MECK_WEB_TEXT_CAP, MALLOC_CAP_SPIRAM);
+    if (!g_web_links) g_web_links = (WebLink*)heap_caps_malloc(sizeof(WebLink) * MECK_WEB_MAX_LINKS, MALLOC_CAP_SPIRAM);
+    if (!g_web_forms) g_web_forms = (WebForm*)heap_caps_malloc(sizeof(WebForm) * MECK_WEB_MAX_FORMS, MALLOC_CAP_SPIRAM);
+    if (!g_web_text || !g_web_links || !g_web_forms) {
+        printf("meck_apply_pending_webfetch: PSRAM alloc failed\n");
+        g_web_ok = false;
+        g_web_text_len = 0;
+        g_web_link_count = 0;
+        g_web_result_ready = true;
+        return;
+    }
+
+    g_web_busy = true;
+
+    // Free the C6: only one consumer can own the shared SDIO link at a time.
+#if MECK_BLE_ENABLED
+    if (g_ble_interface.isEnabled()) {
+        g_ble_interface.disable();
+        printf("meck_apply_pending_webfetch: disabled BLE companion (mutual excl)\n");
+    }
+#endif
+    if (g_wifi_interface.isEnabled()) {
+        g_wifi_interface.disable();
+        printf("meck_apply_pending_webfetch: disabled WiFi companion (mutual excl)\n");
+    }
+#if MECK_BLE_KEYBOARD_ENABLED
+    if (g_blekbd.isEnabled()) {
+        g_blekbd.disable();
+        printf("meck_apply_pending_webfetch: disabled BLE keyboard (mutual excl)\n");
+    }
+#endif
+
+    ParseResult pr = {0, 0, 0};
+    MeckWebFetch fetcher;
+    bool got = fetcher.fetch(g_c6_at,
+                             g_node_prefs.wifi_ssid,
+                             g_node_prefs.wifi_password,
+                             g_web_req_url,
+                             g_web_text, MECK_WEB_TEXT_CAP,
+                             g_web_links, MECK_WEB_MAX_LINKS,
+                             g_web_forms, MECK_WEB_MAX_FORMS,
+                             &pr);
+
+    g_web_ok = got;
+    g_web_text_len = pr.textLen;
+    g_web_link_count = pr.linkCount;
+    g_web_busy = false;
+    g_web_result_ready = true;
+}
+
 // ---- External BLE keyboard host (declared in target.h) ----
 // UI-task entry points queue work; the SDIO-touching ops run on meck_task via
 // meck_apply_pending_kbd(). read_key / scan accessors / state are read-only and
@@ -520,6 +637,7 @@ static void meck_task(void* arg) {
         meck_apply_pending_ble();
 #endif
         meck_apply_pending_wifi();
+        meck_apply_pending_webfetch();   // Stage 1 web reader plumbing test
 #if MECK_BLE_ENABLED
         // BLE companion protocol: drain SDIO, handle app commands
         g_companion.check();

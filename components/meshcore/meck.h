@@ -106,6 +106,22 @@ bool meck_wifi_is_enabled(void);
 bool meck_wifi_is_connected(void);
 const char* meck_wifi_get_ip(void);
 
+// Web reader (Stage 3): the UI posts a fetch request; the SDIO work runs on
+// meck_task (switches off any active companion to free the C6, brings WiFi up
+// with the saved credentials, fetches + reader-mode-parses the page into
+// shared buffers). The UI polls meck_web_result_ready() and reads the result
+// via the getters. Everything is left off afterwards (re-enable manually).
+void        meck_web_request(const char* url);  // queue a fetch of url
+void        meck_web_fetch_test(void);          // request the example.com test page
+bool        meck_web_busy(void);                // fetch in flight
+bool        meck_web_result_ready(void);        // fresh result available
+bool        meck_web_ok(void);                  // last fetch succeeded
+int         meck_web_link_count(void);          // links found on the last page
+const char* meck_web_text(void);                // readable text of the last page
+const char* meck_web_link_url(int i);           // URL of link i (i < link_count)
+const char* meck_web_link_text(int i);          // display text of link i
+void        meck_web_ack_result(void);          // clear the result-ready flag
+
 // Battery gauge -- main.cpp registers function pointers so the meshcore
 // component can read the BQ27220 without linking to the driver directly.
 typedef uint16_t (*meck_battery_fn)(void);
