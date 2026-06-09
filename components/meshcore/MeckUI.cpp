@@ -429,6 +429,8 @@ static lv_obj_t   *obj_web_home        = NULL;
 static lv_obj_t   *obj_web_home_scroll = NULL;
 static lv_obj_t   *lbl_web_toast       = NULL;
 static lv_timer_t *g_web_toast_timer   = NULL;
+static lv_obj_t   *lbl_web_wip_toast   = NULL;
+static lv_timer_t *g_web_wip_timer     = NULL;
 
 // Web form fill (Stage 5): a "Forms (N)" button, a selection panel for pages
 // with more than one form, and a fill overlay with one editable textarea per
@@ -8032,6 +8034,20 @@ static void web_toast_hide_cb(lv_timer_t *t) {
     if (g_web_toast_timer) { lv_timer_delete(g_web_toast_timer); g_web_toast_timer = NULL; }
 }
 
+static void web_wip_toast_hide_cb(lv_timer_t *t) {
+    (void)t;
+    if (lbl_web_wip_toast) lv_obj_add_flag(lbl_web_wip_toast, LV_OBJ_FLAG_HIDDEN);
+    if (g_web_wip_timer) { lv_timer_delete(g_web_wip_timer); g_web_wip_timer = NULL; }
+}
+
+static void web_wip_toast_show() {
+    if (!lbl_web_wip_toast) return;
+    lv_obj_remove_flag(lbl_web_wip_toast, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(lbl_web_wip_toast);
+    if (g_web_wip_timer) lv_timer_delete(g_web_wip_timer);
+    g_web_wip_timer = lv_timer_create(web_wip_toast_hide_cb, 3500, NULL);
+}
+
 static void on_web_addbm_tap(lv_event_t *e) {
     (void)e;
     if (!g_web_current_url[0]) return;
@@ -8076,22 +8092,6 @@ static void web_home_rebuild() {
     if (!obj_web_home_scroll) return;
     lv_obj_clean(obj_web_home_scroll);
     int y = 5;
-
-    // IRC row: inert placeholder (IRC support is a later stage).
-    {
-        lv_obj_t *btn = lv_button_create(obj_web_home_scroll);
-        lv_obj_set_size(btn, SCREEN_WIDTH - 40, 50);
-        lv_obj_set_pos(btn, 10, y);
-        lv_obj_set_style_bg_color(btn, lv_color_make(20, 20, 25), 0);
-        lv_obj_set_style_radius(btn, 8, 0);
-        lv_obj_clear_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, "IRC: not yet available");
-        lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_GREY), 0);
-        meck_set_font(lbl, &meck_montserrat_18, 0);
-        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
-        y += 60;
-    }
 
     web_menu_row(y, "Web: [Enter URL]", lv_color_white(), on_web_go_tap, NULL);
     y += 60;
@@ -8140,6 +8140,7 @@ static void cb_open_web(lv_event_t *e) {
     if (obj_web_fill_panel)   lv_obj_add_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
     if (obj_web_home)         lv_obj_remove_flag(obj_web_home, LV_OBJ_FLAG_HIDDEN);
     lv_screen_load(scr_web);
+    web_wip_toast_show();
     if (!g_web_poll_timer)
         g_web_poll_timer = lv_timer_create(web_poll_cb, 200, NULL);
 }
@@ -8274,6 +8275,21 @@ static void create_web_screen() {
     meck_set_font(lbl_web_toast, &meck_montserrat_18, 0);
     lv_obj_align(lbl_web_toast, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(lbl_web_toast, LV_OBJ_FLAG_HIDDEN);
+
+    // Work-in-progress notice, shown briefly each time the web tile is opened.
+    lbl_web_wip_toast = lv_label_create(scr_web);
+    lv_label_set_text(lbl_web_wip_toast,
+                      "The web reader is a work in progress. Some pages may not load correctly yet.");
+    lv_obj_set_style_bg_color(lbl_web_wip_toast, lv_palette_main(LV_PALETTE_AMBER), 0);
+    lv_obj_set_style_bg_opa(lbl_web_wip_toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(lbl_web_wip_toast, lv_color_black(), 0);
+    lv_obj_set_style_pad_all(lbl_web_wip_toast, 12, 0);
+    lv_obj_set_style_radius(lbl_web_wip_toast, 10, 0);
+    meck_set_font(lbl_web_wip_toast, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_web_wip_toast, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_web_wip_toast, SCREEN_WIDTH - 60);
+    lv_obj_align(lbl_web_wip_toast, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(lbl_web_wip_toast, LV_OBJ_FLAG_HIDDEN);
 
     // ---- Landing menu (created above the reader so it covers it when shown) --
     obj_web_home = lv_obj_create(scr_web);
