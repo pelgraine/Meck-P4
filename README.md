@@ -21,7 +21,9 @@ with a `meshcore` ESP-IDF component added on top.
 - [Home Screen](#home-screen)
 - [Touch Navigation](#touch-navigation)
 - [Screen-Off Power Saving](#screen-off-power-saving)
+- [Screen Orientation](#screen-orientation)
 - [Virtual Keyboard](#virtual-keyboard)
+- [Physical Keyboard (CardKB)](#physical-keyboard-cardkb)
 - [Channel Messages](#channel-messages)
 - [Channel Picker](#channel-picker)
 - [Contacts](#contacts)
@@ -38,6 +40,8 @@ with a `meshcore` ESP-IDF component added on top.
 - [Discover](#discover)
 - [Audio Player](#audio-player)
 - [Reader](#reader)
+- [Notes](#notes)
+- [Web Reader](#web-reader)
 - [Maps](#maps)
 - [Config Export](#config-export)
 - [Config Import](#config-import)
@@ -208,6 +212,16 @@ This is not true light sleep. The PM config sets `light_sleep_enable=true`, but 
 
 -----
 
+## Screen Orientation
+
+Meck-P4 can run in **portrait** (the default) or **landscape**. The orientation is set from **Settings > Orientation**, which toggles between the two.
+
+Changing it applies live. The display rotation is switched (0 degrees for portrait, 90 degrees for landscape), every screen is torn down and rebuilt at the new logical resolution, and you are returned to the home screen. The choice persists via NVS and is re-applied on the next boot before any screen is drawn.
+
+The main screens adapt to the orientation: the home navigation grid is 2 columns by 5 rows in portrait and 5 columns by 2 rows in landscape, and the on-screen keyboard height scales with the panel so it stays usable either way. A few secondary screens (the audio player, maps, and the reader) are still laid out at the fixed portrait dimensions and do not yet re-flow in landscape.
+
+-----
+
 ## Virtual Keyboard
 
 Text entry (node name, message compose, channel name, channel secret) uses an on-screen virtual keyboard. The keyboard appears automatically when you tap a field that needs input, and dismisses on Send / Enter / Back.
@@ -223,13 +237,14 @@ The choice persists via NVS and applies live to every keyboard instance the mome
 
 ### Layout
 
-Three physical layouts are available, cycled from **Settings → KB Layout**:
+Four physical layouts are available, cycled from **Settings → KB Layout**:
 
 |Layout              |Description                                                                                                                                      |
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
 |**QWERTY** (default)|Standard English layout                                                                                                                          |
 |**AZERTY**          |French layout. A↔Q and W↔Z swap from QWERTY; M moves from row 3 (after L) to the right of row 2 (after L), giving row 2 ten cells and row 3 nine.|
 |**QWERTZ**          |German layout. Y↔Z swap; same shape as QWERTY everywhere else.                                                                                   |
+|**ЙЦУКЕН** (Cyrillic)|Standard Russian arrangement, also commonly used by Bulgarian users. The top three rows carry twelve letters each, with ё on the third row. The control keys keep their Latin labels (ABC / abc / 1#) so case and number switching still work. Ukrainian and Serbian letter sets are not included. Shown as "ЙЦУКЕН" in Settings.|
 
 The same physical layout is used for both upper and lower case, with Shift toggling between them. The layout choice persists via NVS.
 
@@ -265,6 +280,22 @@ Tap **`abc`** to switch back to letters.
 The two message-composer keyboards (channel and DM compose) have an **emoji key** just to the right of the space bar. Tap it to open a scrollable picker; tap an emoji to insert it and the picker closes, or tap outside the picker to dismiss without inserting.
 
 Emoji render in colour both in the picker and inline in your messages, drawn from a set of Twemoji images baked into the firmware. Codepoints outside that set fall back to the normal text font.
+
+-----
+
+## Physical Keyboard (CardKB)
+
+Meck-P4 has optional support for the **M5Stack CardKB**, a small I2C QWERTY keyboard, as an alternative to the on-screen keyboard for typing messages. Support is gated behind the `MECK_CARDKB` build flag, so it is a build-from-source option rather than a touch-only default.
+
+The CardKB connects to the board's **P1 connector** (the 1x4 header), driven as a software-I2C bus on SDA = GPIO 48 and SCL = GPIO 47, because both hardware I2C controllers are already used by other peripherals. The bus runs at 10 kHz and the keyboard is expected at I2C address 0x5F. It is probed for at boot; if one answers, a poll timer starts and `MeckUI: CardKB poll timer started` is logged. If none is found, the device runs normally on the on-screen keyboard.
+
+When a CardKB is present and a message composer (channel or DM/room) is open:
+
+- Typing writes straight into the message field. The first keypress hides the on-screen keyboard so the message list reclaims its space, while the field keeps focus so you can keep typing.
+- **Enter** sends the message (the same action as the on-screen keyboard's OK button) and **Esc** cancels.
+- **Backspace** deletes the character before the cursor, and **Left / Right** move the cursor within the field.
+
+CardKB input is currently wired to the message composers only. Whole-UI navigation with the arrow keys (moving focus between buttons and across screens) is not yet implemented.
 
 -----
 
@@ -608,7 +639,7 @@ For full setup instructions including the `mp3_clean.py` script usage, SD card l
 
 Tap **Reader** from the home grid to open the text reader. It lists files from the SD card under `/sdcard/books`, with the same folder navigation, breadcrumb, and up-one-level button as the audio browser, so you can organise books into subfolders however you like.
 
-As of **v0.5** the reader opens **plain-text (`.txt`) files** only. EPUB support is planned for a future firmware release, handled as an EPUB-to-text conversion that produces a `.txt` the reader then opens.
+The reader opens **plain-text (`.txt`)** and **EPUB (`.epub`)** files. The file list shows folders, `.txt`, and `.epub` items. Tapping an EPUB converts it to plain text the first time it is opened: a *Converting … to txt* screen is shown while the book is decoded, the result is cached as a `.txt` in a hidden `.epub_cache` subfolder, and the reader opens that. Re-opening the same EPUB later loads straight from the cached text, so the conversion only runs once. You only ever see and tap the `.epub` itself; the cached text stays hidden from the browser.
 
 Tap a file to start reading. In the reading view, tap the **left third** of the screen to turn back a page and the **right two-thirds** to turn forward. Back returns to the file list; from the `/sdcard/books` root, Back returns to the home screen.
 
@@ -617,6 +648,56 @@ Tap a file to start reading. In the reading view, tap the **left third** of the 
 **Resume bookmark.** A **green play icon** beside a file in the list means that file has a saved reading position. Re-opening it resumes at the page you were on, so you can leave a book part-read and pick it up later. Your position is saved as you turn pages and when you leave the book.
 
 **Font size.** The reader honours the font-size preference in **Settings**: the same setting that scales the rest of the UI also sizes the body text of your `.txt` files.
+
+-----
+
+## Notes
+
+Tap **Notes** from the home grid to open the notes app. Notes are plain UTF-8 `.txt` files stored under `/sdcard/notes`, so they live on the removable card, survive a firmware reflash, and can be read or edited on a computer. The notes folder is created automatically on first run.
+
+The browser works like the reader's: folder navigation with an up-one-level button and a breadcrumb, rooted at `/sdcard/notes`. A green **+ New Note** row sits at the top of every folder, so you can start a note even in an empty folder. New notes are created in the folder you are currently viewing.
+
+**Creating and editing.** Tapping **+ New Note** opens the editor with the on-screen keyboard (which honours your KB Theme and KB Layout settings). New notes are named by date and time when the clock is synced (`note_YYYYMMDD_HHMM.txt`), or sequentially (`note_NNN.txt`) when it is not. Opening an existing note shows it in a read view with an **Edit** button in the top-right that reopens it in the editor. Tap **Save** to write your changes back to the card.
+
+**Reading.** The read view uses the same paging engine as the reader: tap the left third of the screen to turn back a page and the right two-thirds to turn forward, with a progress percentage at the bottom and a saved-position bookmark so you can resume where you left off.
+
+**Rename and delete.** Long-press a note in the browser to open an action menu with **Rename**, **Delete**, and **Cancel**. Delete asks for confirmation first. Both operations move or remove the note's resume bookmark alongside the file.
+
+-----
+
+## Web Reader
+
+Tap **Web** from the home grid to open the web reader, a lightweight reader-mode browser that runs over the onboard ESP32-C6. It is aimed at light, text-heavy pages, not the full modern web.
+
+> **Work in progress.** The web reader ships in v0.6 with known limitations (listed below). An amber notice appears for a few seconds each time you open the Web tile as a reminder.
+
+### How it works
+
+The web reader drives the ESP32-C6 directly over ESP-AT, building its HTTP and TLS requests by hand on top of the C6's AT command set. This is separate from the WiFi companion transport: it shares the same C6 WiFi link but uses its own request path. The C6 must be connected to WiFi (see [WiFi Companion](#wifi-companion)) for the web reader to fetch anything.
+
+### Using it
+
+The landing menu has four entries: **Enter URL**, a **DuckDuckGo Lite** search, **Bookmarks**, and **History**.
+
+- **Reader view.** Fetched pages are parsed to readable text and shown in a scrolling view with a status line. Headings render in dark red. Link markers show as a muted grey `[N]` and are followed from the **Links** panel rather than by tapping the number.
+- **Links.** The **Links** button opens a panel listing the page's links so you can follow one.
+- **Forms.** When a page has forms, an orange **Forms (N)** button appears. It opens a picker (duplicate forms are collapsed by action and field set), and selecting one opens a fill modal with a labelled field per text or password input. Submitting builds the `action?name=value&…` query and loads it through the normal page path, so history and status stay correct. GET forms are supported; POST is not yet.
+- **Bookmarks** can be added from the reader view with a confirmation toast, and revisited from the landing menu along with your browsing **History**.
+
+HTTPS is supported and confirmed working (verified against DuckDuckGo Lite). Common search field names such as `q` or `search` are shown as "Search" in both the page text and the fill modal.
+
+### Known limitations in v0.6
+
+- **Throughput and size.** The AT link runs at roughly 1.5 KB/s, and a single fetch is capped (about 32 KB of captured page text, plus a receive-time ceiling), so large pages truncate. When a page hits the cap, the reader prepends a "Page too large to load fully." notice. Light, text-heavy pages such as DuckDuckGo Lite work well; large portals (the Wikipedia portal is the worst case seen) do not.
+- **No redirect following.** 301 and 302 responses show the server's short "document has moved" body instead of following it. This affects apex-to-www hops (for example `wikipedia.org` to `www.wikipedia.org`) and any http-to-https hop. The workaround is to follow the link by hand.
+- **URL parsing.** A URL of the form `host?query` with no path slash (for example `https://example.com?q=foo`) folds the query into the hostname. Use a form with a path (`https://example.com/search?q=foo`), which parses correctly.
+- **No TLS certificate verification.** HTTPS connections are not certificate-checked, so they are not protected against a man-in-the-middle.
+- **Bot-flagged requests.** The request uses a simple `Meck-P4` user agent, which Cloudflare flags, so Cloudflare-gated sites do not load yet.
+- **No cookies, Referer, POST, gzip, or chunked transfer.** So no logins, no session-cookie or referrer-gated sites, and no compressed or chunked responses.
+
+### Not in v0.6
+
+The **IRC client** (Stage 6) from the upstream Meck web reader is not started yet, and its placeholder has been removed for now. Several of the limitations above (redirect following, browser-like request headers, a cookie jar, POST and login support, certificate verification) are planned follow-up work.
 
 -----
 
@@ -732,8 +813,9 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Debug Logs >>**   |Opens the Debug Logs sub-screen. Captures all firmware printf output to an SD log file for troubleshooting. See [Debug Logs](#debug-logs).                                                                                          |
 |**Brightness**      |Slider: 12% to 100% -- applies live                                                                                                                                                                                              |
 |**Auto Off**        |Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — when idle, the screen tears down the MIPI-DSI bus and CPU usage drops from ~94% to ~57% CPU_MAX. Wake with the **boot button** (touch wake is not yet supported)            |
+|**Orientation**     |Tap to toggle: Portrait (default) / Landscape. Applies live, rebuilding every screen at the new rotation, and persists across reboots. See [Screen Orientation](#screen-orientation).|
 |**KB Theme**        |Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details.                                                                                                  |
-|**KB Layout**       |Tap to cycle: QWERTY / AZERTY / QWERTZ. Layout switches apply live to every keyboard instance.                                                                                                                                  |
+|**KB Layout**       |Tap to cycle: QWERTY / AZERTY / QWERTZ / ЙЦУКЕН (Cyrillic). Layout switches apply live to every keyboard instance.                                                                                                            |
 |**Identity**        |Read-only display of your public key                                                                                                                                                                                            |
 
 All settings persist via NVS with an SD card mirror.
@@ -957,9 +1039,9 @@ no particular timeframes attached.
 - [x] **Discover** — active zero-hop DISCOVER_REQ/RESP scan with SNR
   readout, list of nearby repeaters/rooms, tap-to-add for nodes not
   yet in your contacts
-- [x] **Virtual keyboard** — Dark / Light theme, three layouts
-  (QWERTY / AZERTY / QWERTZ), long-press accent popover for French
-  and Czech diacritics
+- [x] **Virtual keyboard** — Dark / Light theme, four layouts
+  (QWERTY / AZERTY / QWERTZ / Cyrillic ЙЦУКЕН), long-press accent
+  popover for French and Czech diacritics
 - [x] **Audio player** — WAV + MP3 playback from SD with music /
   audiobook subtrees, transport controls, volume, and a tappable
   now-playing indicator that returns to the current track without
@@ -1008,6 +1090,12 @@ no particular timeframes attached.
 - [x] MAX_GROUP_CHANNELS bumped from 8 to 12
 - [x] AMOLED variant verification
 - [x] **ESP32-C6 WiFi companion** — connect the MeshCore app over WiFi (TCP port 5000), with on-device SSID/password configuration. See [WiFi Companion](#wifi-companion).
+- [x] **EPUB reading** — the Reader opens `.epub` files via on-the-fly epub-to-txt conversion, cached so the conversion runs only once. See [Reader](#reader).
+- [x] **Notes app** — create, edit, read, rename, and delete plain-text notes under `/sdcard/notes`, reusing the reader's paging and resume bookmark. See [Notes](#notes).
+- [x] **Web reader** — reader-mode browser over the ESP32-C6 (plain HTTP and HTTPS, on-screen browser, GET form fill, bookmarks, history). Ships as a work in progress; the IRC client is not yet ported. See [Web Reader](#web-reader).
+- [x] **Cyrillic keyboard** — ЙЦУКЕН layout added to the KB Layout cycle (Russian / Bulgarian).
+- [x] **M5Stack CardKB support** — optional physical I2C keyboard for the message composers, gated behind the `MECK_CARDKB` build flag. See [Physical Keyboard (CardKB)](#physical-keyboard-cardkb).
+- [x] **Screen orientation** — Portrait / Landscape toggle in Settings with a live rebuild. See [Screen Orientation](#screen-orientation).
 
 **Pending:**
 
@@ -1015,7 +1103,6 @@ no particular timeframes attached.
 - [ ] Picture over LoRa — enable image transfer end-to-end (infrastructure is complete, pending final integration)
 - [ ] Voice and Camera home tiles — currently placeholders, will activate when voice/picture features are enabled
 - [ ] ESP32-C6 BLE companion firmware (WiFi companion is complete as of v0.4)
-- [ ] Notes app
 - [ ] Mentions-only notification filtering — the "Mentions" preference currently behaves the same as "All"; filtering to trigger only on @nodename is planned
 - [ ] Serial CLI commands on the P4 — local serial settings require a serial terminal, which is not yet implemented. Remote CLI via Repeater Admin works normally
 - [ ] M4B audiobook files not supported (MP3 and WAV only)
@@ -1023,7 +1110,8 @@ no particular timeframes attached.
 - [ ] Audio cover-art rendering at >256x256 — pre-flight succeeds but the LVGL heap
   can’t allocate decoded framebuffers for larger sizes; needs decode-time
   downscale or a streaming decoder. 256x256 size png file works.
-- [ ] Web browser & IRC client
+- [ ] Web reader follow-ups — redirect following, browser-like request headers, a cookie jar, POST and login support, and TLS certificate verification (the web reader itself ships in v0.6; see [Web Reader](#web-reader))
+- [ ] IRC client — port the upstream Meck web reader's IRC client (Stage 6)
 - [ ] PCF8563 hardware RTC integration — read on boot, write on shutdown
   so time survives power-off
 - [ ] Light sleep actually engaging — the screen-off path releases the
