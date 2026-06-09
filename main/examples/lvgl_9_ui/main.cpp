@@ -5880,7 +5880,10 @@ extern "C" void app_main(void)
 
     Lvgl_Init();
     Lvgl_Startup();
-    xTaskCreate(lvgl_ui_task, "lvgl_ui_task", 100 * 1024, NULL, 1, NULL);
+    if (xTaskCreate(lvgl_ui_task, "lvgl_ui_task", 32 * 1024, NULL, 1, NULL) != pdPASS) {
+        printf("FATAL: lvgl_ui_task create failed — not enough contiguous internal RAM for its stack; UI will not start\n");
+        fflush(stdout);
+    }
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     if (XL9555->begin() == false)
