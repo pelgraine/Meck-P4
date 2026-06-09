@@ -309,8 +309,8 @@ static void meck_apply_pending_wifi() {
 
 // Shared browser buffers (PSRAM, allocated on first request). The response is
 // capped at WEBFETCH_RESP_CAP, so extracted text cannot exceed it.
-#define MECK_WEB_TEXT_CAP   8192
-#define MECK_WEB_MAX_LINKS  32
+#define MECK_WEB_TEXT_CAP   16384
+#define MECK_WEB_MAX_LINKS  64
 #define MECK_WEB_MAX_FORMS  4
 
 static char     g_web_req_url[256]   = {0};
@@ -323,6 +323,7 @@ static volatile bool g_web_busy         = false;  // fetch in flight
 static volatile bool g_web_ok           = false;  // last fetch succeeded
 static int g_web_text_len   = 0;
 static int g_web_link_count = 0;
+static int g_web_form_count = 0;
 
 extern "C" void meck_web_request(const char* url) {
     if (!url) return;
@@ -351,6 +352,114 @@ extern "C" const char* meck_web_link_text(int i) {
     if (!g_web_links || i < 0 || i >= g_web_link_count) return "";
     return g_web_links[i].text;
 }
+extern "C" int meck_web_form_count(void) { return g_web_form_count; }
+extern "C" const char* meck_web_form_action(int f) {
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return "";
+    return g_web_forms[f].action;
+}
+extern "C" bool meck_web_form_is_post(int f) {
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return false;
+    return g_web_forms[f].isPost;
+}
+extern "C" int meck_web_form_field_count(int f) {
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return 0;
+    return g_web_forms[f].fieldCount;
+}
+extern "C" const char* meck_web_form_field_name(int f, int i) {
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return "";
+    if (i < 0 || i >= g_web_forms[f].fieldCount) return "";
+    return g_web_forms[f].fields[i].name;
+}
+extern "C" const char* meck_web_form_field_label(int f, int i) {
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return "";
+    if (i < 0 || i >= g_web_forms[f].fieldCount) return "";
+    return g_web_forms[f].fields[i].label;
+}
+extern "C" const char* meck_web_form_field_value(int f, int i) {
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return "";
+    if (i < 0 || i >= g_web_forms[f].fieldCount) return "";
+    return g_web_forms[f].fields[i].value;
+}
+extern "C" char meck_web_form_field_type(int f, int i) {
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return 0;
+    if (i < 0 || i >= g_web_forms[f].fieldCount) return 0;
+    return g_web_forms[f].fields[i].type;
+}
+
+// Percent-encode `in` into `out` using form/query rules: unreserved chars are
+// kept, space becomes '+', everything else becomes %XX. Always NUL-terminates;
+// stops early rather than overflowing `out`. Returns chars written (sans NUL).
+static int web_url_encode(const char* in, char* out, int out_cap) {
+    static const char* hex = "0123456789ABCDEF";
+    int n = 0;
+    for (const unsigned char* p = (const unsigned char*)in; *p; p++) {
+        unsigned char c = *p;
+        bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                          (c >= '0' && c <= '9') ||
+                          c == '-' || c == '_' || c == '.' || c == '~';
+        if (unreserved) {
+            if (n + 1 >= out_cap) break;
+            out[n++] = (char)c;
+        } else if (c == ' ') {
+            if (n + 1 >= out_cap) break;
+            out[n++] = '+';
+        } else {
+            if (n + 3 >= out_cap) break;
+            out[n++] = '%';
+            out[n++] = hex[c >> 4];
+            out[n++] = hex[c & 0x0F];
+        }
+    }
+    out[n] = '\0';
+    return n;
+}
+
+// Set the current value of field i in form f (used by the fill UI before
+// submit). Bounded to WEB_MAX_FIELD_VALUE.
+extern "C" void meck_web_form_set_field_value(int f, int i, const char* v) {
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return;
+    if (i < 0 || i >= g_web_forms[f].fieldCount) return;
+    if (!v) v = "";
+    strncpy(g_web_forms[f].fields[i].value, v, WEB_MAX_FIELD_VALUE - 1);
+    g_web_forms[f].fields[i].value[WEB_MAX_FIELD_VALUE - 1] = '\0';
+}
+
+// Build form f's GET submission URL (action?name=value&...) into `out`.
+// Submit ('s') and checkbox ('c') fields are skipped; text/password/hidden
+// fields are URL-encoded and included with their current values. Returns the
+// URL length written (0 if f is out of range). The caller navigates to it, so
+// the reader's history/status stay correct.
+extern "C" int meck_web_form_build_get_url(int f, char* out, int out_cap) {
+    if (!out || out_cap <= 0) return 0;
+    out[0] = '\0';
+    if (!g_web_forms || f < 0 || f >= g_web_form_count) return 0;
+    const WebForm& form = g_web_forms[f];
+
+    int n = snprintf(out, out_cap, "%s", form.action);
+    if (n < 0) { out[0] = '\0'; return 0; }
+    if (n >= out_cap) n = out_cap - 1;
+
+    bool first = (strchr(out, '?') == nullptr);
+    for (int i = 0; i < form.fieldCount; i++) {
+        char t = form.fields[i].type;
+        if (t == 's' || t == 'c') continue;          // skip submit buttons / checkboxes
+        if (form.fields[i].name[0] == '\0') continue;
+
+        char enc_name[3 * 64 + 1];
+        char enc_val[3 * WEB_MAX_FIELD_VALUE + 1];
+        web_url_encode(form.fields[i].name,  enc_name, sizeof(enc_name));
+        web_url_encode(form.fields[i].value, enc_val,  sizeof(enc_val));
+
+        int avail = out_cap - n;
+        int w = snprintf(out + n, avail, "%c%s=%s",
+                         first ? '?' : '&', enc_name, enc_val);
+        if (w < 0 || w >= avail) { out[out_cap - 1] = '\0'; n = out_cap - 1; break; }
+        n += w;
+        first = false;
+    }
+    return n;
+}
+
 extern "C" void meck_web_ack_result(void)   { g_web_result_ready = false; }
 
 static void meck_apply_pending_webfetch() {
@@ -371,6 +480,7 @@ static void meck_apply_pending_webfetch() {
         g_web_ok = false;
         g_web_text_len = 0;
         g_web_link_count = 0;
+        g_web_form_count = 0;
         g_web_result_ready = true;
         return;
     }
@@ -409,6 +519,7 @@ static void meck_apply_pending_webfetch() {
     g_web_ok = got;
     g_web_text_len = pr.textLen;
     g_web_link_count = pr.linkCount;
+    g_web_form_count = pr.formCount;
     g_web_busy = false;
     g_web_result_ready = true;
 }

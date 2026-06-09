@@ -428,6 +428,23 @@ static lv_obj_t   *obj_web_home_scroll = NULL;
 static lv_obj_t   *lbl_web_toast       = NULL;
 static lv_timer_t *g_web_toast_timer   = NULL;
 
+// Web form fill (Stage 5): a "Forms (N)" button, a selection panel for pages
+// with more than one form, and a fill overlay with one editable textarea per
+// visible field sharing a single Meck keyboard.
+#define WEB_FILL_MAX_FIELDS 16   // mirrors WEB_MAX_FORM_FIELDS in MeckWebHtml.h
+static lv_obj_t   *btn_web_forms       = NULL;
+static lv_obj_t   *lbl_web_forms       = NULL;
+static lv_obj_t   *obj_web_form_panel  = NULL;
+static lv_obj_t   *obj_web_form_scroll = NULL;
+static lv_obj_t   *obj_web_fill_panel  = NULL;
+static lv_obj_t   *obj_web_fill_scroll = NULL;
+static lv_obj_t   *kb_web_fill         = NULL;
+static lv_obj_t   *lbl_web_fill_title  = NULL;
+static lv_obj_t   *g_fill_ta[WEB_FILL_MAX_FIELDS]        = {0};  // shown field textareas
+static int         g_fill_field_idx[WEB_FILL_MAX_FIELDS] = {0};  // textarea -> form field index
+static int         g_fill_ta_count     = 0;
+static int         g_fill_form_idx     = -1;                     // form being filled
+
 // Home tile header labels
 static lv_obj_t *lbl_home_title    = NULL;
 // Clock + battery labels are mirrored on every tileview page (7 pages in the
@@ -7352,6 +7369,19 @@ static void on_web_search_tap(lv_event_t *e);
 static void on_web_bookmark_tap(lv_event_t *e);
 static void on_web_bookmark_long(lv_event_t *e);
 static void on_web_visited_tap(lv_event_t *e);
+static const char* web_field_display(int f, int i);
+static bool web_forms_equiv(int a, int b);
+static int  web_unique_forms(int *out, int max);
+static void web_forms_rebuild();
+static void web_fill_rebuild(int f);
+static void open_form_fill(int f);
+static void on_web_forms_btn(lv_event_t *e);
+static void on_web_form_select(lv_event_t *e);
+static void on_web_form_panel_close(lv_event_t *e);
+static void on_web_fill_submit(lv_event_t *e);
+static void on_web_fill_close(lv_event_t *e);
+static void on_fill_ta_focus(lv_event_t *e);
+static void on_web_fill_kb_event(lv_event_t *e);
 
 // ---- Bookmark & history persistence (plain newline-delimited URLs on SD) ----
 
@@ -7459,6 +7489,7 @@ static void web_load_url(const char *url) {
     if (lbl_web_content) lv_label_set_text(lbl_web_content, "Loading...");
     if (lbl_web_status)  lv_label_set_text(lbl_web_status, g_web_current_url);
     if (btn_web_links)   lv_obj_add_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
+    if (btn_web_forms)   lv_obj_add_flag(btn_web_forms, LV_OBJ_FLAG_HIDDEN);
     meck_web_request(g_web_current_url);
 }
 
@@ -7505,12 +7536,24 @@ static void web_poll_cb(lv_timer_t *t) {
             if (n > 0) lv_obj_remove_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
             else       lv_obj_add_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
         }
+        if (btn_web_forms) {
+            int idx[16];
+            int fn = web_unique_forms(idx, 16);
+            if (lbl_web_forms) {
+                char ft[24];
+                snprintf(ft, sizeof(ft), "Forms (%d)", fn);
+                lv_label_set_text(lbl_web_forms, ft);
+            }
+            if (fn > 0) lv_obj_remove_flag(btn_web_forms, LV_OBJ_FLAG_HIDDEN);
+            else        lv_obj_add_flag(btn_web_forms, LV_OBJ_FLAG_HIDDEN);
+        }
         web_add_visited(g_web_current_url);   // record the successful page
     } else {
         if (lbl_web_content)
             lv_label_set_text(lbl_web_content, "Fetch failed (see debug log).");
         if (lbl_web_status) lv_label_set_text(lbl_web_status, g_web_current_url);
         if (btn_web_links)  lv_obj_add_flag(btn_web_links, LV_OBJ_FLAG_HIDDEN);
+        if (btn_web_forms)  lv_obj_add_flag(btn_web_forms, LV_OBJ_FLAG_HIDDEN);
     }
     meck_web_ack_result();
 }
@@ -7684,6 +7727,227 @@ static void on_web_search_tap(lv_event_t *e) {
     }
 }
 
+// ---- Web form fill (Stage 5) ------------------------------------------------
+// Rebuild the fill overlay's rows for form f: one labelled, pre-filled textarea
+// per visible (text/password) field. Hidden/submit/checkbox fields are not
+// shown (hidden fields are still carried through by the URL builder). All
+// textareas share kb_web_fill, re-pointed on focus.
+static void web_fill_rebuild(int f) {
+    if (!obj_web_fill_scroll) return;
+    lv_obj_clean(obj_web_fill_scroll);
+    g_fill_ta_count = 0;
+    if (kb_web_fill) lv_keyboard_set_textarea(kb_web_fill, NULL);
+
+    int nfields = meck_web_form_field_count(f);
+    int y = 5;
+    for (int i = 0; i < nfields && g_fill_ta_count < WEB_FILL_MAX_FIELDS; i++) {
+        char t = meck_web_form_field_type(f, i);
+        if (t != 't' && t != 'p') continue;
+
+        const char *lbltxt = web_field_display(f, i);
+
+        lv_obj_t *lbl = lv_label_create(obj_web_fill_scroll);
+        lv_label_set_text(lbl, lbltxt);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_16, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, SCREEN_WIDTH - 60);
+        lv_obj_set_pos(lbl, 10, y);
+        y += 32;
+
+        lv_obj_t *ta = lv_textarea_create(obj_web_fill_scroll);
+        lv_obj_set_size(ta, SCREEN_WIDTH - 60, 50);
+        lv_obj_set_pos(ta, 10, y);
+        lv_textarea_set_one_line(ta, true);
+        lv_textarea_set_max_length(ta, 127);
+        if (t == 'p') lv_textarea_set_password_mode(ta, true);
+        lv_textarea_set_text(ta, meck_web_form_field_value(f, i));
+        lv_obj_set_style_bg_color(ta, lv_color_make(30, 30, 40), 0);
+        lv_obj_set_style_text_color(ta, lv_color_white(), 0);
+        meck_set_font(ta, &meck_montserrat_18, 0);
+        lv_obj_set_style_border_color(ta, lv_palette_main(LV_PALETTE_CYAN), 0);
+        lv_obj_add_event_cb(ta, on_fill_ta_focus, LV_EVENT_FOCUSED, NULL);
+        y += 62;
+
+        g_fill_ta[g_fill_ta_count]        = ta;
+        g_fill_field_idx[g_fill_ta_count] = i;
+        g_fill_ta_count++;
+    }
+
+    if (g_fill_ta_count > 0 && kb_web_fill)
+        lv_keyboard_set_textarea(kb_web_fill, g_fill_ta[0]);
+}
+
+static void open_form_fill(int f) {
+    if (f < 0 || f >= meck_web_form_count()) return;
+    g_fill_form_idx = f;
+    if (lbl_web_fill_title) {
+        char tt[32];
+        snprintf(tt, sizeof(tt), "Fill form %d", f + 1);
+        lv_label_set_text(lbl_web_fill_title, tt);
+    }
+    web_fill_rebuild(f);
+    if (obj_web_form_panel) lv_obj_add_flag(obj_web_form_panel, LV_OBJ_FLAG_HIDDEN);
+    if (obj_web_fill_panel) lv_obj_remove_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_fill_ta_focus(lv_event_t *e) {
+    lv_obj_t *ta = (lv_obj_t *)lv_event_get_target(e);
+    if (kb_web_fill && ta) lv_keyboard_set_textarea(kb_web_fill, ta);
+}
+
+static void on_web_fill_submit(lv_event_t *e) {
+    (void)e;
+    int f = g_fill_form_idx;
+    if (f < 0) return;
+    for (int k = 0; k < g_fill_ta_count; k++) {
+        if (!g_fill_ta[k]) continue;
+        const char *v = lv_textarea_get_text(g_fill_ta[k]);
+        meck_web_form_set_field_value(f, g_fill_field_idx[k], v ? v : "");
+    }
+    char url[512];
+    int len = meck_web_form_build_get_url(f, url, sizeof(url));
+    g_fill_form_idx = -1;
+    if (kb_web_fill) lv_keyboard_set_textarea(kb_web_fill, NULL);
+    if (obj_web_fill_panel) lv_obj_add_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
+    // Route through web_go so the current page lands on the back-stack and the
+    // reader's status/history track the submitted URL.
+    if (len > 0) web_go(url);
+}
+
+static void on_web_fill_close(lv_event_t *e) {
+    (void)e;
+    g_fill_form_idx = -1;
+    if (kb_web_fill) lv_keyboard_set_textarea(kb_web_fill, NULL);
+    if (obj_web_fill_panel) lv_obj_add_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_web_fill_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)       on_web_fill_submit(NULL);
+    else if (code == LV_EVENT_CANCEL) on_web_fill_close(NULL);
+}
+
+// Friendly display name for a form field: prefer the HTML <label>; otherwise
+// map the common search field names to "Search"; otherwise the raw name.
+static const char* web_field_display(int f, int i) {
+    const char *nm = meck_web_form_field_name(f, i);
+    // Map the common search field names first. The parser copies the field
+    // name into label when a page has no <label>/placeholder, so checking the
+    // label first would mask these (e.g. DuckDuckGo's / AO3's "q").
+    if (!strcmp(nm, "q") || !strcmp(nm, "s") ||
+        !strcmp(nm, "query") || !strcmp(nm, "search")) return "Search";
+    const char *lbl = meck_web_form_field_label(f, i);
+    if (lbl[0]) return lbl;
+    return nm[0] ? nm : "(field)";
+}
+
+// Two forms are duplicates if they post to the same action and have the same
+// ordered list of fillable (text/password) field names.
+static bool web_forms_equiv(int a, int b) {
+    if (strcmp(meck_web_form_action(a), meck_web_form_action(b)) != 0) return false;
+    int fa = meck_web_form_field_count(a), fb = meck_web_form_field_count(b);
+    int ia = 0, ib = 0;
+    for (;;) {
+        while (ia < fa) { char t = meck_web_form_field_type(a, ia); if (t == 't' || t == 'p') break; ia++; }
+        while (ib < fb) { char t = meck_web_form_field_type(b, ib); if (t == 't' || t == 'p') break; ib++; }
+        bool ea = (ia >= fa), eb = (ib >= fb);
+        if (ea && eb) return true;
+        if (ea != eb) return false;
+        if (strcmp(meck_web_form_field_name(a, ia), meck_web_form_field_name(b, ib)) != 0) return false;
+        ia++; ib++;
+    }
+}
+
+// Build the list of forms to offer: those with at least one fillable field,
+// later duplicates (see web_forms_equiv) omitted. Writes up to `max` form
+// indices into `out`, returns the count. Drives the Forms button label, the
+// picker rows, and the skip-the-picker-for-one-form shortcut.
+static int web_unique_forms(int *out, int max) {
+    int n = meck_web_form_count(), count = 0;
+    for (int i = 0; i < n && count < max; i++) {
+        int fc = meck_web_form_field_count(i), vis = 0;
+        for (int j = 0; j < fc; j++) {
+            char t = meck_web_form_field_type(i, j);
+            if (t == 't' || t == 'p') { vis++; break; }
+        }
+        if (!vis) continue;
+        bool dup = false;
+        for (int k = 0; k < count; k++) if (web_forms_equiv(out[k], i)) { dup = true; break; }
+        if (dup) continue;
+        out[count++] = i;
+    }
+    return count;
+}
+
+// Rebuild the form-selection panel: one row per unique fillable form, labelled
+// with the field names it will ask for.
+static void web_forms_rebuild() {
+    if (!obj_web_form_scroll) return;
+    lv_obj_clean(obj_web_form_scroll);
+    int idx[16];
+    int n = web_unique_forms(idx, 16);
+    int y = 5;
+    for (int r = 0; r < n; r++) {
+        int i = idx[r];
+        int fc = meck_web_form_field_count(i);
+        char fields[160];
+        int fi = 0, vis = 0;
+        fields[0] = '\0';
+        for (int j = 0; j < fc; j++) {
+            char t = meck_web_form_field_type(i, j);
+            if (t != 't' && t != 'p') continue;
+            const char *nm = web_field_display(i, j);
+            int avail = (int)sizeof(fields) - fi;
+            int w = snprintf(fields + fi, avail, "%s%s", vis ? ", " : "", nm);
+            if (w < 0 || w >= avail) { fields[sizeof(fields) - 1] = '\0'; vis++; break; }
+            fi += w;
+            vis++;
+        }
+
+        lv_obj_t *btn = lv_button_create(obj_web_form_scroll);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 60, 70);
+        lv_obj_set_pos(btn, 10, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
+        lv_obj_add_event_cb(btn, on_web_form_select, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        char rowtxt[200];
+        snprintf(rowtxt, sizeof(rowtxt), "Fill: %s", fields);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, rowtxt);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_18, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, SCREEN_WIDTH - 90);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
+
+        y += 80;
+    }
+}
+
+static void on_web_form_select(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    open_form_fill(idx);
+}
+
+static void on_web_form_panel_close(lv_event_t *e) {
+    (void)e;
+    if (obj_web_form_panel) lv_obj_add_flag(obj_web_form_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void on_web_forms_btn(lv_event_t *e) {
+    (void)e;
+    int idx[16];
+    int n = web_unique_forms(idx, 16);
+    if (n <= 0) return;
+    if (n == 1) { open_form_fill(idx[0]); return; }   // only one unique form
+    web_forms_rebuild();
+    if (obj_web_form_panel) lv_obj_remove_flag(obj_web_form_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ---- Landing-menu row handlers ----------------------------------------------
 static void on_web_bookmark_tap(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
@@ -7813,6 +8077,8 @@ static void cb_open_web(lv_event_t *e) {
     if (obj_web_link_panel)   lv_obj_add_flag(obj_web_link_panel, LV_OBJ_FLAG_HIDDEN);
     if (obj_web_url_panel)    lv_obj_add_flag(obj_web_url_panel, LV_OBJ_FLAG_HIDDEN);
     if (obj_web_search_panel) lv_obj_add_flag(obj_web_search_panel, LV_OBJ_FLAG_HIDDEN);
+    if (obj_web_form_panel)   lv_obj_add_flag(obj_web_form_panel, LV_OBJ_FLAG_HIDDEN);
+    if (obj_web_fill_panel)   lv_obj_add_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
     if (obj_web_home)         lv_obj_remove_flag(obj_web_home, LV_OBJ_FLAG_HIDDEN);
     lv_screen_load(scr_web);
     if (!g_web_poll_timer)
@@ -7850,7 +8116,7 @@ static void create_web_screen() {
     lv_obj_add_event_cb(btn_back, web_navigate_back, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *title = lv_label_create(scr_web);
-    lv_label_set_text(title, "Web Reader");
+    lv_label_set_text(title, "Web\nReader");
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
     meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 25);
@@ -7859,11 +8125,11 @@ static void create_web_screen() {
     lv_label_set_text(lbl_web_status, "");
     lv_obj_set_style_text_color(lbl_web_status, lv_palette_main(LV_PALETTE_GREY), 0);
     meck_set_font(lbl_web_status, &meck_montserrat_14, 0);
-    lv_obj_align(lbl_web_status, LV_ALIGN_TOP_LEFT, 120, 62);
+    lv_obj_align(lbl_web_status, LV_ALIGN_TOP_LEFT, 120, 100);
 
     lv_obj_t *scroll = lv_obj_create(scr_web);
-    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 95);
-    lv_obj_set_pos(scroll, 0, 95);
+    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 270);
+    lv_obj_set_pos(scroll, 0, 130);
     lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scroll, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
@@ -7917,6 +8183,21 @@ static void create_web_screen() {
     lv_obj_set_style_text_color(go_lbl, lv_color_black(), 0);
     meck_set_font(go_lbl, &meck_montserrat_16, 0);
     lv_obj_center(go_lbl);
+
+    // "Forms (N)" button (bottom-left, above Go to URL; shown after a fetch
+    // that found at least one form).
+    btn_web_forms = lv_button_create(scr_web);
+    lv_obj_set_size(btn_web_forms, 160, 55);
+    lv_obj_align(btn_web_forms, LV_ALIGN_BOTTOM_LEFT, 12, -75);
+    lv_obj_set_style_bg_color(btn_web_forms, lv_palette_main(LV_PALETTE_ORANGE), 0);
+    lv_obj_set_style_radius(btn_web_forms, 10, 0);
+    lv_obj_add_flag(btn_web_forms, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(btn_web_forms, on_web_forms_btn, LV_EVENT_CLICKED, NULL);
+    lbl_web_forms = lv_label_create(btn_web_forms);
+    lv_label_set_text(lbl_web_forms, "Forms (0)");
+    lv_obj_set_style_text_color(lbl_web_forms, lv_color_black(), 0);
+    meck_set_font(lbl_web_forms, &meck_montserrat_16, 0);
+    lv_obj_center(lbl_web_forms);
 
     // Transient confirmation toast (shown briefly when a bookmark is added).
     lbl_web_toast = lv_label_create(scr_web);
@@ -8102,8 +8383,100 @@ static void create_web_screen() {
     kb_web_search = lv_keyboard_create(obj_web_search_panel);
     meck_style_keyboard(kb_web_search);
     lv_keyboard_set_textarea(kb_web_search, ta_web_search);
-    lv_obj_add_event_cb(kb_web_search, on_web_search_kb_event, LV_EVENT_READY,  NULL);
-    lv_obj_add_event_cb(kb_web_search, on_web_search_kb_event, LV_EVENT_CANCEL, NULL);
+
+    // ---- Form selection panel (shown only when a page has >1 form) ----------
+    obj_web_form_panel = lv_obj_create(scr_web);
+    lv_obj_set_size(obj_web_form_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_web_form_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_web_form_panel, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(obj_web_form_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(obj_web_form_panel, 0, 0);
+    lv_obj_add_flag(obj_web_form_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_web_form_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_web_form_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *fp_title = lv_label_create(obj_web_form_panel);
+    lv_label_set_text(fp_title, "Forms");
+    lv_obj_set_style_text_color(fp_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(fp_title, &meck_montserrat_24, 0);
+    lv_obj_align(fp_title, LV_ALIGN_TOP_LEFT, 20, 25);
+
+    lv_obj_t *fp_close = lv_button_create(obj_web_form_panel);
+    lv_obj_set_size(fp_close, 110, 60);
+    lv_obj_align(fp_close, LV_ALIGN_TOP_RIGHT, -12, 18);
+    lv_obj_set_style_bg_color(fp_close, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(fp_close, 8, 0);
+    lv_obj_add_event_cb(fp_close, on_web_form_panel_close, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *fp_cl = lv_label_create(fp_close);
+    lv_label_set_text(fp_cl, LV_SYMBOL_CLOSE " Close");
+    lv_obj_set_style_text_color(fp_cl, lv_color_white(), 0);
+    meck_set_font(fp_cl, &meck_montserrat_16, 0);
+    lv_obj_center(fp_cl);
+
+    obj_web_form_scroll = lv_obj_create(obj_web_form_panel);
+    lv_obj_set_size(obj_web_form_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 100);
+    lv_obj_set_pos(obj_web_form_scroll, 0, 100);
+    lv_obj_set_style_bg_color(obj_web_form_scroll, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(obj_web_form_scroll, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(obj_web_form_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_web_form_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_web_form_scroll, LV_DIR_VER);
+
+    // ---- Form fill overlay (labelled textareas + shared Meck keyboard) ------
+    obj_web_fill_panel = lv_obj_create(scr_web);
+    lv_obj_set_size(obj_web_fill_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_web_fill_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_web_fill_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_web_fill_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_web_fill_panel, 0, 0);
+    lv_obj_add_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_web_fill_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_web_fill_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lbl_web_fill_title = lv_label_create(obj_web_fill_panel);
+    lv_label_set_text(lbl_web_fill_title, "Fill form");
+    lv_obj_set_style_text_color(lbl_web_fill_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(lbl_web_fill_title, &meck_montserrat_24, 0);
+    lv_obj_align(lbl_web_fill_title, LV_ALIGN_TOP_LEFT, 20, 25);
+
+    lv_obj_t *fill_close = lv_button_create(obj_web_fill_panel);
+    lv_obj_set_size(fill_close, 110, 60);
+    lv_obj_align(fill_close, LV_ALIGN_TOP_RIGHT, -12, 18);
+    lv_obj_set_style_bg_color(fill_close, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(fill_close, 8, 0);
+    lv_obj_add_event_cb(fill_close, on_web_fill_close, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *fill_cl = lv_label_create(fill_close);
+    lv_label_set_text(fill_cl, LV_SYMBOL_CLOSE " Close");
+    lv_obj_set_style_text_color(fill_cl, lv_color_white(), 0);
+    meck_set_font(fill_cl, &meck_montserrat_16, 0);
+    lv_obj_center(fill_cl);
+
+    obj_web_fill_scroll = lv_obj_create(obj_web_fill_panel);
+    lv_obj_set_size(obj_web_fill_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - MECK_KB_HEIGHT - 165);
+    lv_obj_set_pos(obj_web_fill_scroll, 0, 95);
+    lv_obj_set_style_bg_opa(obj_web_fill_scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(obj_web_fill_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_web_fill_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_web_fill_scroll, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(obj_web_fill_scroll, LV_SCROLLBAR_MODE_AUTO);
+
+    lv_obj_t *fill_submit = lv_button_create(obj_web_fill_panel);
+    lv_obj_set_size(fill_submit, SCREEN_WIDTH - 40, 55);
+    lv_obj_align(fill_submit, LV_ALIGN_BOTTOM_MID, 0, -(MECK_KB_HEIGHT + 8));
+    lv_obj_set_style_bg_color(fill_submit, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(fill_submit, 8, 0);
+    lv_obj_add_event_cb(fill_submit, on_web_fill_submit, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *fill_submit_lbl = lv_label_create(fill_submit);
+    lv_label_set_text(fill_submit_lbl, "Submit");
+    lv_obj_set_style_text_color(fill_submit_lbl, lv_color_black(), 0);
+    meck_set_font(fill_submit_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(fill_submit_lbl);
+
+    kb_web_fill = lv_keyboard_create(obj_web_fill_panel);
+    meck_style_keyboard(kb_web_fill);
+    lv_keyboard_set_textarea(kb_web_fill, NULL);
+    lv_obj_add_event_cb(kb_web_fill, on_web_fill_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_web_fill, on_web_fill_kb_event, LV_EVENT_CANCEL, NULL);
 }
 
 static void create_settings_wifi_screen() {

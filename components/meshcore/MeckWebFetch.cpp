@@ -27,7 +27,7 @@
 
 // Stage 1 capture cap. Enough to hold a small plain-http test page in full;
 // anything larger is consumed but not stored.
-static constexpr int WEBFETCH_RESP_CAP = 8192;
+static constexpr int WEBFETCH_RESP_CAP = 32768;
 
 // ---------------------------------------------------------------------------
 // URL parsing (plain http only)
@@ -36,13 +36,15 @@ static constexpr int WEBFETCH_RESP_CAP = 8192;
 // Splits "http://host[:port][/path]" into host, port, path. Returns false on
 // an https url (not handled in Stage 1) or if no host could be parsed.
 static bool parse_http_url(const char* url, char* host, int host_sz,
-                           int* port, char* path, int path_sz) {
+                           int* port, char* path, int path_sz, bool* is_https) {
     *port = 80;
+    *is_https = false;
     const char* p = url;
     if (strncmp(p, "https://", 8) == 0) {
-        return false;   // https is a later stage
-    }
-    if (strncmp(p, "http://", 7) == 0) {
+        *is_https = true;
+        *port = 443;
+        p += 8;
+    } else if (strncmp(p, "http://", 7) == 0) {
         p += 7;
     }
     int hi = 0;
@@ -268,8 +270,9 @@ bool MeckWebFetch::fetch(Cpp_Bus_Driver::Esp_At* at,
     char host[128];
     char path[256];
     int  port = 80;
-    if (!parse_http_url(url, host, sizeof(host), &port, path, sizeof(path))) {
-        printf("WebFetch: unsupported or unparseable url (https is a later stage): %s\n", url);
+    bool is_https = false;
+    if (!parse_http_url(url, host, sizeof(host), &port, path, sizeof(path), &is_https)) {
+        printf("WebFetch: unparseable url: %s\n", url);
         return false;
     }
     printf("WebFetch: fetching %s  (host=%s port=%d path=%s)\n", url, host, port, path);
@@ -331,16 +334,30 @@ bool MeckWebFetch::fetch(Cpp_Bus_Driver::Esp_At* at,
         printf("WebFetch: DNS resolve failed; trying hostname connect\n");
     }
 
-    // 4. Open the TCP connection, retrying a few times.
+    // 4. For HTTPS, configure the TLS client first: auth_mode 0 (no server
+    //    certificate verification -- no CA bundle on the C6 yet) and SNI set to
+    //    the hostname so the server serves the right cert. Then open with the
+    //    "SSL" socket type by hostname (SNI / cert hostname match) rather than
+    //    "TCP" by IP. The TLS handshake is slow, so SSL gets a longer ceiling.
+    if (is_https) {
+        cmd("AT+CIPSSLCCONF=0,0", 2000);
+        char sni[160];
+        snprintf(sni, sizeof(sni), "AT+CIPSSLCSNI=0,\"%s\"", host);
+        cmd(sni, 2000);
+    }
     char start[200];
-    snprintf(start, sizeof(start), "AT+CIPSTART=0,\"TCP\",\"%s\",%d", connect_host, port);
+    snprintf(start, sizeof(start), "AT+CIPSTART=0,\"%s\",\"%s\",%d",
+             is_https ? "SSL" : "TCP",
+             is_https ? host : connect_host,
+             port);
     bool connected = false;
+    int start_timeout = is_https ? 15000 : 8000;
     for (int attempt = 0; attempt < 3 && !connected; attempt++) {
         if (attempt > 0) {
             printf("WebFetch: CIPSTART retry %d/3\n", attempt);
             vTaskDelay(pdMS_TO_TICKS(400));
         }
-        connected = cmd(start, 8000);
+        connected = cmd(start, start_timeout);
     }
     if (!connected) { printf("WebFetch: CIPSTART failed\n"); teardown(); return false; }
 
@@ -392,7 +409,7 @@ bool MeckWebFetch::fetch(Cpp_Bus_Driver::Esp_At* at,
 
     unsigned long t0 = millis();
     unsigned long last_rx = t0;
-    while ((long)(millis() - t0) < 15000) {
+    while ((long)(millis() - t0) < 45000) {
         poll();
         drain();   // sets _recv_pending on notify, _closed on close, captures data
 
@@ -437,6 +454,29 @@ bool MeckWebFetch::fetch(Cpp_Bus_Driver::Esp_At* at,
             body_len = _resp_len - (i + 4);
             break;
         }
+    }
+
+    // --- TEMP diagnostic: dump the response head so we can see the status
+    //     line + headers (Content-Encoding / Content-Type / Content-Length)
+    //     and the first body bytes (clean HTML vs compressed). Remove once the
+    //     receive/parse path is sorted.
+    {
+        int hn = (_resp_len < 512) ? _resp_len : 512;
+        printf("WebFetch: --- response head (%d of %d captured) ---\n", hn, _resp_len);
+        for (int i = 0; i < hn; i++) {
+            unsigned char ch = (unsigned char)_resp[i];
+            if (ch == '\n')               putchar('\n');
+            else if (ch == '\r')          { /* CR dropped; LF shows breaks */ }
+            else if (ch >= 32 && ch < 127) putchar((int)ch);
+            else                           printf("\\x%02X", ch);
+        }
+        putchar('\n');
+        int bn = (body_len < 64) ? body_len : 64;
+        printf("WebFetch: --- body first %d bytes (hex; 1F 8B == gzip) ---\n", bn);
+        for (int i = 0; i < bn; i++) printf("%02X ", (unsigned char)body[i]);
+        putchar('\n');
+        printf("WebFetch: --- end response head ---\n");
+        fflush(stdout);
     }
 
     ParseResult res = {0, 0, 0};

@@ -120,6 +120,16 @@ int         meck_web_link_count(void);          // links found on the last page
 const char* meck_web_text(void);                // readable text of the last page
 const char* meck_web_link_url(int i);           // URL of link i (i < link_count)
 const char* meck_web_link_text(int i);          // display text of link i
+int         meck_web_form_count(void);                 // forms found on the last page
+const char* meck_web_form_action(int f);               // action URL of form f
+bool        meck_web_form_is_post(int f);              // true=POST, false=GET
+int         meck_web_form_field_count(int f);          // field count of form f (includes hidden)
+const char* meck_web_form_field_name(int f, int i);    // name attribute of field i in form f
+const char* meck_web_form_field_label(int f, int i);   // display label of field i in form f
+const char* meck_web_form_field_value(int f, int i);   // current/default value of field i in form f
+char        meck_web_form_field_type(int f, int i);    // 't' text 'p' password 'h' hidden 's' submit 'c' checkbox
+void        meck_web_form_set_field_value(int f, int i, const char* v); // set field i value before submit
+int         meck_web_form_build_get_url(int f, char* out, int out_cap); // build action?name=value GET URL
 void        meck_web_ack_result(void);          // clear the result-ready flag
 
 // Battery gauge -- main.cpp registers function pointers so the meshcore
