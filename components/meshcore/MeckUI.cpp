@@ -408,6 +408,8 @@ static lv_obj_t *g_tileview        = NULL;
 // Web reader browser screen (Stage 3)
 static lv_obj_t   *scr_web          = NULL;
 static lv_obj_t   *lbl_web_content  = NULL;
+#define WEB_RECOLOR_CAP 32768   // PSRAM recolor buffer (~2x the 16 KB text cap)
+static char       *g_web_recolor_buf = NULL;   // recolored copy of page text
 static lv_obj_t   *lbl_web_status   = NULL;
 static lv_timer_t *g_web_poll_timer = NULL;
 static char        g_web_current_url[256] = {0};
@@ -7509,6 +7511,54 @@ static void web_go(const char *url) {
     web_load_url(url);
 }
 
+// Insert LVGL recolor markup for display: headings (lines the parser wrapped as
+// "* ... *") in dark red, link "[N]" markers in darker royal blue. Literal '#'
+// in page text is escaped to "##" so it is not taken as a recolor command.
+static void web_recolor_text(const char *in, char *out, int cap) {
+    const char *HEAD = "#B22222 ";   // dark red (firebrick)
+    const char *LINK = "#808080 ";   // muted grey (de-emphasised marker, not a control)
+    int o = 0;
+    bool at_line_start = true;
+    int i = 0;
+    while (in[i] && o < cap - 1) {
+        // Heading: a line that begins "* " and ends " *".
+        if (at_line_start && in[i] == '*' && in[i + 1] == ' ') {
+            int j = i + 2;
+            while (in[j] && in[j] != '\n') j++;
+            if (j >= i + 4 && in[j - 1] == '*' && in[j - 2] == ' ') {
+                for (const char *p = HEAD; *p && o < cap - 1; p++) out[o++] = *p;
+                for (int k = i + 2; k < j - 2 && o < cap - 1; k++) {
+                    if (in[k] == '#') { if (o < cap - 1) out[o++] = '#'; if (o < cap - 1) out[o++] = '#'; }
+                    else out[o++] = in[k];
+                }
+                if (o < cap - 1) out[o++] = '#';
+                i = j;
+                at_line_start = false;
+                continue;
+            }
+        }
+        // Link marker: "[" digits "]".
+        if (in[i] == '[') {
+            int j = i + 1;
+            while (in[j] >= '0' && in[j] <= '9') j++;
+            if (j > i + 1 && in[j] == ']') {
+                for (const char *p = LINK; *p && o < cap - 1; p++) out[o++] = *p;
+                for (int k = i; k <= j && o < cap - 1; k++) out[o++] = in[k];
+                if (o < cap - 1) out[o++] = '#';
+                i = j + 1;
+                at_line_start = false;
+                continue;
+            }
+        }
+        char c = in[i];
+        if (c == '#') { if (o < cap - 1) out[o++] = '#'; if (o < cap - 1) out[o++] = '#'; }
+        else out[o++] = c;
+        at_line_start = (c == '\n');
+        i++;
+    }
+    out[o] = '\0';
+}
+
 static void web_poll_cb(lv_timer_t *t) {
     (void)t;
     // Deferred bookmark delete: run here, outside input-event dispatch, so we
@@ -7520,7 +7570,16 @@ static void web_poll_cb(lv_timer_t *t) {
     }
     if (!meck_web_result_ready()) return;
     if (meck_web_ok()) {
-        if (lbl_web_content) lv_label_set_text(lbl_web_content, meck_web_text());
+        if (lbl_web_content) {
+            if (g_web_recolor_buf) {
+                web_recolor_text(meck_web_text(), g_web_recolor_buf, WEB_RECOLOR_CAP);
+                lv_label_set_text(lbl_web_content, g_web_recolor_buf);
+            } else {
+                lv_label_set_text(lbl_web_content, meck_web_text());
+            }
+        }
+        if (lbl_web_content && meck_web_truncated())
+            lv_label_ins_text(lbl_web_content, 0, "Page too large to load fully.\n\n");
         int n = meck_web_link_count();
         if (lbl_web_status) {
             char st[80];
@@ -8143,6 +8202,11 @@ static void create_web_screen() {
     lv_obj_set_style_text_color(lbl_web_content, lv_color_white(), 0);
     meck_set_font(lbl_web_content, &meck_montserrat_18, 0);
     lv_label_set_text(lbl_web_content, "Loading...");
+    // Colour-code headings and link markers via the label's recolor markup.
+    // Buffer lives in PSRAM; only enable recolor if it allocated, so plain text
+    // still renders if it did not.
+    g_web_recolor_buf = (char *)heap_caps_malloc(WEB_RECOLOR_CAP, MALLOC_CAP_SPIRAM);
+    if (g_web_recolor_buf) lv_label_set_recolor(lbl_web_content, true);
 
     // Floating "Links (N)" button (shown after a fetch that found links).
     btn_web_links = lv_button_create(scr_web);

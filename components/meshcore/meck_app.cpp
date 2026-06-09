@@ -324,6 +324,7 @@ static volatile bool g_web_ok           = false;  // last fetch succeeded
 static int g_web_text_len   = 0;
 static int g_web_link_count = 0;
 static int g_web_form_count = 0;
+static volatile bool g_web_truncated = false;  // last fetch hit the byte cap (too large)
 
 extern "C" void meck_web_request(const char* url) {
     if (!url) return;
@@ -342,6 +343,7 @@ extern "C" void meck_web_fetch_test() {
 extern "C" bool meck_web_busy(void)         { return g_web_busy; }
 extern "C" bool meck_web_result_ready(void) { return g_web_result_ready; }
 extern "C" bool meck_web_ok(void)           { return g_web_ok; }
+extern "C" bool meck_web_truncated(void)    { return g_web_truncated; }
 extern "C" int  meck_web_link_count(void)   { return g_web_link_count; }
 extern "C" const char* meck_web_text(void)  { return g_web_text ? g_web_text : ""; }
 extern "C" const char* meck_web_link_url(int i) {
@@ -481,6 +483,7 @@ static void meck_apply_pending_webfetch() {
         g_web_text_len = 0;
         g_web_link_count = 0;
         g_web_form_count = 0;
+        g_web_truncated = false;
         g_web_result_ready = true;
         return;
     }
@@ -505,7 +508,7 @@ static void meck_apply_pending_webfetch() {
     }
 #endif
 
-    ParseResult pr = {0, 0, 0};
+    ParseResult pr = {0, 0, 0, false};
     MeckWebFetch fetcher;
     bool got = fetcher.fetch(g_c6_at,
                              g_node_prefs.wifi_ssid,
@@ -520,6 +523,7 @@ static void meck_apply_pending_webfetch() {
     g_web_text_len = pr.textLen;
     g_web_link_count = pr.linkCount;
     g_web_form_count = pr.formCount;
+    g_web_truncated = pr.truncated;
     g_web_busy = false;
     g_web_result_ready = true;
 }

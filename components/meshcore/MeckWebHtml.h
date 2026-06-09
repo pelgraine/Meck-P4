@@ -336,6 +336,7 @@ struct ParseResult {
   int textLen;
   int linkCount;
   int formCount;
+  bool truncated;   // set by the fetch layer: capture hit the byte cap (page too large)
 };
 
 inline ParseResult parseHtml(const char* html, int htmlLen,
@@ -343,7 +344,7 @@ inline ParseResult parseHtml(const char* html, int htmlLen,
                              WebLink* links, int maxLinks,
                              WebForm* forms, int maxForms,
                              const char* baseUrl) {
-  ParseResult result = {0, 0, 0};
+  ParseResult result = {0, 0, 0, false};
   int ti = 0;       // text output index
   int hi = 0;       // html input index
   int skipDepth = 0; // depth inside skip tags
@@ -689,6 +690,11 @@ inline ParseResult parseHtml(const char* html, int htmlLen,
               if (!fld.label[0]) {
                 // Use name as fallback label
                 strncpy(fld.label, fld.name, sizeof(fld.label)-1);
+                // Search-named fields display as "Search" (matches the fill modal)
+                if (!strcmp(fld.name, "q") || !strcmp(fld.name, "s") ||
+                    !strcmp(fld.name, "query") || !strcmp(fld.name, "search")) {
+                  strncpy(fld.label, "Search", sizeof(fld.label)-1);
+                }
               }
               f.textFieldCount++;
               // Emit field display

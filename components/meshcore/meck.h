@@ -116,6 +116,7 @@ void        meck_web_fetch_test(void);          // request the example.com test 
 bool        meck_web_busy(void);                // fetch in flight
 bool        meck_web_result_ready(void);        // fresh result available
 bool        meck_web_ok(void);                  // last fetch succeeded
+bool        meck_web_truncated(void);           // last fetch hit the byte cap (page too large)
 int         meck_web_link_count(void);          // links found on the last page
 const char* meck_web_text(void);                // readable text of the last page
 const char* meck_web_link_url(int i);           // URL of link i (i < link_count)

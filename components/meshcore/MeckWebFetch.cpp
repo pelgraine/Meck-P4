@@ -479,11 +479,12 @@ bool MeckWebFetch::fetch(Cpp_Bus_Driver::Esp_At* at,
         fflush(stdout);
     }
 
-    ParseResult res = {0, 0, 0};
+    ParseResult res = {0, 0, 0, false};
     if (textOut && textCap > 0) {
         res = parseHtml(body, body_len, textOut, textCap,
                         links, maxLinks, forms, maxForms, url);
     }
+    res.truncated = (_resp_len >= _resp_cap);   // capture hit the byte cap (page too large)
     if (out) *out = res;
     printf("WebFetch: parsed %d chars, %d links, %d forms\n",
            res.textLen, res.linkCount, res.formCount);
