@@ -32,6 +32,18 @@
 // ---- MeshCore radio adapter instance ----
 P4SX1262Radio radio_driver;
 
+// LilyGo's main.cpp defines `auto XL9535 = std::make_unique<...>(...)` at file
+// scope (external linkage). We reference it here to drive the SKY13453 RF
+// switch VCTL line, the same way target.cpp reaches SX1262.
+extern std::unique_ptr<Cpp_Bus_Driver::Xl95x5> XL9535;
+
+extern "C" void meck_set_antenna(uint8_t external) {
+    if (!XL9535) return;
+    XL9535->pin_write(XL9535_SKY13453_VCTL,
+                      external ? Cpp_Bus_Driver::Xl95x5::Value::LOW
+                               : Cpp_Bus_Driver::Xl95x5::Value::HIGH);
+}
+
 
 // ============================================================
 // meck_radio_attach()

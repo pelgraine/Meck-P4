@@ -655,6 +655,7 @@ extern "C" bool meck_app_init() {
     radio_set_params(g_node_prefs.freq, g_node_prefs.bw,
                      g_node_prefs.sf,   g_node_prefs.cr);
     radio_set_tx_power(g_node_prefs.tx_power_dbm);
+    meck_set_antenna(g_node_prefs.antenna);
     printf("meck_app_init: applied prefs to radio: "
            "%.3f MHz, BW=%.1f kHz, SF%u, CR=%u, TX=%d dBm\n",
            (double)g_node_prefs.freq, (double)g_node_prefs.bw,

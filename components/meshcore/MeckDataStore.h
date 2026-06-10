@@ -185,6 +185,13 @@ struct P4NodePrefs {
     // at the end for NVS compatibility (short reads tolerated by loadPrefs).
     char kbd_addr[18];
 
+    // SKY13453 LoRa antenna port. 0 = Internal (RF1, VCTL HIGH), 1 = External
+    // (RF2, VCTL LOW). Appending here is safe — loadPrefs memsets to zero and
+    // tolerates short reads, so existing NVS blobs come up as 0 = Internal,
+    // matching the boot default. Applied at boot in meck_app_init via
+    // meck_set_antenna(); the Settings toggle saves this and applies live.
+    uint8_t antenna;                 // 0=Internal (RF1), 1=External (RF2)
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -224,6 +231,7 @@ struct P4NodePrefs {
         save_drafts = 0;        // off by default
         orientation = 0;        // portrait by default
         memset(kbd_addr, 0, sizeof(kbd_addr));   // no keyboard paired yet
+        antenna = 0;            // Internal (RF1) by default
     }
 };
 

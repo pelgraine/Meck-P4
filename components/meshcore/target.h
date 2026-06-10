@@ -22,6 +22,12 @@ extern P4SX1262Radio radio_driver;
 
 void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr);
 void radio_set_tx_power(uint8_t dbm);
+
+// SKY13453 LoRa antenna selector (XL9535 IO1 / VCTL). external=0 selects the
+// internal antenna (RF1, VCTL HIGH); external=1 selects the external port
+// (RF2, VCTL LOW). Safe to call from the LVGL/UI task — matches the context
+// of LilyGo's existing RF-config callback that drives the same pin.
+extern "C" void meck_set_antenna(uint8_t external);
 uint32_t radio_get_rng_seed();
 
 // Internal accessor — UI code uses this to read messages, contacts, recent heard

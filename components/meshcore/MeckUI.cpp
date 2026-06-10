@@ -541,6 +541,7 @@ static lv_obj_t *lbl_set_font_scale  = NULL;
 static lv_obj_t *lbl_set_ble         = NULL;
 #endif
 static lv_obj_t *lbl_set_drafts      = NULL;
+static lv_obj_t *lbl_set_antenna     = NULL;
 static lv_obj_t *lbl_set_orientation = NULL;
 
 // WiFi settings sub-screen (Settings > WiFi Companion)
@@ -1445,6 +1446,7 @@ static void on_settings_font_scale_tap(lv_event_t *e);
 static void on_settings_ble_tap(lv_event_t *e);
 #endif
 static void on_settings_drafts_tap(lv_event_t *e);
+static void on_settings_antenna_tap(lv_event_t *e);
 static void on_settings_orientation_tap(lv_event_t *e);
 // Screen build / teardown / live orientation rebuild (orientation applies live).
 static void meck_ui_build_screens();
@@ -2615,6 +2617,10 @@ static void settings_update_labels() {
     if (lbl_set_drafts) {
         lv_label_set_text(lbl_set_drafts,
             prefs->save_drafts != 0 ? "On" : "Off");
+    }
+    if (lbl_set_antenna) {
+        lv_label_set_text(lbl_set_antenna,
+            prefs->antenna != 0 ? "External (RF2)" : "Internal (RF1)");
     }
     if (lbl_set_orientation) {
         lv_label_set_text(lbl_set_orientation,
@@ -8900,6 +8906,25 @@ static void on_settings_drafts_tap(lv_event_t *e) {
            prefs->save_drafts != 0 ? "On" : "Off");
 }
 
+static void on_settings_antenna_tap(lv_event_t *e) {
+    LV_UNUSED(e);
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    prefs->antenna = (prefs->antenna != 0) ? 0 : 1;
+    mesh->getDataStore()->savePrefs(*prefs);
+    meck_set_antenna(prefs->antenna);
+
+    if (lbl_set_antenna) {
+        lv_label_set_text(lbl_set_antenna,
+            prefs->antenna != 0 ? "External (RF2)" : "Internal (RF1)");
+    }
+    printf("Settings: antenna = %s\n",
+           prefs->antenna != 0 ? "External (RF2)" : "Internal (RF1)");
+}
+
 static void on_settings_orientation_tap(lv_event_t *e) {
     LV_UNUSED(e);
     Meck* mesh = meck_get_instance();
@@ -8942,6 +8967,13 @@ static void create_settings_screen() {
     lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
 
     int y = 5;
+
+    // Antenna selection (tap to toggle). 0 = Internal (RF1, VCTL HIGH),
+    // 1 = External (RF2, VCTL LOW). Persisted in prefs and applied live.
+    create_settings_row(scroll, "Antenna (tap to toggle)",
+        &lbl_set_antenna, on_settings_antenna_tap, y);
+    y += 65;
+
 #if MECK_BLE_ENABLED
     create_settings_row(scroll, "BLE Companion (tap to toggle)",
         &lbl_set_ble, on_settings_ble_tap, y);
