@@ -4696,6 +4696,7 @@ static void on_tone_picker_select(lv_event_t *e) {
             NotifSounds::buildTonePath(path, sizeof(path), files[fileIdx].c_str());
             meck_audio_codec_wake();
             meck_audio_play_file(path, 0);
+            meck_audio_resume();
         }
     }
 
@@ -10255,6 +10256,7 @@ static void on_voice_play_tap(lv_event_t *e) {
     meck_audio_set_volume_pct(70);
     meck_audio_codec_wake();
     meck_audio_play_file(g_voice_last_wav_path, 0);
+    meck_audio_resume();
     if (lbl_voice_status) {
         lv_label_set_text(lbl_voice_status, "Playing...");
         lv_obj_set_style_text_color(lbl_voice_status,
@@ -10702,6 +10704,7 @@ static void on_voice_inbox_row_tap(lv_event_t *e) {
     meck_audio_set_volume_pct(70);
     meck_audio_codec_wake();
     meck_audio_play_file(path, 0);
+    meck_audio_resume();
 }
 
 static void voice_inbox_refresh(void) {
@@ -13815,6 +13818,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                             g_notif_sounds.getSoundForChannel(i));
                         meck_audio_codec_wake();
                         meck_audio_play_file(path, 0);
+                        meck_audio_resume();
                     }
                 }
             }
