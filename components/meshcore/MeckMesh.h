@@ -4180,8 +4180,9 @@ protected:
     // we happened to be on the path of) are ignored. The result is
     // stashed in _trace_result + dirty flag for the UI to poll.
     //
-    // path_len from the base layer is encoded: bits[7:6]=hash size mode,
-    // bits[5:0]=hop count. final_snr is read off the packet (its _snr
+    // For TRACE, path_len from the base layer is the raw byte length of the
+    // hash list, and the hash size is carried in `flags` (path_sz = flags &
+    // 0x03, used as a shift). final_snr is read off the packet (its _snr
     // field is SNR×4 as set by the dispatcher during RX).
     void onTraceRecv(mesh::Packet* packet, uint32_t tag, uint32_t auth_code,
                      uint8_t flags, const uint8_t* path_snrs,
@@ -4189,9 +4190,11 @@ protected:
         if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
 
         if (_trace_pending_tag != 0 && tag == _trace_pending_tag) {
-            uint8_t hops      = path_len & 63;
-            uint8_t hash_size = (path_len >> 6) + 1;
+            // hash size comes from flags (path_sz shift), not path_len's top
+            // bits; hop count is the raw byte length divided by bytes-per-hop.
+            uint8_t hash_size = 1 << (flags & 0x03);
             if (hash_size > 2) hash_size = 2;  // Result struct holds up to 2 bytes/hop
+            uint8_t hops = hash_size ? (path_len / hash_size) : 0;
             if (hops > MECK_TRACE_MAX_HOPS) hops = MECK_TRACE_MAX_HOPS;
 
             _trace_result.tag           = tag;

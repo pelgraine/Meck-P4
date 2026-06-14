@@ -11914,7 +11914,7 @@ static void create_discover_screen() {
                         LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *rescan_lbl = lv_label_create(btn_rescan);
-    lv_label_set_text(rescan_lbl, LV_SYMBOL_REFRESH " Rescan");
+    lv_label_set_text(rescan_lbl, "Rescan");
     lv_obj_set_style_text_color(rescan_lbl, lv_color_white(), 0);
     meck_set_font(rescan_lbl, &meck_montserrat_18, 0);
     lv_obj_center(rescan_lbl);
@@ -11962,7 +11962,7 @@ static void refresh_discover_list() {
                      n, n == 1 ? "" : "s");
         } else if (n == 0) {
             snprintf(buf, sizeof(buf),
-                     "No repeaters heard yet — tap Rescan");
+                     "No repeaters heard yet tap Rescan");
         } else {
             snprintf(buf, sizeof(buf), "Scan done:  %d repeater%s found",
                      n, n == 1 ? "" : "s");
@@ -12475,7 +12475,7 @@ static void trace_render_result(const Meck::MeckTraceResult &r) {
     // i.e. the inbound leg of the last hop.
     char snr_buf[32];
     float final_snr_db = r.final_snr / 4.0f;
-    snprintf(snr_buf, sizeof(snr_buf), LV_SYMBOL_DOWN " SNR: %.2fdB",
+    snprintf(snr_buf, sizeof(snr_buf), "SNR: %.2fdB",
              final_snr_db);
     trace_add_result_row("•", self_name, "Started the trace",
                           snr_buf, r.final_snr, true);
@@ -12504,7 +12504,7 @@ static void trace_render_result(const Meck::MeckTraceResult &r) {
                  "Hop %d " LV_SYMBOL_BULLET " Repeated the packet", h + 1);
         char snrl[32];
         float hop_snr = r.path_snrs[h] / 4.0f;
-        snprintf(snrl, sizeof(snrl), LV_SYMBOL_DOWN " SNR: %.2fdB", hop_snr);
+        snprintf(snrl, sizeof(snrl), "SNR: %.2fdB", hop_snr);
         trace_add_result_row(badge, name_buf, subtitle, snrl,
                               r.path_snrs[h], true);
     }
@@ -12585,7 +12585,7 @@ static void on_trace_run_clicked(lv_event_t *e) {
     if (lbl_trace_status) {
         char st[80];
         snprintf(st, sizeof(st),
-            "Running trace: %d hop%s, %d-byte mode (tag 0x%08X)…",
+            "Running trace: %d hop%s, %d-byte mode (tag 0x%08X)",
             hops, hops == 1 ? "" : "s", bytes_per_hop, (unsigned)tag);
         lv_label_set_text(lbl_trace_status, st);
     }
