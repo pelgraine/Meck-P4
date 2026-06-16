@@ -1251,6 +1251,7 @@ static void refresh_channel_detail_labels();
 static void create_settings_channels_screen();
 static void create_channel_detail_screen();
 static void on_ch_detail_tone_tap(lv_event_t *e);
+static void on_dm_tone_tap(lv_event_t *e);
 static void on_tone_picker_select(lv_event_t *e);
 static void on_tone_picker_cancel(lv_event_t *e);
 static void refresh_tone_picker_list();
@@ -1463,7 +1464,6 @@ static void create_settings_keyboard_screen();
 #endif
 static void on_gps_tile_long_press(lv_event_t *e);
 
-static void on_ch_delete(lv_event_t *e);
 static void on_ch_add_tap(lv_event_t *e);
 static void on_ch_add_save(lv_event_t *e);
 static void on_ch_add_cancel(lv_event_t *e);
@@ -4460,8 +4460,8 @@ static void on_ch_detail_share_tap(lv_event_t *e) {
     // Scrollable contact list
     obj_ch_share_picker_scroll = lv_obj_create(obj_ch_share_picker_panel);
     lv_obj_set_size(obj_ch_share_picker_scroll,
-                    lv_obj_get_width(obj_ch_share_picker_panel) - 20,
-                    lv_obj_get_height(obj_ch_share_picker_panel) - 60);
+                    SCREEN_WIDTH - 60,
+                    SCREEN_HEIGHT - 140);
     lv_obj_align(obj_ch_share_picker_scroll, LV_ALIGN_BOTTOM_MID, 0, -5);
     lv_obj_set_style_bg_opa(obj_ch_share_picker_scroll, 0, 0);
     lv_obj_set_style_border_width(obj_ch_share_picker_scroll, 0, 0);
@@ -4477,7 +4477,7 @@ static void on_ch_detail_share_tap(lv_event_t *e) {
         if (contact.type != 1) continue;  // ADV_TYPE_CHAT only
 
         lv_obj_t *row = lv_button_create(obj_ch_share_picker_scroll);
-        lv_obj_set_size(row, lv_obj_get_width(obj_ch_share_picker_scroll) - 10, 50);
+        lv_obj_set_size(row, SCREEN_WIDTH - 70, 50);
         lv_obj_set_pos(row, 5, y);
         lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
         lv_obj_set_style_radius(row, 8, 0);
@@ -4674,6 +4674,16 @@ static void on_ch_detail_tone_tap(lv_event_t *e) {
     lv_obj_remove_flag(obj_tone_picker_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
+// DM notification tone: reuses the shared tone picker with the DM slot
+// (channel index 0xFF in NotifSounds). Opened from the DM inbox header.
+static void on_dm_tone_tap(lv_event_t *e) {
+    if (!obj_tone_picker_panel) return;
+    g_detail_channel_idx = 0xFF;  // 0xFF = DM slot
+    g_notif_sounds.scanSoundFiles();
+    refresh_tone_picker_list();
+    lv_obj_remove_flag(obj_tone_picker_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void on_tone_picker_cancel(lv_event_t *e) {
     if (obj_tone_picker_panel) lv_obj_add_flag(obj_tone_picker_panel, LV_OBJ_FLAG_HIDDEN);
 }
@@ -4700,7 +4710,8 @@ static void on_tone_picker_select(lv_event_t *e) {
         }
     }
 
-    refresh_channel_detail_labels();
+    // DM slot (0xFF) has no channel-detail label to refresh.
+    if (g_detail_channel_idx != 0xFF) refresh_channel_detail_labels();
     if (obj_tone_picker_panel) lv_obj_add_flag(obj_tone_picker_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -5365,26 +5376,6 @@ static void goto_contacts_from_detail(lv_event_t *e) {
 // ============================================================================
 // Channel handlers (lifted from old:683-748)
 // ============================================================================
-
-static void on_ch_delete(lv_event_t *e) {
-    intptr_t idx = (intptr_t)lv_event_get_user_data(e);
-    Meck* mesh = meck_get_instance();
-    if (!mesh || idx < 0 || idx >= mesh->getActiveChannelCount()) return;
-
-    if (mesh->getActiveChannelCount() <= 1) {
-        printf("Channels: cannot delete last channel\n");
-        return;
-    }
-
-    ChannelDetails ch;
-    char name[P4_CHANNEL_NAME_MAX] = {};
-    if (mesh->getChannel((uint8_t)idx, ch)) {
-        strncpy(name, ch.name, sizeof(name) - 1);
-    }
-    mesh->deleteChannel((uint8_t)idx);
-    printf("Channels: deleted '%s' (idx %d)\n", name, (int)idx);
-    refresh_channel_picker();
-}
 
 static void on_ch_add_save(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
@@ -7054,14 +7045,6 @@ static void on_settings_wifi_toggle_tap(lv_event_t *e) {
            prefs->wifi_enabled != 0 ? "On" : "Off");
 }
 
-// Stage 1 web reader plumbing test. Queues a one-shot fetch of a hardcoded
-// plain-http page; the fetch runs on meck_task (see meck_web_fetch_test).
-// Watch the debug log for the "WebFetch:" lines and the raw response.
-static void on_settings_wifi_fetchtest_tap(lv_event_t *e) {
-    meck_web_fetch_test();
-    printf("Settings: web fetch test queued\n");
-}
-
 static void on_wifi_edit_save(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!mesh) return;
@@ -8620,12 +8603,6 @@ static void create_settings_wifi_screen() {
         &lbl_set_wifi_ip, NULL, y);
     y += 65;
 
-    // Stage 1: temporary web reader plumbing test. Fetches a hardcoded
-    // plain-http page; watch the debug log for the result.
-    create_settings_row(scroll, "Fetch test page (Stage 1)",
-        NULL, on_settings_wifi_fetchtest_tap, y);
-    y += 65;
-
     // Hint text
     lv_obj_t *hint = lv_label_create(scroll);
     lv_label_set_text(hint, "Connect companion app to IP:5000\n"
@@ -9776,7 +9753,9 @@ static void create_channel_detail_screen() {
                         LV_EVENT_LONG_PRESSED, NULL);
 
     // ---- Tone picker overlay ----
-    obj_tone_picker_panel = lv_obj_create(scr_channel_detail);
+    // Parented to the top layer (not this screen) so it can also be opened
+    // from the DM inbox for the DM notification tone.
+    obj_tone_picker_panel = lv_obj_create(lv_layer_top());
     lv_obj_set_size(obj_tone_picker_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
     lv_obj_set_pos(obj_tone_picker_panel, 0, 0);
     lv_obj_set_style_bg_color(obj_tone_picker_panel, lv_color_make(0, 0, 0), 0);
@@ -9966,22 +9945,11 @@ static void refresh_channel_picker() {
         meck_set_font(lbl_name, &meck_montserrat_22, 0);
         lv_obj_align(lbl_name, LV_ALIGN_LEFT_MID, 10, 0);
 
-        lv_obj_t *btn_del = lv_button_create(btn);
-        lv_obj_set_size(btn_del, 40, 40);
-        lv_obj_align(btn_del, LV_ALIGN_RIGHT_MID, -5, 0);
-        lv_obj_set_style_bg_color(btn_del, lv_color_make(80, 20, 20), 0);
-        lv_obj_set_style_radius(btn_del, 8, 0);
-        lv_obj_add_event_cb(btn_del, on_ch_delete, LV_EVENT_CLICKED, (void*)(intptr_t)i);
-        lv_obj_t *x_lbl = lv_label_create(btn_del);
-        lv_label_set_text(x_lbl, LV_SYMBOL_CLOSE);
-        lv_obj_set_style_text_color(x_lbl, lv_color_white(), 0);
-        lv_obj_center(x_lbl);
-
         lbl_picker_unread[i] = lv_label_create(btn);
         lv_label_set_text(lbl_picker_unread[i], "");
         lv_obj_set_style_text_color(lbl_picker_unread[i], lv_color_make(100, 255, 100), 0);
         meck_set_font(lbl_picker_unread[i], &meck_montserrat_18, 0);
-        lv_obj_align(lbl_picker_unread[i], LV_ALIGN_RIGHT_MID, -55, 0);
+        lv_obj_align(lbl_picker_unread[i], LV_ALIGN_RIGHT_MID, -10, 0);
 
         y += 85;
     }
@@ -11299,6 +11267,20 @@ static void create_dm_inbox_screen() {
     lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_CYAN), 0);
     meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Notification tone button — opens the shared tone picker for the DM
+    // slot (0xFF). Placed left of the battery/clock cluster in the header.
+    lv_obj_t *btn_dm_tone = lv_button_create(scr_dm_inbox);
+    lv_obj_set_size(btn_dm_tone, 52, 44);
+    lv_obj_align(btn_dm_tone, LV_ALIGN_TOP_RIGHT, -160, 12);
+    lv_obj_set_style_bg_color(btn_dm_tone, lv_color_make(30, 40, 55), 0);
+    lv_obj_set_style_radius(btn_dm_tone, 8, 0);
+    lv_obj_t *dm_tone_lbl = lv_label_create(btn_dm_tone);
+    lv_label_set_text(dm_tone_lbl, LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_color(dm_tone_lbl, lv_palette_main(LV_PALETTE_CYAN), 0);
+    meck_set_font(dm_tone_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(dm_tone_lbl);
+    lv_obj_add_event_cb(btn_dm_tone, on_dm_tone_tap, LV_EVENT_CLICKED, NULL);
 
     obj_dm_inbox_scroll = lv_obj_create(scr_dm_inbox);
     lv_obj_set_size(obj_dm_inbox_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 100);
@@ -13831,6 +13813,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // counts. Gated on the label handle existing so it short-circuits
     // before the picker has been built for the first time.
     if (lbl_picker_dm_unread) {
+        static int prev_dm_unread = 0;
         int dm_unread = dm_total_unread();
         if (dm_unread > 0) {
             char tmp[16];
@@ -13839,6 +13822,20 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         } else {
             lv_label_set_text(lbl_picker_dm_unread, "");
         }
+        // Tone trigger: DM unread count just increased
+        if (dm_unread > prev_dm_unread && g_notif_sounds.hasSoundForChannel(0xFF)) {
+            MeckAudioState audio_st = meck_audio_get_state();
+            if (audio_st != MECK_AUDIO_STATE_PLAYING &&
+                audio_st != MECK_AUDIO_STATE_PAUSED) {
+                char path[64];
+                NotifSounds::buildTonePath(path, sizeof(path),
+                    g_notif_sounds.getSoundForChannel(0xFF));
+                meck_audio_codec_wake();
+                meck_audio_play_file(path, 0);
+                meck_audio_resume();
+            }
+        }
+        prev_dm_unread = dm_unread;
     }
 
     // GPS tile: refresh detail block at 500ms tick.

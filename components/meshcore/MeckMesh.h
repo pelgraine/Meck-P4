@@ -1686,7 +1686,8 @@ public:
 
     // Build the [MECK:CH] share message for a channel and send it as a DM.
     // Returns true if the DM was queued successfully.
-    bool shareChannelViaDM(int channel_idx, int contact_idx) {
+    bool shareChannelViaDM(int channel_idx, int contact_idx,
+                           uint32_t* out_expected_ack = nullptr) {
         ChannelDetails ch;
         if (!getChannel(channel_idx, ch) || ch.name[0] == '\0') return false;
 
@@ -1700,7 +1701,7 @@ public:
         snprintf(shareMsg, sizeof(shareMsg), "%s%s|%s",
                  MECK_CH_PREFIX, ch.name, hexSecret);
 
-        return sendDirectMessage(contact_idx, shareMsg);
+        return sendDirectMessage(contact_idx, shareMsg, out_expected_ack);
     }
 
     // Delete a channel by index, compact remaining channels down.
