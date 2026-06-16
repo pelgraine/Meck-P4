@@ -628,6 +628,17 @@ static lv_obj_t *obj_ch_share_picker_panel  = NULL;
 static lv_obj_t *obj_ch_share_picker_scroll = NULL;
 static int g_share_channel_idx              = -1;
 
+// Channel-share delivery feedback. After a share DM is sent we poll
+// lookupDMAckStatus() in ui_update_timer_cb: on ack -> "Sent!", on timeout
+// retry up to 3 attempts, then "Failed". Status shows in a top-layer label.
+static lv_obj_t   *g_share_status_lbl     = NULL;
+static lv_timer_t *g_share_dismiss_timer  = NULL;
+static bool        g_share_active         = false;
+static int         g_share_st_channel     = -1;
+static int         g_share_st_contact     = -1;
+static uint32_t    g_share_st_ack         = 0;
+static int         g_share_st_attempt     = 0;
+
 // Voice screens — landing (Inbox/Record picker), inbox, and record
 static lv_obj_t *scr_voice_landing          = NULL;  // Inbox / Record picker
 static lv_obj_t *btn_voice_inbox            = NULL;  // Inbox button on landing
@@ -4392,23 +4403,58 @@ static void on_ch_share_picker_cancel(lv_event_t *e) {
     }
 }
 
+// Channel-share status label (top layer so it survives the picker closing).
+static void share_status_dismiss_cb(lv_timer_t *t) {
+    (void)t;
+    if (g_share_status_lbl) lv_obj_add_flag(g_share_status_lbl, LV_OBJ_FLAG_HIDDEN);
+    if (g_share_dismiss_timer) { lv_timer_delete(g_share_dismiss_timer); g_share_dismiss_timer = NULL; }
+}
+
+static void share_status_show(const char* text) {
+    if (!g_share_status_lbl) {
+        g_share_status_lbl = lv_label_create(lv_layer_top());
+        lv_obj_set_style_bg_color(g_share_status_lbl, lv_color_make(20, 30, 45), 0);
+        lv_obj_set_style_bg_opa(g_share_status_lbl, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(g_share_status_lbl, lv_color_white(), 0);
+        lv_obj_set_style_pad_all(g_share_status_lbl, 12, 0);
+        lv_obj_set_style_radius(g_share_status_lbl, 8, 0);
+        lv_obj_set_style_text_align(g_share_status_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        meck_set_font(g_share_status_lbl, &meck_montserrat_18, 0);
+    }
+    if (g_share_dismiss_timer) { lv_timer_delete(g_share_dismiss_timer); g_share_dismiss_timer = NULL; }
+    lv_label_set_text(g_share_status_lbl, text);
+    lv_obj_align(g_share_status_lbl, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_remove_flag(g_share_status_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_share_status_lbl);
+}
+
+// Terminal state (Sent!/Failed): show text, stop polling, auto-hide after 4s.
+static void share_status_finish(const char* text) {
+    share_status_show(text);
+    g_share_active = false;
+    g_share_dismiss_timer = lv_timer_create(share_status_dismiss_cb, 4000, NULL);
+}
+
 static void on_ch_share_picker_select(lv_event_t *e) {
     int contact_idx = (int)(intptr_t)lv_event_get_user_data(e);
     Meck *mesh = meck_get_instance();
     if (!mesh || g_share_channel_idx < 0) return;
 
-    if (mesh->shareChannelViaDM(g_share_channel_idx, contact_idx)) {
-        ContactInfo ci;
-        if (mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
-            printf("Channels: shared channel %d with %s\n",
-                   g_share_channel_idx, ci.name);
-        }
-    } else {
-        printf("Channels: share failed (channel %d, contact %d)\n",
-               g_share_channel_idx, contact_idx);
-    }
-
+    int ch = g_share_channel_idx;
+    uint32_t ack = 0;
+    bool ok = mesh->shareChannelViaDM(ch, contact_idx, &ack);
     on_ch_share_picker_cancel(NULL);
+
+    if (ok && ack) {
+        g_share_st_channel = ch;
+        g_share_st_contact = contact_idx;
+        g_share_st_ack     = ack;
+        g_share_st_attempt = 1;
+        g_share_active     = true;
+        share_status_show("Share Channel Sending (Attempt 1/3)");
+    } else {
+        share_status_finish("Share failed to send");
+    }
 }
 
 static void on_ch_detail_share_tap(lv_event_t *e) {
@@ -8723,6 +8769,42 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
     // XL9535 INT line is planned for a later stage; until then a deliberate
     // BOOT press is the only way out of off-state.
 
+    // Boot button toggles the screen on demand. The 4 Hz poll debounces and
+    // edge detection (the press fires once, not every tick it's held) means
+    // the same press that turns the screen off can't immediately wake it on
+    // the next tick. Handled before the auto-off gate so it works even when
+    // auto-off is disabled (screen_off_minutes == 0).
+    //
+    // wifi_dimmed is the WiFi-companion "soft off" (brightness 0, no DISPOFF).
+    // It lives at function scope so both the toggle and the inactivity path
+    // see it, since meck_screen_is_off() only reflects the real DISPOFF state.
+    static bool wifi_dimmed = false;
+    static bool s_boot_was_pressed = false;
+    bool boot_now = meck_boot_button_pressed();
+    bool boot_edge = boot_now && !s_boot_was_pressed;
+    s_boot_was_pressed = boot_now;
+
+    if (prefs && boot_edge) {
+        if (meck_screen_is_off() || wifi_dimmed) {
+            // Off or WiFi-dimmed → wake.
+            if (meck_screen_is_off()) meck_screen_on();
+            meck_screen_set_brightness(prefs->screen_brightness ? prefs->screen_brightness : 200);
+            wifi_dimmed = false;
+            lv_display_trigger_activity(NULL);
+            printf("Screen: boot button woke screen\n");
+        } else if (meck_wifi_is_enabled()) {
+            // WiFi companion active: full sleep kills the SDIO link, so blank
+            // by dropping brightness to 0 rather than issuing DISPOFF.
+            meck_screen_set_brightness(0);
+            wifi_dimmed = true;
+            printf("Screen: boot button blanked display (WiFi active)\n");
+        } else {
+            printf("Screen: boot button turned screen off\n");
+            meck_screen_off();
+        }
+        return;
+    }
+
     // Auto-off disabled — if the screen happens to be off (because the
     // setting changed mid-sleep), wake it back up. Otherwise nothing to do.
     if (!prefs || prefs->screen_off_minutes == 0) {
@@ -8738,7 +8820,6 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
 
     if (!meck_screen_is_off()) {
         // Sleep path: inactivity-based.
-        static bool wifi_dimmed = false;
         if (inactive_ms >= threshold_ms) {
             // When WiFi companion is active, entering light sleep kills
             // the SDIO bus (and thus the TCP connection). Instead of full
@@ -8748,15 +8829,6 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
                     meck_screen_set_brightness(0);
                     wifi_dimmed = true;
                     printf("Screen: WiFi active, dimming display (no sleep)\n");
-                }
-                // Boot button wakes from wifi-dim (touch indev still runs
-                // but lv_display_get_inactive_time won't drop below threshold
-                // unless there's genuine touch input).
-                if (wifi_dimmed && meck_boot_button_pressed()) {
-                    meck_screen_set_brightness(prefs->screen_brightness ? prefs->screen_brightness : 200);
-                    wifi_dimmed = false;
-                    lv_display_trigger_activity(NULL);
-                    printf("Screen: woke from wifi-dim via boot button\n");
                 }
             } else {
                 printf("Screen: entering off-state after %u min idle\n",
@@ -8769,20 +8841,6 @@ static void screen_idle_timer_cb(lv_timer_t *t) {
                 meck_screen_set_brightness(prefs->screen_brightness);
                 wifi_dimmed = false;
             }
-        }
-    } else {
-        // Wake path (Stage 1): boot button only. lv_display_get_inactive_time
-        // won't update while off because the touch indev read timer is
-        // paused, so we can't rely on it here.
-        if (meck_boot_button_pressed()) {
-            printf("Screen: woke via boot button\n");
-            meck_screen_on();
-            // Brightness restore lives here (not in meck_screen_on) because
-            // main.cpp can't reference Meck/P4NodePrefs without pulling in
-            // headers that conflict with LilyGo's strict-flag build.
-            uint8_t b = prefs->screen_brightness ? prefs->screen_brightness : 200;
-            meck_screen_set_brightness(b);
-            lv_display_trigger_activity(NULL);
         }
     }
 }
@@ -11020,6 +11078,12 @@ static void create_channel_picker_screen() {
     lock_screen_scroll(scr_channel_picker);
     lv_obj_set_style_bg_color(scr_channel_picker, lv_color_black(), 0);
     screen_attach_clock_battery(scr_channel_picker, 3, &meck_montserrat_24, 30);
+    // Move clock under the battery so the "Channels" title doesn't overlap it
+    // (mirrors the DM inbox / message thread / WiFi / debug screens).
+    if (lbl_screen_clock[3]) {
+        lv_obj_set_style_text_align(lbl_screen_clock[3], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(lbl_screen_clock[3], LV_ALIGN_TOP_RIGHT, -15, 55);
+    }
 
     create_back_button(scr_channel_picker);
 
@@ -11549,9 +11613,9 @@ static void create_contacts_screen() {
     lv_obj_set_style_radius(obj_contacts_scroll, 8, 0);
     lv_obj_set_style_pad_all(obj_contacts_scroll, 5, 0);
     lv_obj_set_scroll_dir(obj_contacts_scroll, LV_DIR_VER);
-    lv_obj_set_flex_flow(obj_contacts_scroll, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(obj_contacts_scroll,
-        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+    // Rows are manually positioned in refresh_contacts_list rather than
+    // flex-laid-out: with ~700 contacts the per-row flex relayout stalled the
+    // LVGL task long enough to trip the task watchdog on every Contacts open.
 
     // Swipe left/right anywhere on the screen cycles filters.
     lv_obj_add_event_cb(scr_contacts, on_contacts_screen_gesture,
@@ -11694,6 +11758,7 @@ static void refresh_contacts_list() {
         });
 
     int shown = 0;
+    int row_y = 0;
     for (int s = 0; s < sort_count; s++) {
         int i = s_sort_buf[s].idx;
         ContactInfo ci;
@@ -11703,6 +11768,8 @@ static void refresh_contacts_list() {
 
         lv_obj_t *row = lv_button_create(obj_contacts_scroll);
         lv_obj_set_size(row, SCREEN_WIDTH - 40, 60);
+        lv_obj_set_pos(row, 5, row_y);
+        row_y += 65;
         lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
         lv_obj_set_style_radius(row, 8, 0);
         lv_obj_set_style_border_width(row, 1, 0);
@@ -13156,6 +13223,42 @@ static void goto_contacts(lv_event_t *e) {
 
 static void ui_update_timer_cb(lv_timer_t *t) {
     Meck* mesh = meck_get_instance();
+
+    // Channel-share delivery feedback: poll ack status, retry up to 3 times.
+    if (g_share_active && mesh) {
+        bool acked = false;
+        unsigned long sent = 0;
+        uint32_t timeout = 0;
+        if (mesh->lookupDMAckStatus(g_share_st_ack, acked, sent, timeout)) {
+            if (acked) {
+                share_status_finish("Sent!");
+            } else if (millis() - sent > timeout) {
+                if (g_share_st_attempt < 3) {
+                    g_share_st_attempt++;
+                    uint32_t ack2 = 0;
+                    if (mesh->shareChannelViaDM(g_share_st_channel,
+                                                g_share_st_contact, &ack2) && ack2) {
+                        g_share_st_ack = ack2;
+                        char sbuf[48];
+                        snprintf(sbuf, sizeof(sbuf),
+                            "Share Channel Sending (Attempt %d/3)", g_share_st_attempt);
+                        share_status_show(sbuf);
+                    } else {
+                        share_status_finish("Share failed to send");
+                    }
+                } else {
+                    share_status_finish("Failed");
+                }
+            }
+            // else: still within the timeout window, keep waiting
+        } else {
+            // ack entry evicted from the circular table before we saw a
+            // result; stop polling and let the status auto-dismiss.
+            g_share_active = false;
+            if (!g_share_dismiss_timer)
+                g_share_dismiss_timer = lv_timer_create(share_status_dismiss_cb, 4000, NULL);
+        }
+    }
 
     // Drain anything queued by onMessageRecv since the last tick. This
     // runs on the LVGL task, so the callback invoked inside is safe to
