@@ -110,6 +110,7 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DMAX_CONTACTS=2000
     -DHAVE_CODEC2=1
     -DMECK_CARDKB=1
+    -DMECK_RX_DUTY_CYCLE=1
 )
 
 # Capture the actual UTC build epoch and inject it into the firmware so

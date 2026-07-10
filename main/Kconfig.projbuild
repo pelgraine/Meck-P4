@@ -167,6 +167,9 @@ menu "Example Configuration"
             config EXAMPLE_BUILD_LVGL_9_UI
                 bool "lvgl_9_ui"
                 depends on BOARD_TYPE_T_DISPLAY_P4 || BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+            config EXAMPLE_BUILD_CMDMODE_TEST
+                bool "cmdmode_test (RM69A10 command-mode/GRAM probe)"
+                depends on BOARD_TYPE_T_DISPLAY_P4 || BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
             config EXAMPLE_BUILD_PCF8563
                 bool "pcf8563"
                 depends on BOARD_TYPE_T_DISPLAY_P4

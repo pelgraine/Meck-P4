@@ -60,9 +60,15 @@ public:
         // Radio hardware init is done in radio_init() (target.cpp)
         // This is called after that, so radio should be in RX mode already
         _inReceiveMode = true;
+#if defined(MECK_RX_DUTY_CYCLE)
+        computeDutyPeriods();
+        _dutyState = DutyState::LISTEN;
+        _dutyWindowStartUs = esp_timer_get_time();
+#endif
     }
 
     int recvRaw(uint8_t* bytes, int sz) override {
+#if !defined(MECK_RX_DUTY_CYCLE)
         // Periodic noise-floor sample. This rides the existing recvRaw()
         // call cadence (Dispatcher loop, SPI lock already held). Fires at
         // most every 2 s — the same rate MeshCore uses for its calibrate
@@ -73,8 +79,17 @@ public:
             _lastFloorSampleUs = now_us;
             sampleNoiseFloor();
         }
+#endif
 
         if (!_inReceiveMode) return 0;
+
+#if defined(MECK_RX_DUTY_CYCLE)
+        // Advance the listen/sleep state machine. While the chip is in a
+        // sleep window there is nothing to read, and we must not touch it
+        // over SPI (that would wake it), so bail before any register access.
+        dutyCycleTick();
+        if (_dutyState == DutyState::ASLEEP) return 0;
+#endif
 
         // Poll IRQ status register directly via SPI (DIO1 via XL9535 unreliable)
         uint16_t irq = SX1262->get_irq_flag();
@@ -163,6 +178,14 @@ public:
 
     bool startSendRaw(const uint8_t* bytes, int len) override {
         _inReceiveMode = false;
+#if defined(MECK_RX_DUTY_CYCLE)
+        // If a duty-cycle sleep window is in progress the chip is asleep;
+        // wake it to standby before configuring TX.
+        if (_dutyState == DutyState::ASLEEP) {
+            SX1262->set_standby(Cpp_Bus_Driver::Sx126x::Stdby_Config::STDBY_RC);
+            _dutyState = DutyState::LISTEN;
+        }
+#endif
         printf("P4SX1262Radio::startSendRaw: %d bytes\n", len);
 
         // Configure for TX
@@ -200,6 +223,11 @@ public:
         SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TX_DONE);
         resetToRx();
         _inReceiveMode = true;
+#if defined(MECK_RX_DUTY_CYCLE)
+        // Resume the duty cycle with a fresh listen window.
+        _dutyState = DutyState::LISTEN;
+        _dutyWindowStartUs = esp_timer_get_time();
+#endif
     }
 
     bool isInRecvMode() const override {
@@ -264,6 +292,9 @@ public:
         _currentBW = bw;
         _currentSF = sf;
         _currentCR = cr;
+#if defined(MECK_RX_DUTY_CYCLE)
+        computeDutyPeriods();
+#endif
     }
 
 private:
@@ -284,6 +315,82 @@ private:
     // throttles sampling to ~2 s intervals.
     int      _noiseFloor;
     uint64_t _lastFloorSampleUs;
+
+#if defined(MECK_RX_DUTY_CYCLE)
+    // ---- MCU-driven RX duty cycle (approach B) ----
+    // The MCU cycles the SX1262 between a short RX listen window and a
+    // warm-start sleep window, both timed here over SPI. Windows are sized
+    // from the preamble airtime so any incoming preamble overlaps a listen
+    // window long enough to be detected, and the cycle never sleeps while a
+    // packet is mid-reception (BUSY high). If the preamble is too short to
+    // carve out a safe sleep window at the current SF/BW, duty cycling is
+    // disabled for that config and the radio stays in continuous RX (same
+    // fallback behaviour as RadioLib's startReceiveDutyCycleAuto).
+    //
+    // This relies on the mesh layer issuing no SPI transaction to the radio
+    // during a sleep window (an SPI access wakes a warm-start sleep):
+    // recvRaw() bails before any register access when ASLEEP, isReceiving()
+    // reads only the BUSY GPIO, noise-floor sampling is compiled out above,
+    // and TX wakes the chip first (see startSendRaw).
+    enum class DutyState { LISTEN, ASLEEP };
+    DutyState _dutyState = DutyState::LISTEN;
+    uint64_t  _dutyWindowStartUs = 0;
+    uint32_t  _rxWindowUs = 0;
+    uint32_t  _sleepWindowUs = 0;   // 0 => duty cycling disabled for current params
+
+    // Listen window length, in preamble symbols. Must cover the chip's
+    // preamble-detection time. Larger is safer against MCU timing jitter,
+    // smaller yields more sleep. The sleep window is the remaining preamble
+    // airtime after this and the jitter margin.
+    static constexpr uint32_t DUTY_RX_SYMBOLS = 16;
+    // Subtracted from the sleep window to absorb MCU scheduling and SPI /
+    // BUSY-assert latency, so a preamble cannot slip entirely through a
+    // sleep gap undetected.
+    static constexpr uint32_t DUTY_JITTER_MARGIN_US = 4000;
+
+    // Recompute listen/sleep windows from the current LoRa params. Preamble
+    // symbol count matches radio_set_params() in target.cpp.
+    void computeDutyPeriods() {
+        if (_currentBW <= 0.0f || _currentSF == 0) { _rxWindowUs = 0; _sleepWindowUs = 0; return; }
+        float bw_hz = _currentBW * 1000.0f;
+        float symbol_us = (float)(1UL << _currentSF) * 1e6f / bw_hz;
+        uint32_t preamble_symbols = (_currentSF <= 8) ? 32u : 16u;
+        uint32_t preamble_air_us  = (uint32_t)(preamble_symbols * symbol_us);
+        uint32_t rx_us            = (uint32_t)(DUTY_RX_SYMBOLS * symbol_us);
+        if (rx_us + DUTY_JITTER_MARGIN_US >= preamble_air_us) {
+            _rxWindowUs = 0;
+            _sleepWindowUs = 0;   // preamble too short to sleep safely: continuous RX
+            return;
+        }
+        _rxWindowUs = rx_us;
+        _sleepWindowUs = preamble_air_us - rx_us - DUTY_JITTER_MARGIN_US;
+    }
+
+    // Advance the listen/sleep state machine. Called at the top of recvRaw()
+    // while in receive mode.
+    void dutyCycleTick() {
+        if (_sleepWindowUs == 0) return;   // disabled for current params
+        uint64_t now = esp_timer_get_time();
+        if (_dutyState == DutyState::LISTEN) {
+            if (isReceiving()) {           // packet in flight (BUSY high): hold RX
+                _dutyWindowStartUs = now;
+                return;
+            }
+            if (now - _dutyWindowStartUs >= _rxWindowUs) {
+                SX1262->set_sleep(Cpp_Bus_Driver::Sx126x::Sleep_Mode::WARM_START);
+                _dutyState = DutyState::ASLEEP;
+                _dutyWindowStartUs = now;
+            }
+        } else {  // ASLEEP
+            if (now - _dutyWindowStartUs >= _sleepWindowUs) {
+                SX1262->set_standby(Cpp_Bus_Driver::Sx126x::Stdby_Config::STDBY_RC);
+                resetToRx();               // re-arm RX + RX_DONE IRQ (warm start retains LoRa config)
+                _dutyState = DutyState::LISTEN;
+                _dutyWindowStartUs = now;
+            }
+        }
+    }
+#endif
 
     void resetToRx() {
         SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::RX);

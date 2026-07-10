@@ -466,6 +466,10 @@ static lv_obj_t *lbl_home_audio[MECK_HOME_PAGE_COUNT]   = {};
 static int clock_ticks   = 120;
 static int battery_ticks = 600;
 
+// Battery header display mode: false = percentage, true = voltage. Toggled
+// by tapping any battery label; applies to every mirrored copy.
+static bool g_batt_show_voltage = false;
+
 // Clock + battery labels for every non-home screen and modal. Slot 0..7
 // reserved for full screens (Settings, Settings/Contacts, Radio Picker,
 // Channel Picker, Messages, Contacts, Contact Detail, Discover); slot
@@ -953,6 +957,9 @@ struct BubbleRetryCtx {
     uint8_t  echo_hash_count;
     uint8_t  echo_hashes[16];
     uint8_t  heard_count;
+    char     sender[64];        // parsed sender name (received channel msgs
+                                // only; empty for sent and DM). Used to
+                                // prefill a "@sender " reply.
 };
 
 // Modal widgets — created once and attached to scr_messages so they
@@ -972,6 +979,11 @@ static char g_retry_pending_body[200] = "";
 static lv_obj_t *obj_path_panel     = NULL;
 static lv_obj_t *lbl_path_info      = NULL;
 static char g_path_copy_text[256]   = "";  // text to paste on "Copy Path"
+
+// Reply button on the path popup — shown only when a received channel
+// bubble is long-pressed. Prefills the composer with "@sender ".
+static lv_obj_t *btn_path_reply     = NULL;
+static char g_reply_pending_sender[64] = "";
 
 // Discover (repeaters-only, mirrors Meck T-Deck Pro's F-key Discover)
 static lv_obj_t *scr_discover         = NULL;
@@ -3424,6 +3436,8 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
                 ctx->body[sizeof(ctx->body) - 1] = '\0';
             } else {
                 ctx->body[0] = '\0';
+                strncpy(ctx->sender, trim_sender, sizeof(ctx->sender) - 1);
+                ctx->sender[sizeof(ctx->sender) - 1] = '\0';
             }
             lv_obj_set_user_data(bubble, ctx);
             lv_obj_add_event_cb(bubble, on_bubble_long_pressed,
@@ -5474,6 +5488,15 @@ static void on_now_playing_tap(lv_event_t *e) {
     meck_audio_ui_show_player_current();
 }
 
+// Tap any battery label to cycle its display between percentage and voltage.
+// Forcing battery_ticks to the period makes the next ui_update_timer_cb tick
+// (<=500ms) repaint every mirrored label in the new mode.
+static void on_battery_label_tap(lv_event_t *e) {
+    (void)e;
+    g_batt_show_voltage = !g_batt_show_voltage;
+    battery_ticks = 600;
+}
+
 // Attach the clock + battery pair to a home tile and register them in the
 // per-tile arrays so ui_update_timer_cb can drive them. Called once from
 // each tile builder. The battery field is space-padded to 4 chars in the
@@ -5487,6 +5510,8 @@ static void home_attach_clock_battery(lv_obj_t *page, int tile_idx) {
     meck_set_font(bat, &meck_montserrat_24, 0);
     lv_obj_set_style_text_align(bat, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(bat, LV_ALIGN_TOP_RIGHT, -15, NOTCH_SAFE_Y);
+    lv_obj_add_flag(bat, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(bat, on_battery_label_tap, LV_EVENT_CLICKED, NULL);
     lbl_home_battery[tile_idx] = bat;
 
     lv_obj_t *clk = lv_label_create(page);
@@ -5550,6 +5575,8 @@ static void screen_attach_clock_battery(lv_obj_t *parent, int slot,
     meck_set_font(bat, font, 0);
     lv_obj_set_style_text_align(bat, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(bat, LV_ALIGN_TOP_RIGHT, -15, y_offset);
+    lv_obj_add_flag(bat, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(bat, on_battery_label_tap, LV_EVENT_CLICKED, NULL);
     lbl_screen_battery[slot] = bat;
 
     lv_obj_t *clk = lv_label_create(parent);
@@ -6704,6 +6731,18 @@ static void on_path_modal_copy(lv_event_t *e) {
     if (obj_path_panel) lv_obj_add_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void on_path_modal_reply(lv_event_t *e) {
+    if (ta_compose && g_reply_pending_sender[0] != '\0') {
+        char prefill[72];
+        // Bracketed form: other MeshCore devices and the companion app parse
+        // "@[node name]" as a node-name tag. The plain "@name" form is not
+        // recognised as a tag and breaks on names containing spaces.
+        snprintf(prefill, sizeof(prefill), "@[%s] ", g_reply_pending_sender);
+        lv_textarea_set_text(ta_compose, prefill);
+    }
+    if (obj_path_panel) lv_obj_add_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
 // LV_EVENT_LONG_PRESSED handler — attached to every bubble (sent and
 // received). For sent bubbles that are retry-eligible, opens the retry
 // modal. For all bubbles, shows path/echo info with a Copy button.
@@ -6736,6 +6775,16 @@ static void on_bubble_long_pressed(lv_event_t *e) {
     build_path_info_text(ctx);
     if (lbl_path_info) {
         lv_label_set_text(lbl_path_info, g_path_copy_text);
+    }
+    // Offer Reply only for received channel messages (not sent, not DM).
+    if (!ctx->is_outgoing && !ctx->is_dm && ctx->sender[0] != '\0') {
+        strncpy(g_reply_pending_sender, ctx->sender,
+                sizeof(g_reply_pending_sender) - 1);
+        g_reply_pending_sender[sizeof(g_reply_pending_sender) - 1] = '\0';
+        if (btn_path_reply) lv_obj_clear_flag(btn_path_reply, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        g_reply_pending_sender[0] = '\0';
+        if (btn_path_reply) lv_obj_add_flag(btn_path_reply, LV_OBJ_FLAG_HIDDEN);
     }
     if (obj_path_panel) {
         lv_obj_clear_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
@@ -6869,6 +6918,21 @@ static void create_path_modal() {
     lv_label_set_long_mode(lbl_path_info, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl_path_info, card_w - 32);
     lv_obj_align(lbl_path_info, LV_ALIGN_TOP_LEFT, 0, 35);
+
+    // Reply button — hidden unless a received channel bubble is long-pressed
+    // (shown/positioned above Copy Path when visible).
+    btn_path_reply = lv_button_create(card);
+    lv_obj_set_size(btn_path_reply, card_w - 32, 55);
+    lv_obj_align(btn_path_reply, LV_ALIGN_BOTTOM_MID, 0, -130);
+    lv_obj_set_style_bg_color(btn_path_reply, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_path_reply, 8, 0);
+    lv_obj_t *lbl_reply = lv_label_create(btn_path_reply);
+    lv_label_set_text(lbl_reply, "Reply");
+    lv_obj_set_style_text_color(lbl_reply, lv_color_white(), 0);
+    meck_set_font(lbl_reply, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_reply);
+    lv_obj_add_event_cb(btn_path_reply, on_path_modal_reply, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_path_reply, LV_OBJ_FLAG_HIDDEN);
 
     // Copy Path button
     lv_obj_t *btn_copy = lv_button_create(card);
@@ -13632,10 +13696,20 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             else if (pct >= 20) col = lv_palette_main(LV_PALETTE_YELLOW);
             else                col = lv_palette_main(LV_PALETTE_RED);
         }
+        char batt_txt[12] = "";
+        if (available) {
+            if (g_batt_show_voltage) {
+                uint16_t mv = meck_battery_voltage_mv();
+                snprintf(batt_txt, sizeof(batt_txt), "%u.%02u",
+                         (unsigned)(mv / 1000), (unsigned)((mv % 1000) / 10));
+            } else {
+                snprintf(batt_txt, sizeof(batt_txt), "%3u%%", (unsigned)pct);
+            }
+        }
         for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
             if (!lbl_home_battery[i]) continue;
             if (available) {
-                lv_label_set_text_fmt(lbl_home_battery[i], "%3u%%", (unsigned)pct);
+                lv_label_set_text(lbl_home_battery[i], batt_txt);
                 lv_obj_set_style_text_color(lbl_home_battery[i], col, 0);
             } else {
                 lv_label_set_text(lbl_home_battery[i], "");
@@ -13644,7 +13718,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         for (int i = 0; i < MECK_SCREEN_HOST_COUNT; i++) {
             if (!lbl_screen_battery[i]) continue;
             if (available) {
-                lv_label_set_text_fmt(lbl_screen_battery[i], "%3u%%", (unsigned)pct);
+                lv_label_set_text(lbl_screen_battery[i], batt_txt);
                 lv_obj_set_style_text_color(lbl_screen_battery[i], col, 0);
             } else {
                 lv_label_set_text(lbl_screen_battery[i], "");

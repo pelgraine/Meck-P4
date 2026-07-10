@@ -227,9 +227,8 @@ extern "C" bool meck_boot_button_pressed() {
 // referenced against the correct cell capacity.
 //
 // (A previous comment block here claimed the cell was 2000 mAh based on
-// an unverified third-party attribution. The wiki FAQ is the only source
-// we've actually verified against LilyGo's own documentation, and it
-// says 1000. Code now matches the wiki.)
+// an unverified third-party attribution. Resolved: the cell has since
+// been verified as 1000 mAh, matching the wiki and the constant below.)
 //
 // The BQ27220 has no hardware lock preventing FCC from learning a value
 // above design capacity unless the FCC_LIMIT bit is set in the CEDV

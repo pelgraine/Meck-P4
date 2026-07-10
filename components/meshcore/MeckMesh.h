@@ -2670,6 +2670,37 @@ protected:
             return;  // do NOT store in message ring
         }
 
+        // Per-channel notification preference: on a channel set to "Mentions"
+        // (channel_notif == 1), a message only counts as unread when it tags
+        // this node. The tone trigger in MeckUI fires on an unread increase,
+        // so skipping the increment silences the alert as well. "All" (0) and
+        // "None" (2) are untouched here. The message is stored in the ring
+        // either way -- only the unread badge is gated, never history.
+        //
+        // Both tag forms are matched, case-insensitively: the MeshCore
+        // companion app emits "@[node name]" with brackets, while a device
+        // typed by hand may produce the plain "@nodename".
+        bool suppress_unread = false;
+        if (_prefs && ch_idx < MAX_GROUP_CHANNELS &&
+            _prefs->channel_notif[ch_idx] == 1) {
+            suppress_unread = true;  // suppress unless a mention is found
+            if (_prefs->node_name[0] != '\0' && text) {
+                char tag_plain[36];
+                char tag_bracket[38];
+                snprintf(tag_plain, sizeof(tag_plain), "@%s", _prefs->node_name);
+                snprintf(tag_bracket, sizeof(tag_bracket), "@[%s]", _prefs->node_name);
+                size_t len_plain   = strlen(tag_plain);
+                size_t len_bracket = strlen(tag_bracket);
+                for (const char* p = text; *p; p++) {
+                    if (strncasecmp(p, tag_bracket, len_bracket) == 0 ||
+                        strncasecmp(p, tag_plain, len_plain) == 0) {
+                        suppress_unread = false;  // mentioned -- notify
+                        break;
+                    }
+                }
+            }
+        }
+
         xSemaphoreTake(_mutex, portMAX_DELAY);
         P4ChannelMessage* ring = (ch_idx < MAX_GROUP_CHANNELS) ? _msgs_ch[ch_idx] : nullptr;
         P4ChannelMessage saved_copy;
@@ -2696,7 +2727,7 @@ protected:
             strncpy(m.text, text, P4_MSG_TEXT_LEN - 1);
             m.text[P4_MSG_TEXT_LEN - 1] = '\0';
             if (_msg_count_ch[ch_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[ch_idx]++;
-            _msg_unread_ch[ch_idx]++;
+            if (!suppress_unread) _msg_unread_ch[ch_idx]++;
             _msg_dirty = true;
             saved_copy = m;
             wrote_idx = _msg_newest_ch[ch_idx];
