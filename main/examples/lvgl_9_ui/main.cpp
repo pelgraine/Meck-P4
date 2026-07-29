@@ -4332,9 +4332,18 @@ void Lvgl_Init(void)
     }
 
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
-    lv_indev_t *indev_2 = lv_indev_create();
-    lv_indev_set_type(indev_2, LV_INDEV_TYPE_KEYPAD);
-    lv_indev_set_read_cb(indev_2, my_keyboard_read);
+    // Keypad indev deliberately NOT registered. Meck reads the TCA8418 itself
+    // from MeckP4Keyboard (polled, in MeckUI.cpp) and routes keys straight into
+    // the message composers. Registering this indev as well put two independent
+    // readers on the same key-event FIFO: whichever ran first in a given cycle
+    // popped the event and the other saw nothing, so keystrokes went missing.
+    // my_keyboard_read() is left defined for reference and for the eventual
+    // lv_group-based whole-UI navigation, which should feed from the single
+    // MeckP4Keyboard reader rather than reintroducing a second one.
+    //
+    // lv_indev_t *indev_2 = lv_indev_create();
+    // lv_indev_set_type(indev_2, LV_INDEV_TYPE_KEYPAD);
+    // lv_indev_set_read_cb(indev_2, my_keyboard_read);
 #endif
 
 #if CONFIG_ENABLE_USB_DISPLAY == true
@@ -5932,8 +5941,14 @@ extern "C" void app_main(void)
     TCA8418->set_irq_pin_mode(Cpp_Bus_Driver::Tca8418::Irq_Mask::KEY_EVENTS);
     TCA8418->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
 
-    TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_1, 20000);
-    TCA8418->start_pwm_gradient_time(30, 1000);
+    // Keyboard backlight left off at boot. This ramp was what made the
+    // backlight appear to "default on" -- it is firmware, not hardware -- and
+    // it is a standing current draw on a battery device. LEDC channel 1 is
+    // still free if brightness control is added later (channel 0 is the main
+    // display backlight).
+    //
+    // TCA8418->create_pwm(KEYBOARD_BL, ledc_channel_t::LEDC_CHANNEL_1, 20000);
+    // TCA8418->start_pwm_gradient_time(30, 1000);
 
     XL9555->pin_mode(XL9555_T_MIXRF_EN, Cpp_Bus_Driver::Xl95x5::Mode::OUTPUT);
     XL9555->pin_write(XL9555_T_MIXRF_EN, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
@@ -5997,6 +6012,17 @@ extern "C" void app_main(void)
     }
 
     System_Ui->set_config_rf_params(System_Ui->_device_nrf24l01);
+
+    // Power the T-MixRF rail back down. CC1101, NRF24L01 and the ST25R3916 NFC
+    // front-end are all fed from XL9555 IO0, and none of them is used by Meck,
+    // but they sit powered for the whole session once enabled above.
+    //
+    // The rail is cut here, after their init calls, rather than never being
+    // raised: each of those three devices sets a Sys_Status init_flag, and a
+    // false flag triggers a startup message box that blocks boot until it is
+    // dismissed. Letting them initialise normally and then removing power keeps
+    // those flags true and leaves the startup path untouched.
+    XL9555->pin_write(XL9555_T_MIXRF_EN, Cpp_Bus_Driver::Xl95x5::Value::LOW);
 
     assert = Kode_Bq25896::bq25896_init(Bq25896_Iic_Bus, Bq25896_Handle);
     if (assert != ESP_OK)
