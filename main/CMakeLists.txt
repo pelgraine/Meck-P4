@@ -88,7 +88,8 @@ idf_component_register(SRC_DIRS ${project_path}
                             ICM20948_WE
                             ST25R3916
                             NFC-RFAL
-                            RadioLib)
+                            RadioLib
+                            kode_bq25896)
 
 target_compile_options(
     ${COMPONENT_LIB}

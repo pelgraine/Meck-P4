@@ -66,9 +66,25 @@ extern "C" int meck_voice_send_get_status(void);
 #include "t_display_p4_driver.h"
 #include "sdkconfig.h"
 #include "MeckCardKB.h"
+#include "MeckP4Keyboard.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+
+// ---------------------------------------------------------------------------
+// Hardware keyboard presence (T-Display-P4-Keyboard expansion board).
+//
+// Set by meck_p4kbd_init() near the end of meck_ui_init once the TCA8418 has
+// answered. Declared here rather than beside the driver block because the
+// composer focus handlers, which decide whether to reveal the on-screen
+// keyboard, sit several thousand lines earlier in this file.
+// ---------------------------------------------------------------------------
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+static bool g_p4kbd_present = false;
+static inline bool meck_hw_keyboard_active(void) { return g_p4kbd_present; }
+#else
+static inline bool meck_hw_keyboard_active(void) { return false; }
+#endif
 
 #include <cstdio>
 #include <cstring>
@@ -5117,6 +5133,15 @@ static void on_compose_size_changed(lv_event_t *e) {
 static void on_compose_focused(lv_event_t *e) {
     if (kb_compose) {
         lv_keyboard_set_textarea(kb_compose, ta_compose);
+        // With the hardware keyboard attached the on-screen keyboard stays
+        // hidden and the composer keeps its resting position, so the message
+        // list gets the full height. The textarea binding above still has to
+        // happen: the hardware poll locates its destination through
+        // lv_keyboard_get_textarea(kb).
+        if (meck_hw_keyboard_active()) {
+            meck_relayout_compose();
+            return;
+        }
         lv_obj_remove_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
         // Lift textarea and send button above the keyboard. Height is
         // dynamic (LV_SIZE_CONTENT) so we only set position here, then
@@ -5194,6 +5219,12 @@ static void on_room_compose_size_changed(lv_event_t *e) {
 static void on_room_compose_focused(lv_event_t *e) {
     if (kb_room_compose) {
         lv_keyboard_set_textarea(kb_room_compose, ta_room_compose);
+        // See on_compose_focused: hidden on-screen keyboard, textarea still
+        // bound so hardware keystrokes can find it.
+        if (meck_hw_keyboard_active()) {
+            meck_relayout_room_compose();
+            return;
+        }
         lv_obj_remove_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
         if (ta_room_compose) lv_obj_align(ta_room_compose,
             LV_ALIGN_BOTTOM_LEFT, 10, -(15 + MECK_KB_HEIGHT));
@@ -11549,6 +11580,11 @@ static void create_messages_screen() {
     lv_obj_set_style_border_width(ta_compose, 2,                       LV_PART_CURSOR);
     lv_obj_set_style_border_side(ta_compose,  LV_BORDER_SIDE_LEFT,     LV_PART_CURSOR);
     lv_obj_set_style_border_opa(ta_compose,   LV_OPA_COVER,            LV_PART_CURSOR);
+    // Blink the cursor. start_cursor_blink() in LVGL's textarea reads
+    // anim_duration on LV_PART_CURSOR: 0 leaves the cursor solid, non-zero
+    // drives the on/off animation. Set it here rather than inheriting
+    // whatever the theme happens to default to.
+    lv_obj_set_style_anim_duration(ta_compose, 500, LV_PART_CURSOR);
     lv_obj_add_event_cb(ta_compose, on_compose_focused,      LV_EVENT_FOCUSED,      NULL);
     lv_obj_add_event_cb(ta_compose, on_compose_defocused,    LV_EVENT_DEFOCUSED,    NULL);
     lv_obj_add_event_cb(ta_compose, on_compose_size_changed, LV_EVENT_SIZE_CHANGED, NULL);
@@ -17497,6 +17533,11 @@ static void create_room_messages_screen() {
     lv_obj_set_style_border_width(ta_room_compose, 2,                       LV_PART_CURSOR);
     lv_obj_set_style_border_side(ta_room_compose,  LV_BORDER_SIDE_LEFT,     LV_PART_CURSOR);
     lv_obj_set_style_border_opa(ta_room_compose,   LV_OPA_COVER,            LV_PART_CURSOR);
+    // Blink the cursor. start_cursor_blink() in LVGL's textarea reads
+    // anim_duration on LV_PART_CURSOR: 0 leaves the cursor solid, non-zero
+    // drives the on/off animation. Set it here rather than inheriting
+    // whatever the theme happens to default to.
+    lv_obj_set_style_anim_duration(ta_room_compose, 500, LV_PART_CURSOR);
     lv_obj_add_event_cb(ta_room_compose, on_room_compose_focused,      LV_EVENT_FOCUSED,      NULL);
     lv_obj_add_event_cb(ta_room_compose, on_room_compose_defocused,    LV_EVENT_DEFOCUSED,    NULL);
     lv_obj_add_event_cb(ta_room_compose, on_room_compose_size_changed, LV_EVENT_SIZE_CHANGED, NULL);
@@ -17545,6 +17586,12 @@ static void create_room_messages_screen() {
 static MeckCardKB   g_cardkb;
 static lv_timer_t  *g_cardkb_timer = NULL;
 
+#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4 && MECK_CARDKB
+
+// Shared by the CardKB, BLE-keyboard and P4-keyboard poll paths, so compiled
+// if any of them is.
+#if (defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4) && defined(MECK_CARDKB)) || MECK_BLE_KEYBOARD_ENABLED || defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+
 // The textarea the user is currently typing into belongs to whichever composer
 // keyboard is visible. Returns that keyboard, or NULL if no composer is open.
 static lv_obj_t *meck_cardkb_active_kb(void) {
@@ -17557,6 +17604,10 @@ static lv_obj_t *meck_cardkb_active_kb(void) {
         return kb_room_compose;
     return NULL;
 }
+
+#endif // (T_DISPLAY_P4 && MECK_CARDKB) || MECK_BLE_KEYBOARD_ENABLED || T_DISPLAY_P4_KEYBOARD
+
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4) && defined(MECK_CARDKB)
 
 static void meck_cardkb_poll(lv_timer_t *t) {
     (void)t;
@@ -17605,6 +17656,8 @@ static void meck_cardkb_poll(lv_timer_t *t) {
     }
 }
 
+#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4 && MECK_CARDKB
+
 // External BLE keyboard -> active composer. Same routing as meck_cardkb_poll;
 // reads keys from the C6 BLE central via meck_kbd_read_key() and reuses the
 // existing meck_cardkb_active_kb() composer lookup.
@@ -17640,6 +17693,8 @@ static void meck_blekbd_poll(lv_timer_t *t) {
 }
 #endif // MECK_BLE_KEYBOARD_ENABLED
 
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4) && defined(MECK_CARDKB)
+
 // Probe for a CardKB and, if present, start the poll timer. Called from the end
 // of meck_ui_init() while the LVGL lock is held.
 static void meck_cardkb_init(void) {
@@ -17652,6 +17707,83 @@ static void meck_cardkb_init(void) {
 }
 
 #endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4 && MECK_CARDKB
+
+// ============================================================================
+// T-Display-P4-Keyboard (TCA8418) input -> active composer
+//
+// Same routing as the CardKB path and reusing its composer lookup. Polled from
+// an LVGL timer, so this runs in the LVGL task context and may touch widgets
+// directly. MeckP4Keyboard::read_key() already discards key-up events and
+// resolves Shift/Caps/Fn, so one call yields one finished character.
+// ============================================================================
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+
+static MeckP4Keyboard  g_p4kbd;
+static lv_timer_t     *g_p4kbd_timer = NULL;
+
+static void meck_p4kbd_poll(lv_timer_t *t) {
+    (void)t;
+    uint32_t key = g_p4kbd.read_key();
+    if (key == 0) return;
+
+    lv_obj_t *kb = meck_cardkb_active_kb();
+    if (!kb) {
+        // Type-to-compose: on the channel and room message screens a printable
+        // key focuses the composer, so typing can begin without tapping into
+        // the field first. Only printable keys do this -- arrows, Enter and Esc
+        // stay available for moving around the message list without the
+        // composer springing open.
+        //
+        // Sending LV_EVENT_FOCUSED rather than only adding the state matters
+        // twice: it runs on_compose_focused, which binds the textarea to the
+        // keyboard object this poll routes through, and LVGL's own textarea
+        // handler starts the cursor blink on that same event.
+        if (key >= 0x20 && key <= 0x7E) {
+            lv_obj_t *scr    = lv_screen_active();
+            lv_obj_t *target = NULL;
+            if      (scr == scr_messages      && ta_compose)      target = ta_compose;
+            else if (scr == scr_room_messages && ta_room_compose) target = ta_room_compose;
+            if (target) {
+                lv_obj_add_state(target, LV_STATE_FOCUSED);
+                lv_obj_send_event(target, LV_EVENT_FOCUSED, NULL);
+                kb = meck_cardkb_active_kb();
+            }
+        }
+        if (!kb) return;                            // no composer focused
+    }
+    lv_obj_t *ta = lv_keyboard_get_textarea(kb);
+    if (!ta) return;
+
+    switch (key) {
+        case LV_KEY_ENTER:     lv_obj_send_event(kb, LV_EVENT_READY,  NULL); break;
+        case LV_KEY_ESC:       lv_obj_send_event(kb, LV_EVENT_CANCEL, NULL); break;
+        case LV_KEY_BACKSPACE: lv_textarea_delete_char(ta);                  break;
+        case LV_KEY_LEFT:      lv_textarea_cursor_left(ta);                  break;
+        case LV_KEY_RIGHT:     lv_textarea_cursor_right(ta);                 break;
+        default:
+            if (key >= 0x20 && key <= 0x7E) {
+                char s[2] = { (char)key, 0 };
+                lv_textarea_add_text(ta, s);
+            }
+            break;
+    }
+}
+
+// Probe for the keyboard and, if present, start the poll timer. Absence is a
+// normal outcome -- the on-screen keyboard then behaves exactly as it does on
+// a plain T-Display-P4 build.
+static void meck_p4kbd_init(void) {
+    if (g_p4kbd.begin()) {
+        g_p4kbd_present = true;
+        g_p4kbd_timer = lv_timer_create(meck_p4kbd_poll, 30, NULL);
+        printf("MeckUI: P4 keyboard poll timer started\n");
+    } else {
+        g_p4kbd_present = false;
+        printf("MeckUI: no P4 keyboard found, using the on-screen keyboard\n");
+    }
+}
+
+#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
 
 // Build every screen: the home tileview and its pages, all sub-screens, and
 // the audio/map/reader modules. Split out of meck_ui_init so the live
@@ -17881,6 +18013,10 @@ extern "C" void meck_ui_init() {
 
 #if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4) && defined(MECK_CARDKB)
     meck_cardkb_init();
+#endif
+
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_p4kbd_init();
 #endif
 
     // External BLE keyboard: route decoded keys into the active composer. Cheap
