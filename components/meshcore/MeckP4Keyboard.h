@@ -35,6 +35,7 @@
 #include <cstddef>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/gpio.h"
 #include "cpp_bus_driver_library.h"
 #include "lvgl.h"
 #include "t_display_p4_driver.h"           // Init_Ldo_Channel_Power
@@ -58,6 +59,20 @@ public:
         // get_multiple_touch_point() treats that the same as a count of 0), so
         // dropped reads surface as keypresses that need repeating.
         Init_Ldo_Channel_Power(4, 3300);
+
+        // Keyboard backlight enable line. The SY7200A datasheet describes this
+        // pin as "Enable and dimming control ... when used as enable input,
+        // pull high to turn on IC", with PWM only required for dimming
+        // (20 kHz - 1 MHz), so a plain output level is enough for on/off and no
+        // LEDC channel is needed. Starts off; the LilyGo key toggles it.
+        gpio_config_t bl_cfg = {};
+        bl_cfg.pin_bit_mask = 1ULL << KEYBOARD_BL;
+        bl_cfg.mode         = GPIO_MODE_OUTPUT;
+        bl_cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
+        bl_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        bl_cfg.intr_type    = GPIO_INTR_DISABLE;
+        gpio_config(&bl_cfg);
+        set_backlight(false);
 
         _xl_bus  = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA,  XL9555_SCL);
         _kbd_bus = std::make_shared<Cpp_Bus_Driver::Software_Iic>(TCA8418_SDA, TCA8418_SCL);
@@ -156,9 +171,11 @@ private:
             case kKeyCaps:  _caps  = !_caps; return 0;
             case kKeyShift: _shift = true;   return 0;
             case kKeyFn:    _fn    = true;   return 0;
+            case kKeyWin:   // LilyGo key: toggle the keyboard backlight
+                set_backlight(!_backlight);
+                return 0;
             case kKeyAlt:
             case kKeyCtrl:
-            case kKeyWin:
             case kKeyRecord:
             case kKeyF11:
                 return 0;
@@ -194,6 +211,13 @@ private:
         return base;
     }
 
+    // Backlight is a straight enable level, high for on. Session state only --
+    // it is not persisted, so it comes up off after every boot.
+    void set_backlight(bool on) {
+        gpio_set_level(static_cast<gpio_num_t>(KEYBOARD_BL), on ? 1 : 0);
+        _backlight = on;
+    }
+
     void push(uint32_t code) {
         const size_t next = (_tail + 1) % kRing;
         if (next == _head) return;            // ring full: drop oldest input
@@ -216,6 +240,7 @@ private:
     bool _shift    = false;
     bool _caps     = false;
     bool _fn       = false;
+    bool _backlight = false;
 
     uint32_t _ring[kRing] = {0};
     size_t   _head = 0;
