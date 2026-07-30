@@ -1528,12 +1528,24 @@ extern "C" void meck_apply_pending_save() {
             continue;
         }
 
+        // History files are keyed by channel identity, not slot. Resolve
+        // the slot to its current occupant's ident at drain time; if the
+        // slot has emptied since enqueue, skip rather than write into a
+        // wrong or orphaned file.
+        uint32_t ident = g_the_mesh->channelIdentAt(e.channel_idx);
+        if (ident == 0) {
+            printf("meck_save: ch[%u] slot empty at drain, skipping persist\n",
+                   (unsigned)e.channel_idx);
+            g_save_tail = (g_save_tail + 1) % MECK_SAVE_QUEUE_SIZE;
+            continue;
+        }
+
         if (file_offset != 0) {
             // In-place rewrite — message has been appended before. Most
             // common reason to reach this branch is a heard_count bump
             // triggered by a flood echo of one of our own sends.
             store->rewriteChannelMessageRecord(
-                e.channel_idx,
+                ident,
                 P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
                 file_offset,
                 (uint16_t)sizeof(P4MsgFileRecord),
@@ -1544,7 +1556,7 @@ extern "C" void meck_apply_pending_save() {
             // updates can target the same record in-place.
             uint32_t new_offset = 0;
             bool ok = store->appendChannelMessageRecord(
-                e.channel_idx,
+                ident,
                 P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
                 (uint16_t)sizeof(P4MsgFileRecord),
                 &rec,

@@ -36,6 +36,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "cpp_bus_driver_library.h"
 #include "lvgl.h"
 #include "t_display_p4_driver.h"           // Init_Ldo_Channel_Power
@@ -60,18 +61,33 @@ public:
         // dropped reads surface as keypresses that need repeating.
         Init_Ldo_Channel_Power(4, 3300);
 
-        // Keyboard backlight enable line. The SY7200A datasheet describes this
-        // pin as "Enable and dimming control ... when used as enable input,
-        // pull high to turn on IC", with PWM only required for dimming
-        // (20 kHz - 1 MHz), so a plain output level is enough for on/off and no
-        // LEDC channel is needed. Starts off; the LilyGo key toggles it.
-        gpio_config_t bl_cfg = {};
-        bl_cfg.pin_bit_mask = 1ULL << KEYBOARD_BL;
-        bl_cfg.mode         = GPIO_MODE_OUTPUT;
-        bl_cfg.pull_up_en   = GPIO_PULLUP_DISABLE;
-        bl_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        bl_cfg.intr_type    = GPIO_INTR_DISABLE;
-        gpio_config(&bl_cfg);
+        // Keyboard backlight via the SY7200A's enable/dimming pin. Plain
+        // high drives the LED string at full output, which measured about
+        // +1 A of battery draw, so the pin is driven with LEDC PWM at 50%
+        // duty instead (datasheet dimming range 20 kHz - 1 MHz; 20 kHz
+        // keeps it above audible). Channel 1 is the one LilyGo's own
+        // example reserves for KEYBOARD_BL; timer 1 avoids sharing
+        // whatever timer the display backlight's channel-0 helper binds.
+        // Starts off; the LilyGo key toggles it.
+        ledc_timer_config_t bl_timer = {};
+        bl_timer.speed_mode      = LEDC_LOW_SPEED_MODE;
+        bl_timer.duty_resolution = LEDC_TIMER_10_BIT;
+        bl_timer.timer_num       = kBlTimer;
+        bl_timer.freq_hz         = 20000;
+        bl_timer.clk_cfg         = LEDC_AUTO_CLK;
+        if (ledc_timer_config(&bl_timer) != ESP_OK) {
+            printf("[P4KBD] backlight LEDC timer config failed\n");
+        }
+        ledc_channel_config_t bl_ch = {};
+        bl_ch.gpio_num   = KEYBOARD_BL;
+        bl_ch.speed_mode = LEDC_LOW_SPEED_MODE;
+        bl_ch.channel    = kBlChannel;
+        bl_ch.timer_sel  = kBlTimer;
+        bl_ch.duty       = 0;
+        bl_ch.hpoint     = 0;
+        if (ledc_channel_config(&bl_ch) != ESP_OK) {
+            printf("[P4KBD] backlight LEDC channel config failed\n");
+        }
         set_backlight(false);
 
         _xl_bus  = std::make_shared<Cpp_Bus_Driver::Software_Iic>(XL9555_SDA,  XL9555_SCL);
@@ -131,6 +147,11 @@ public:
 private:
     // Custom codes assigned to the modifier keys by Tca8418_Map_Lvgl in
     // t_display_p4_keyboard_config.h.
+    // Backlight PWM: LEDC channel 1 / timer 1, 10-bit, 20 kHz, 50% duty.
+    static constexpr ledc_timer_t   kBlTimer   = LEDC_TIMER_1;
+    static constexpr ledc_channel_t kBlChannel = LEDC_CHANNEL_1;
+    static constexpr uint32_t       kBlDuty    = 512;
+
     static constexpr uint32_t kKeyCaps   = 0x8B;
     static constexpr uint32_t kKeyAlt    = 0x8C;
     static constexpr uint32_t kKeyCtrl   = 0x8D;
@@ -211,10 +232,11 @@ private:
         return base;
     }
 
-    // Backlight is a straight enable level, high for on. Session state only --
-    // it is not persisted, so it comes up off after every boot.
+    // Backlight on = fixed 50% PWM duty (512 of 1024), off = 0. Session
+    // state only -- not persisted, so it comes up off after every boot.
     void set_backlight(bool on) {
-        gpio_set_level(static_cast<gpio_num_t>(KEYBOARD_BL), on ? 1 : 0);
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, kBlChannel, on ? kBlDuty : 0);
+        ledc_update_duty(LEDC_LOW_SPEED_MODE, kBlChannel);
         _backlight = on;
     }
 

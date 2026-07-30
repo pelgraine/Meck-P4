@@ -1705,6 +1705,26 @@ public:
     }
 
     // Delete a channel by index, compact remaining channels down.
+    // Stable identity for a channel, derived from its secret (SHA-256,
+    // first 4 bytes). Message history files are keyed by this rather than
+    // by slot index, so history follows the channel through any table
+    // reshuffle. 0 is reserved as "no channel"; the astronomically
+    // unlikely all-zero hash maps to 1.
+    static uint32_t channelIdent(const uint8_t* secret) {
+        uint8_t hash[32];
+        mbedtls_sha256(secret, 32, hash, 0);
+        uint32_t v = ((uint32_t)hash[0] << 24) | ((uint32_t)hash[1] << 16) |
+                     ((uint32_t)hash[2] << 8)  |  (uint32_t)hash[3];
+        return v ? v : 1;
+    }
+
+    // Identity of the channel currently occupying a slot; 0 if empty.
+    uint32_t channelIdentAt(uint8_t idx) {
+        ChannelDetails ch;
+        if (!getChannel(idx, ch) || ch.name[0] == '\0') return 0;
+        return channelIdent(ch.channel.secret);
+    }
+
     void deleteChannel(uint8_t idx) {
         // Find total channel count
         int total = 0;
@@ -1717,14 +1737,13 @@ public:
             }
         }
 
-        // Drop the message history file for the slot being deleted, then
-        // shift the remaining files down so each ch_<N>.bin stays aligned
-        // with the channel that ends up at slot N after the compact.
-        if (_store) {
-            _store->deleteChannelMessageFile(idx);
-            for (int i = idx; i < total - 1; i++) {
-                _store->renameChannelMessageFile((uint8_t)(i + 1), (uint8_t)i);
-            }
+        // Drop the deleted channel's history file. Files are keyed by
+        // channel identity, not slot, so the surviving channels' files
+        // need no rename cascade -- they follow their channels wherever
+        // the compact puts them.
+        uint32_t dead_ident = channelIdentAt(idx);
+        if (_store && dead_ident) {
+            _store->deleteChannelMessageFile(dead_ident);
         }
 
         // Compact the in-RAM message rings the same way: shift each
@@ -1767,6 +1786,18 @@ public:
         memset(&empty, 0, sizeof(empty));
         setChannel(total - 1, empty);
         saveChannels();
+
+        // Shift the per-channel notification prefs the same way, so each
+        // surviving channel keeps its own setting after the compact.
+        // channel_notif[MAX_GROUP_CHANNELS] is the DM slot; the loop stays
+        // below it. 0 = All (the default) for the vacated tail slot.
+        if (_prefs) {
+            for (int i = idx; i < total - 1; i++) {
+                _prefs->channel_notif[i] = _prefs->channel_notif[i + 1];
+            }
+            if (total >= 1) _prefs->channel_notif[total - 1] = 0;
+            savePrefs();
+        }
         printf("Meck: deleted channel idx %d, compacted %d channels\n", idx, total);
     }
 
@@ -1944,6 +1975,10 @@ public:
     void loadMessagesFromStore() {
         if (!_store) return;
 
+        // First boot of the identity-keyed layout: remove any legacy
+        // slot-keyed ch_<N>.bin files (one-time, NVS-flagged inside).
+        _store->purgeLegacySlotMessageFiles(MAX_GROUP_CHANNELS);
+
         // Buffer for one channel's tail. ~160KB on stack would overflow,
         // so allocate from PSRAM heap (we already have plenty there).
         size_t buf_size = P4_MSG_PER_CHANNEL * sizeof(P4MsgFileRecord);
@@ -1966,8 +2001,13 @@ public:
             P4ChannelMessage* ring = _msgs_ch[ch];
             if (!ring) continue;
 
+            // History files are keyed by channel identity. Empty slots have
+            // no channel and therefore no file.
+            uint32_t ident = channelIdentAt(ch);
+            if (ident == 0) continue;
+
             int n = _store->loadChannelMessageTail(
-                ch,
+                ident,
                 P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
                 (uint16_t)sizeof(P4MsgFileRecord),
                 buf, offs, P4_MSG_PER_CHANNEL);
@@ -1979,7 +2019,9 @@ public:
             for (int i = 0; i < n; i++) {
                 P4ChannelMessage& m = ring[i];
                 m.timestamp = buf[i].timestamp;
-                m.channel_idx = buf[i].channel_idx;
+                // Slot is authoritative: the stored channel_idx byte may
+                // predate a table reshuffle.
+                m.channel_idx = ch;
                 m.path_len = buf[i].path_len;
                 // heard_count restored from schema v2 (or zero on a v1
                 // record, since v1's byte at this offset was reserved zero).
@@ -2000,6 +2042,64 @@ public:
         free(offs);
         printf("Meck: loadMessagesFromStore — %d total messages loaded across %d channels\n",
                total_loaded, MAX_GROUP_CHANNELS);
+    }
+
+    // Clear a slot's in-RAM message ring and repopulate it from the store
+    // for whichever channel now occupies the slot. Called after an external
+    // rewrite of the channel table (companion CMD_SET_CHANNEL): history is
+    // keyed by channel identity, so the new occupant's own history -- if it
+    // has any -- follows it into the slot instead of the slot inheriting
+    // the previous occupant's ring. Per-channel body mirrors
+    // loadMessagesFromStore.
+    void reloadChannelSlot(uint8_t idx) {
+        if (idx >= MAX_GROUP_CHANNELS) return;
+        P4ChannelMessage* ring = _msgs_ch[idx];
+        if (!ring) return;
+
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        memset(ring, 0, P4_MSG_PER_CHANNEL * sizeof(P4ChannelMessage));
+        _msg_count_ch[idx]  = 0;
+        _msg_newest_ch[idx] = -1;
+        _msg_unread_ch[idx] = 0;
+        xSemaphoreGive(_mutex);
+        _msg_dirty = true;
+
+        uint32_t ident = channelIdentAt(idx);
+        if (ident == 0 || !_store) return;
+
+        P4MsgFileRecord* buf = (P4MsgFileRecord*)heap_caps_malloc(
+            P4_MSG_PER_CHANNEL * sizeof(P4MsgFileRecord), MALLOC_CAP_SPIRAM);
+        uint32_t* offs = (uint32_t*)heap_caps_malloc(
+            P4_MSG_PER_CHANNEL * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+        if (!buf || !offs) {
+            if (buf)  free(buf);
+            if (offs) free(offs);
+            return;
+        }
+        int n = _store->loadChannelMessageTail(
+            ident, P4_MSG_FILE_MAGIC, P4_MSG_FILE_VERSION,
+            (uint16_t)sizeof(P4MsgFileRecord), buf, offs, P4_MSG_PER_CHANNEL);
+        if (n > 0) {
+            xSemaphoreTake(_mutex, portMAX_DELAY);
+            for (int i = 0; i < n; i++) {
+                P4ChannelMessage& m = ring[i];
+                m.timestamp   = buf[i].timestamp;
+                m.channel_idx = idx;  // slot is authoritative
+                m.path_len    = buf[i].path_len;
+                m.heard_count = buf[i].heard_count;
+                m.valid       = (buf[i].flags & 0x01) != 0;
+                m.file_offset = offs[i];
+                memcpy(m.text, buf[i].text, P4_MSG_TEXT_LEN);
+                m.text[P4_MSG_TEXT_LEN - 1] = '\0';
+            }
+            _msg_count_ch[idx]  = n;
+            _msg_newest_ch[idx] = n - 1;
+            xSemaphoreGive(_mutex);
+        }
+        free(buf);
+        free(offs);
+        printf("Meck: reloadChannelSlot %u -> %d messages (ident %08x)\n",
+               (unsigned)idx, n > 0 ? n : 0, (unsigned)ident);
     }
 
     // ---- Accessors ----

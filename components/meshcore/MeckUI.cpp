@@ -423,8 +423,11 @@ static lv_obj_t *g_tileview        = NULL;
 // The seven home tiles, kept so the active page index can be resolved.
 // lv_tileview_get_tile_act() hands back the tile object but not its column, and
 // the objects are otherwise locals in meck_ui_build_screens().
-#define MECK_HOME_TILE_COUNT 7
-static lv_obj_t *g_home_tiles[MECK_HOME_TILE_COUNT] = { NULL };
+// PAGE count, not MECK_HOME_TILE_COUNT: a second same-named define here
+// silently redefined the button-grid macro above to 7, capping button
+// registration so Trace, Audio and Web were all styled as index 7 (red).
+#define MECK_HOME_PAGE_COUNT 7
+static lv_obj_t *g_home_tiles[MECK_HOME_PAGE_COUNT] = { NULL };
 
 // Web reader browser screen (Stage 3)
 static lv_obj_t   *scr_web          = NULL;
@@ -474,7 +477,6 @@ static int         g_fill_form_idx     = -1;                     // form being f
 static lv_obj_t *lbl_home_title    = NULL;
 // Clock + battery labels are mirrored on every tileview page (7 pages in the
 // home tileview). The ui_update_timer_cb walks both arrays each interval.
-#define MECK_HOME_PAGE_COUNT 7
 static lv_obj_t *lbl_home_clock[MECK_HOME_PAGE_COUNT]   = {};
 static lv_obj_t *lbl_home_battery[MECK_HOME_PAGE_COUNT] = {};
 static lv_obj_t *lbl_home_audio[MECK_HOME_PAGE_COUNT]   = {};
@@ -3918,6 +3920,34 @@ static void update_radio_detail_label() {
 // Settings tap handlers
 // ============================================================================
 
+// Shared by the panel text editors. On open: hide the on-screen keyboard
+// while the hardware keyboard is present (the kb->textarea binding made by
+// the caller stays -- the hardware poll routes Enter/Esc through it), then
+// focus the field so the poll has a target; sending LV_EVENT_FOCUSED (not
+// just adding the state) starts the cursor blink, same rationale as
+// type-to-compose. On close: drop the focus with the panel -- the poll does
+// not check visibility, so a still-focused hidden field would keep taking
+// keys. Plain t_display_p4 builds compile these to no-ops.
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+static void meck_panel_edit_opened(lv_obj_t *ta, lv_obj_t *kb) {
+    if (kb && meck_hw_keyboard_active())
+        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    if (ta) {
+        lv_obj_add_state(ta, LV_STATE_FOCUSED);
+        lv_obj_send_event(ta, LV_EVENT_FOCUSED, NULL);
+    }
+}
+static void meck_panel_edit_closed(lv_obj_t *ta) {
+    if (ta) {
+        lv_obj_remove_state(ta, LV_STATE_FOCUSED);
+        lv_obj_send_event(ta, LV_EVENT_DEFOCUSED, NULL);
+    }
+}
+#else
+static inline void meck_panel_edit_opened(lv_obj_t *ta, lv_obj_t *kb) { (void)ta; (void)kb; }
+static inline void meck_panel_edit_closed(lv_obj_t *ta) { (void)ta; }
+#endif
+
 static void on_settings_name_save(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!mesh) return;
@@ -3933,11 +3963,13 @@ static void on_settings_name_save(lv_event_t *e) {
             printf("Settings: node name changed to '%s'\n", prefs->node_name);
         }
     }
+    meck_panel_edit_closed(ta_settings_name);
     if (obj_name_edit_panel) lv_obj_add_flag(obj_name_edit_panel, LV_OBJ_FLAG_HIDDEN);
     settings_update_labels();
 }
 
 static void on_settings_name_cancel(lv_event_t *e) {
+    meck_panel_edit_closed(ta_settings_name);
     if (obj_name_edit_panel) lv_obj_add_flag(obj_name_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -3957,6 +3989,7 @@ static void on_settings_name_tap(lv_event_t *e) {
         lv_textarea_set_text(ta_settings_name, prefs->node_name);
         lv_obj_remove_flag(obj_name_edit_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_settings) lv_keyboard_set_textarea(kb_settings, ta_settings_name);
+        meck_panel_edit_opened(ta_settings_name, kb_settings);
     }
 }
 
@@ -4023,6 +4056,7 @@ static void on_settings_freq_tap(lv_event_t *e) {
     lv_textarea_set_text(ta_num_edit, buf);
     lv_obj_remove_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
     if (kb_num_edit) lv_keyboard_set_textarea(kb_num_edit, ta_num_edit);
+    meck_panel_edit_opened(ta_num_edit, kb_num_edit);
 }
 
 // ---- Spreading Factor text editor ----
@@ -4039,6 +4073,7 @@ static void on_settings_sf_tap(lv_event_t *e) {
     lv_textarea_set_text(ta_num_edit, buf);
     lv_obj_remove_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
     if (kb_num_edit) lv_keyboard_set_textarea(kb_num_edit, ta_num_edit);
+    meck_panel_edit_opened(ta_num_edit, kb_num_edit);
 }
 
 static void on_num_edit_save(lv_event_t *e) {
@@ -4048,6 +4083,7 @@ static void on_num_edit_save(lv_event_t *e) {
     if (!prefs) return;
     const char* text = lv_textarea_get_text(ta_num_edit);
     if (!text || !text[0]) {
+        meck_panel_edit_closed(ta_num_edit);
         if (obj_num_edit_panel) lv_obj_add_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -4085,10 +4121,12 @@ static void on_num_edit_save(lv_event_t *e) {
             update_radio_detail_label();
         }
     }
+    meck_panel_edit_closed(ta_num_edit);
     if (obj_num_edit_panel) lv_obj_add_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void on_num_edit_cancel(lv_event_t *e) {
+    meck_panel_edit_closed(ta_num_edit);
     if (obj_num_edit_panel) lv_obj_add_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -4112,6 +4150,7 @@ static void on_settings_bw_tap(lv_event_t *e) {
     lv_textarea_set_text(ta_num_edit, buf);
     lv_obj_remove_flag(obj_num_edit_panel, LV_OBJ_FLAG_HIDDEN);
     if (kb_num_edit) lv_keyboard_set_textarea(kb_num_edit, ta_num_edit);
+    meck_panel_edit_opened(ta_num_edit, kb_num_edit);
 }
 
 // ---- Coding Rate: tap to cycle (5-8) ----
@@ -4143,6 +4182,7 @@ static void on_settings_region_tap(lv_event_t *e) {
     lv_textarea_set_text(ta_region_edit, prefs->default_scope_name);
     lv_obj_remove_flag(obj_region_edit_panel, LV_OBJ_FLAG_HIDDEN);
     if (kb_region_edit) lv_keyboard_set_textarea(kb_region_edit, ta_region_edit);
+    meck_panel_edit_opened(ta_region_edit, kb_region_edit);
 }
 
 static void on_region_edit_save(lv_event_t *e) {
@@ -4166,10 +4206,12 @@ static void on_region_edit_save(lv_event_t *e) {
     printf("Settings: Default region = '%s'\n",
            prefs->default_scope_name[0] ? prefs->default_scope_name : "(unscoped)");
     settings_update_labels();
+    meck_panel_edit_closed(ta_region_edit);
     if (obj_region_edit_panel) lv_obj_add_flag(obj_region_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void on_region_edit_cancel(lv_event_t *e) {
+    meck_panel_edit_closed(ta_region_edit);
     if (obj_region_edit_panel) lv_obj_add_flag(obj_region_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -4244,6 +4286,7 @@ static void on_pos_edit_save(lv_event_t *e) {
             printf("Settings: Lon cleared\n");
             refresh_position_labels();
         }
+        meck_panel_edit_closed(ta_pos_edit);
         if (obj_pos_edit_panel) lv_obj_add_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -4264,10 +4307,12 @@ static void on_pos_edit_save(lv_event_t *e) {
             refresh_position_labels();
         }
     }
+    meck_panel_edit_closed(ta_pos_edit);
     if (obj_pos_edit_panel) lv_obj_add_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void on_pos_edit_cancel(lv_event_t *e) {
+    meck_panel_edit_closed(ta_pos_edit);
     if (obj_pos_edit_panel) lv_obj_add_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -4295,6 +4340,7 @@ static void on_pos_lat_tap(lv_event_t *e) {
     lv_textarea_set_text(ta_pos_edit, buf);
     lv_obj_remove_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
     if (kb_pos_edit) lv_keyboard_set_textarea(kb_pos_edit, ta_pos_edit);
+    meck_panel_edit_opened(ta_pos_edit, kb_pos_edit);
 }
 
 static void on_pos_lon_tap(lv_event_t *e) {
@@ -4314,6 +4360,7 @@ static void on_pos_lon_tap(lv_event_t *e) {
     lv_textarea_set_text(ta_pos_edit, buf);
     lv_obj_remove_flag(obj_pos_edit_panel, LV_OBJ_FLAG_HIDDEN);
     if (kb_pos_edit) lv_keyboard_set_textarea(kb_pos_edit, ta_pos_edit);
+    meck_panel_edit_opened(ta_pos_edit, kb_pos_edit);
 }
 
 static void on_pos_mode_tap(lv_event_t *e) {
@@ -4649,6 +4696,7 @@ static void on_ch_settings_add_tap(lv_event_t *e) {
         lv_textarea_set_text(ta_ch_settings_add, "");
         lv_obj_remove_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_ch_settings_add) lv_keyboard_set_textarea(kb_ch_settings_add, ta_ch_settings_add);
+        meck_panel_edit_opened(ta_ch_settings_add, kb_ch_settings_add);
     }
 }
 
@@ -4661,6 +4709,7 @@ static void on_ch_settings_add_save(lv_event_t *e) {
     // '#' prefix = public (SHA-256 derived secret), no '#' = private (random secret)
     mesh->createChannel(text);
     printf("Channels (settings): added '%s'\n", text);
+    meck_panel_edit_closed(ta_ch_settings_add);
     if (obj_ch_settings_add_panel) lv_obj_add_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
     refresh_channels_settings_list();
     // Also refresh the channel picker if it exists
@@ -4671,6 +4720,7 @@ static void on_ch_settings_add_kb_event(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_READY)  on_ch_settings_add_save(NULL);
     else if (code == LV_EVENT_CANCEL) {
+        meck_panel_edit_closed(ta_ch_settings_add);
         if (obj_ch_settings_add_panel)
             lv_obj_add_flag(obj_ch_settings_add_panel, LV_OBJ_FLAG_HIDDEN);
     }
@@ -4711,6 +4761,7 @@ static void on_ch_detail_scope_tap(lv_event_t *e) {
     lv_textarea_set_text(ta_ch_scope_edit, ch.scope_name);
     lv_obj_remove_flag(obj_ch_scope_edit_panel, LV_OBJ_FLAG_HIDDEN);
     if (kb_ch_scope_edit) lv_keyboard_set_textarea(kb_ch_scope_edit, ta_ch_scope_edit);
+    meck_panel_edit_opened(ta_ch_scope_edit, kb_ch_scope_edit);
 }
 
 static void on_ch_scope_edit_save(lv_event_t *e) {
@@ -4730,10 +4781,12 @@ static void on_ch_scope_edit_save(lv_event_t *e) {
     printf("Channel %d scope set to '%s'\n", g_detail_channel_idx,
            ch.scope_name[0] ? ch.scope_name : "(device default)");
     refresh_channel_detail_labels();
+    meck_panel_edit_closed(ta_ch_scope_edit);
     if (obj_ch_scope_edit_panel) lv_obj_add_flag(obj_ch_scope_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void on_ch_scope_edit_cancel(lv_event_t *e) {
+    meck_panel_edit_closed(ta_ch_scope_edit);
     if (obj_ch_scope_edit_panel) lv_obj_add_flag(obj_ch_scope_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -4765,12 +4818,40 @@ static void on_ch_detail_delete_tap(lv_event_t *e) {
 
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
     if (g_delete_confirm_until > 0 && now < g_delete_confirm_until) {
-        // Confirmed — delete the channel
-        ChannelDetails empty;
-        memset(&empty, 0, sizeof(empty));
-        mesh->setChannel(g_detail_channel_idx, empty);
-        mesh->saveChannels();
-        printf("Channel %d deleted\n", g_detail_channel_idx);
+        // Confirmed. Route through Meck::deleteChannel, which compacts the
+        // channel table, shifts the per-channel message rings and their
+        // ch_<N>.bin files down, and shifts the notification prefs. The old
+        // empty-slot write here left all of those behind, so the next
+        // channel created in the hole inherited the deleted channel's
+        // history and settings.
+        int deleted_idx = g_detail_channel_idx;
+        mesh->deleteChannel((uint8_t)deleted_idx);
+        // UI-side state keyed by the same slot numbers shifts in step:
+        // compose drafts, notification tones, and the active-channel index.
+        for (int i = deleted_idx; i < MAX_GROUP_CHANNELS - 1; i++) {
+            memcpy(g_channel_drafts[i], g_channel_drafts[i + 1],
+                   sizeof(g_channel_drafts[0]));
+        }
+        g_channel_drafts[MAX_GROUP_CHANNELS - 1][0] = '\0';
+        // Tone map: move each mapping down one slot via the accessors (their
+        // bounds checks make out-of-range slots a no-op); only write on a
+        // real difference, since every set persists the config.
+        for (int i = deleted_idx; i < MAX_GROUP_CHANNELS - 1; i++) {
+            const char* next = g_notif_sounds.getSoundForChannel((uint8_t)(i + 1));
+            const char* cur  = g_notif_sounds.getSoundForChannel((uint8_t)i);
+            if (strcmp(cur, next) != 0) {
+                g_notif_sounds.setSoundForChannel((uint8_t)i,
+                                                  next[0] ? next : nullptr);
+            }
+        }
+        if (g_notif_sounds.hasSoundForChannel(MAX_GROUP_CHANNELS - 1))
+            g_notif_sounds.clearSoundForChannel(MAX_GROUP_CHANNELS - 1);
+        if (g_active_channel == (uint8_t)deleted_idx) {
+            g_active_channel = 0;
+        } else if (g_active_channel > (uint8_t)deleted_idx &&
+                   g_active_channel < MAX_GROUP_CHANNELS) {
+            g_active_channel--;
+        }
         // Navigate back to channels list
         refresh_channels_settings_list();
         refresh_channel_picker();
@@ -5514,16 +5595,25 @@ static void on_ch_add_save(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!ta_ch_add || !mesh) return;
     const char* text = lv_textarea_get_text(ta_ch_add);
-    if (!text || !text[0]) return;
+    if (!text || !text[0]) {
+        // Empty confirm doubles as cancel: this modal has no back button,
+        // so a bare Add previously left no touch exit. Matches the
+        // empty-confirm-exits behaviour of the other panel editors.
+        meck_panel_edit_closed(ta_ch_add);
+        if (obj_ch_add_panel) lv_obj_add_flag(obj_ch_add_panel, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
 
     // '#' prefix = public, no '#' = private
     mesh->createChannel(text);
     printf("Channels: added '%s'\n", text);
+    meck_panel_edit_closed(ta_ch_add);
     if (obj_ch_add_panel) lv_obj_add_flag(obj_ch_add_panel, LV_OBJ_FLAG_HIDDEN);
     refresh_channel_picker();
 }
 
 static void on_ch_add_cancel(lv_event_t *e) {
+    meck_panel_edit_closed(ta_ch_add);
     if (obj_ch_add_panel) lv_obj_add_flag(obj_ch_add_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -5538,6 +5628,7 @@ static void on_ch_add_tap(lv_event_t *e) {
         lv_textarea_set_text(ta_ch_add, "");
         lv_obj_remove_flag(obj_ch_add_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_ch_add) lv_keyboard_set_textarea(kb_ch_add, ta_ch_add);
+        meck_panel_edit_opened(ta_ch_add, kb_ch_add);
     }
 }
 
@@ -7324,11 +7415,13 @@ static void on_wifi_edit_save(lv_event_t *e) {
             mesh->getDataStore()->savePrefs(*prefs);
         }
     }
+    meck_panel_edit_closed(ta_wifi_edit);
     if (obj_wifi_edit_panel) lv_obj_add_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
     settings_wifi_update_labels();
 }
 
 static void on_wifi_edit_cancel(lv_event_t *e) {
+    meck_panel_edit_closed(ta_wifi_edit);
     if (obj_wifi_edit_panel) lv_obj_add_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -7350,6 +7443,7 @@ static void on_settings_wifi_ssid_tap(lv_event_t *e) {
         lv_textarea_set_password_mode(ta_wifi_edit, false);
         lv_obj_remove_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_wifi_edit) lv_keyboard_set_textarea(kb_wifi_edit, ta_wifi_edit);
+        meck_panel_edit_opened(ta_wifi_edit, kb_wifi_edit);
     }
 }
 
@@ -7365,6 +7459,7 @@ static void on_settings_wifi_pass_tap(lv_event_t *e) {
         lv_textarea_set_password_mode(ta_wifi_edit, false);
         lv_obj_remove_flag(obj_wifi_edit_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_wifi_edit) lv_keyboard_set_textarea(kb_wifi_edit, ta_wifi_edit);
+        meck_panel_edit_opened(ta_wifi_edit, kb_wifi_edit);
     }
 }
 
@@ -12617,6 +12712,9 @@ static bool trace_find_name_for_hash(const uint8_t *hash, int bytes_per_hop,
 // the user's "Option B" spec.
 static void on_trace_textarea_focused(lv_event_t *e) {
     (void)e;
+    // Hardware keyboard: on-screen keyboard stays down (goto_trace hid it
+    // and gave the results container the full height).
+    if (meck_hw_keyboard_active()) return;
     if (kb_trace) lv_obj_remove_flag(kb_trace, LV_OBJ_FLAG_HIDDEN);
     // Shrink the results container back to its keyboard-visible height so
     // its bottom edge sits above the keyboard, not behind it.
@@ -13048,6 +13146,16 @@ static void goto_trace(lv_event_t *e) {
     g_trace_in_flight = false;
     Meck *mesh = meck_get_instance();
     if (mesh) mesh->traceClearPending();
+    if (meck_hw_keyboard_active()) {
+        // Hardware keyboard: this screen's on-screen keyboard is created
+        // visible, so hide it on entry and give the results container the
+        // full height, mirroring the post-Run-Trace layout.
+        if (kb_trace) lv_obj_add_flag(kb_trace, LV_OBJ_FLAG_HIDDEN);
+        if (cont_trace_results) {
+            lv_obj_set_height(cont_trace_results,
+                SCREEN_HEIGHT - (NOTCH_SAFE_Y + 540) - 10);
+        }
+    }
     lv_screen_load(scr_trace);
 }
 
@@ -13057,6 +13165,7 @@ static void goto_trace(lv_event_t *e) {
 // the user taps the textarea after Save / Reset hid it.
 static void on_path_editor_textarea_focused(lv_event_t *e) {
     (void)e;
+    if (meck_hw_keyboard_active()) return;
     if (kb_path_editor) lv_obj_remove_flag(kb_path_editor, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -13339,6 +13448,8 @@ static void goto_path_editor(lv_event_t *e) {
     (void)e;
     if (!scr_path_editor) return;
     path_editor_load_for_contact(g_selected_contact_idx);
+    if (meck_hw_keyboard_active() && kb_path_editor)
+        lv_obj_add_flag(kb_path_editor, LV_OBJ_FLAG_HIDDEN);
     lv_screen_load(scr_path_editor);
 }
 
@@ -14124,7 +14235,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                     "Not in circuit\n(source: kbd)");
                 snprintf(kbuf, sizeof(kbuf),
                     "V:    %u mV\n"
-                    "Chg:  ~%u%%\n"
+                    "Chg:  ~%u%% est.\n"
                     "Cur:  %s%d mA %s\n"
                     "Rem:  ~%u/%u est.\n"
                     "TTE:  %s",
@@ -15130,6 +15241,9 @@ static void on_admin_password_eye_tap(lv_event_t *e) {
 static void on_admin_password_focused(lv_event_t *e) {
     if (kb_admin_password && ta_admin_password) {
         lv_keyboard_set_textarea(kb_admin_password, ta_admin_password);
+        // Hardware keyboard: keep the on-screen keyboard down; the binding
+        // above stays so the poll routes Enter/Esc through it.
+        if (meck_hw_keyboard_active()) return;
         lv_obj_clear_flag(kb_admin_password, LV_OBJ_FLAG_HIDDEN);
     }
 }
@@ -16666,6 +16780,9 @@ static void on_admin_cmd_send_tap(lv_event_t *e) {
 static void on_admin_cmd_input_focused(lv_event_t *e) {
     if (!kb_admin_cmd_input) return;
     lv_keyboard_set_textarea(kb_admin_cmd_input, ta_admin_cmd_input);
+    // Hardware keyboard: keep the on-screen keyboard down and the input in
+    // its resting position; the binding above stays for Enter/Esc routing.
+    if (meck_hw_keyboard_active()) return;
     lv_obj_remove_flag(kb_admin_cmd_input, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(kb_admin_cmd_input);
     if (ta_admin_cmd_input)
@@ -17953,12 +18070,12 @@ static void meck_home_page_step(int delta) {
     if (!g_tileview) return;
     lv_obj_t *act = lv_tileview_get_tile_act(g_tileview);
     int idx = -1;
-    for (int i = 0; i < MECK_HOME_TILE_COUNT; i++) {
+    for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
         if (g_home_tiles[i] && g_home_tiles[i] == act) { idx = i; break; }
     }
     if (idx < 0) return;
     const int next = idx + delta;
-    if ((next < 0) || (next >= MECK_HOME_TILE_COUNT)) return;
+    if ((next < 0) || (next >= MECK_HOME_PAGE_COUNT)) return;
     if (!g_home_tiles[next]) return;
     lv_tileview_set_tile_by_index(g_tileview, (uint32_t)next, 0, LV_ANIM_ON);
 }
@@ -18172,7 +18289,7 @@ static void meck_ui_teardown_screens() {
         if (*screens[i]) { lv_obj_delete(*screens[i]); *screens[i] = NULL; }
     }
     g_tileview = NULL;   // was a child of scr_home, already freed above
-    for (int i = 0; i < MECK_HOME_TILE_COUNT; i++) g_home_tiles[i] = NULL;
+    for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) g_home_tiles[i] = NULL;
 
     meck_audio_ui_teardown();
     meck_reader_ui_teardown();

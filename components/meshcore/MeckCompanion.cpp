@@ -769,12 +769,24 @@ void MeckCompanion::handleCmdFrame(size_t len) {
     // ---- CMD_SET_CHANNEL (32) ---- import/update a channel
     if (cmd == CMD_SET_CHANNEL && len >= 2 + 32 + 16) {
         uint8_t channel_idx = _cmd[1];
+        // Capture the slot's current occupant before the overwrite: message
+        // history is keyed by channel identity, so if the app puts a
+        // different channel in this slot, the ring must be reloaded for the
+        // new occupant instead of inheriting the previous occupant's
+        // messages.
+        ChannelDetails prev;
+        bool had_prev = _mesh->getChannel(channel_idx, prev) && prev.name[0] != '\0';
         ChannelDetails channel;
         strzcpy(channel.name, (char*)&_cmd[2], 32);
         memset(channel.channel.secret, 0, sizeof(channel.channel.secret));
         memcpy(channel.channel.secret, &_cmd[2 + 32], 16);  // 128-bit key
         if (_mesh->setChannel(channel_idx, channel)) {
             _mesh->saveChannels();
+            if (!had_prev ||
+                memcmp(prev.channel.secret, channel.channel.secret,
+                       sizeof(channel.channel.secret)) != 0) {
+                _mesh->reloadChannelSlot(channel_idx);
+            }
             writeOKFrame();
         } else {
             writeErrFrame(ERR_CODE_NOT_FOUND);

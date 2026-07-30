@@ -1266,14 +1266,17 @@ public:
     // record count is computed at load time from file size. This keeps per-
     // message IO tiny (~308 bytes) and avoids rewriting the whole file.
     //
-    // Schema mismatch policy: file is renamed to ch_<idx>.bin.bak and a
+    // Schema mismatch policy: the file is renamed to <name>.bak and a
     // fresh file is created. Old data is preserved (renamed) for recovery
     // but the in-RAM ring starts empty.
     // =====================================================================
 
     // Build the per-channel file path. out_buf must be >= 64 bytes.
-    static void buildMessagePath(uint8_t channel_idx, char* out_buf, size_t buf_len) {
-        snprintf(out_buf, buf_len, "%s/ch_%u.bin", SD_MESSAGES_DIR, (unsigned)channel_idx);
+    // Keyed by the channel's identity (Meck::channelIdent of its secret),
+    // NOT by slot index -- history follows the channel through any table
+    // reshuffle (delete-and-compact, companion rewrites, config imports).
+    static void buildMessagePath(uint32_t ident, char* out_buf, size_t buf_len) {
+        snprintf(out_buf, buf_len, "%s/chm_%08x.bin", SD_MESSAGES_DIR, (unsigned)ident);
     }
 
     // Ensure a single directory exists. Returns true if it now exists (was
@@ -1318,7 +1321,7 @@ public:
     // record (e.g. heard_count updates) can seek directly without scanning.
     //
     // Returns true on successful append.
-    bool appendChannelMessageRecord(uint8_t channel_idx,
+    bool appendChannelMessageRecord(uint32_t ident,
                                      uint32_t expected_magic,
                                      uint16_t expected_version,
                                      uint16_t record_size,
@@ -1332,7 +1335,7 @@ public:
         ensureMessagesDir();
 
         char path[80];
-        buildMessagePath(channel_idx, path, sizeof(path));
+        buildMessagePath(ident, path, sizeof(path));
 
         // Try opening for read/write (existing file); fall through to fresh
         // create if it doesn't exist or is truncated.
@@ -1358,9 +1361,9 @@ public:
                 // single 16-bit field at offset 4 of the file (header is
                 // [u32 magic][u16 version][u16 record_size][u32 reserved x 2]).
                 if (hdr.version < expected_version) {
-                    ESP_LOGI(TAG, "appendChannelMessageRecord: upgrading ch %u "
+                    ESP_LOGI(TAG, "appendChannelMessageRecord: upgrading ch %08x "
                                   "header v%u -> v%u in place",
-                             (unsigned)channel_idx,
+                             (unsigned)ident,
                              (unsigned)hdr.version, (unsigned)expected_version);
                     if (fseek(f, (long)sizeof(uint32_t), SEEK_SET) == 0) {
                         uint16_t v = expected_version;
@@ -1387,11 +1390,11 @@ public:
             snprintf(bak_path, sizeof(bak_path), "%s.bak", path);
             remove(bak_path);  // ignore failure if no prior bak
             if (rename(path, bak_path) == 0) {
-                ESP_LOGW(TAG, "appendChannelMessageRecord: schema mismatch on ch %u, "
-                              "renamed to %s, starting fresh", (unsigned)channel_idx, bak_path);
+                ESP_LOGW(TAG, "appendChannelMessageRecord: schema mismatch on ch %08x, "
+                              "renamed to %s, starting fresh", (unsigned)ident, bak_path);
             } else {
-                ESP_LOGW(TAG, "appendChannelMessageRecord: schema mismatch on ch %u, "
-                              "rename failed (errno=%d), overwriting", (unsigned)channel_idx, errno);
+                ESP_LOGW(TAG, "appendChannelMessageRecord: schema mismatch on ch %08x, "
+                              "rename failed (errno=%d), overwriting", (unsigned)ident, errno);
             }
             fresh_file = true;
         } else {
@@ -1440,7 +1443,7 @@ public:
     // missing, header bad, offset out of range) the rewrite is skipped
     // and false returned — the in-RAM state is still correct, just not
     // synced to disk this time around.
-    bool rewriteChannelMessageRecord(uint8_t channel_idx,
+    bool rewriteChannelMessageRecord(uint32_t ident,
                                       uint32_t expected_magic,
                                       uint16_t expected_version,
                                       uint32_t file_offset,
@@ -1452,7 +1455,7 @@ public:
         if (!p4_sdcard_is_mounted()) return false;
 
         char path[80];
-        buildMessagePath(channel_idx, path, sizeof(path));
+        buildMessagePath(ident, path, sizeof(path));
         if (!p4_sdcard_file_exists(path)) return false;
 
         FILE* f = fopen(path, "r+b");
@@ -1470,8 +1473,8 @@ public:
             hdr.record_size != record_size ||
             hdr.version > expected_version) {
             fclose(f);
-            ESP_LOGW(TAG, "rewriteChannelMessageRecord: header check failed on ch %u",
-                     (unsigned)channel_idx);
+            ESP_LOGW(TAG, "rewriteChannelMessageRecord: header check failed on ch %08x",
+                     (unsigned)ident);
             return false;
         }
 
@@ -1494,15 +1497,14 @@ public:
         return wrote == record_size;
     }
 
-    // Delete the entire message file for a channel slot. Used when a
-    // channel is removed from the picker, so the slot can be re-used
-    // for a fresh channel without inheriting the old channel's history.
-    // Returns true if the file was removed (or didn't exist to begin
-    // with); false on a hard error.
-    bool deleteChannelMessageFile(uint8_t channel_idx) {
+    // Delete the entire message file for a channel identity. Used when a
+    // channel is deleted, so its history does not outlive it. Returns
+    // true if the file was removed (or didn't exist to begin with);
+    // false on a hard error.
+    bool deleteChannelMessageFile(uint32_t ident) {
         if (!p4_sdcard_is_mounted()) return false;
         char path[80];
-        buildMessagePath(channel_idx, path, sizeof(path));
+        buildMessagePath(ident, path, sizeof(path));
         if (!p4_sdcard_file_exists(path)) return true;
         if (unlink(path) == 0) {
             ESP_LOGI(TAG, "deleteChannelMessageFile: removed %s", path);
@@ -1513,27 +1515,38 @@ public:
         return false;
     }
 
-    // Rename a channel's message file when its slot index changes (e.g.
-    // delete-and-compact shifts channels down to fill a gap). Returns
-    // true if the rename succeeded, or if there was no source file to
-    // rename (a slot that never had any messages persisted). False on
-    // a hard error.
-    bool renameChannelMessageFile(uint8_t from_idx, uint8_t to_idx) {
-        if (!p4_sdcard_is_mounted()) return false;
-        if (from_idx == to_idx) return true;
-        char from_path[80], to_path[80];
-        buildMessagePath(from_idx, from_path, sizeof(from_path));
-        buildMessagePath(to_idx,   to_path,   sizeof(to_path));
-        if (!p4_sdcard_file_exists(from_path)) return true;
-        // Clear any stale file at the destination so rename doesn't fail.
-        if (p4_sdcard_file_exists(to_path)) unlink(to_path);
-        if (rename(from_path, to_path) == 0) {
-            ESP_LOGI(TAG, "renameChannelMessageFile: %s -> %s", from_path, to_path);
-            return true;
+    // One-time purge of the old slot-keyed history layout (ch_<N>.bin).
+    // The identity-keyed layout cannot tell whether a legacy file's
+    // contents actually belong to the channel now at that slot -- earlier
+    // deletes could already have mixed them -- so rather than migrate
+    // suspect files, the first boot of this layout removes them and
+    // history starts empty and correctly labelled. Guarded by an NVS flag
+    // so it runs exactly once; if the SD card is not mounted the flag is
+    // left unset and the purge retries on the next boot.
+    void purgeLegacySlotMessageFiles(int max_slots) {
+        if (!_initialized) return;
+        nvs_handle_t h;
+        uint8_t done = 0;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_u8(h, "chm_purge", &done);
+            nvs_close(h);
         }
-        ESP_LOGW(TAG, "renameChannelMessageFile: rename(%s, %s) failed (errno=%d)",
-                 from_path, to_path, errno);
-        return false;
+        if (done) return;
+        if (!p4_sdcard_is_mounted()) return;  // retry next boot
+
+        int removed = 0;
+        char path[80];
+        for (int i = 0; i < max_slots; i++) {
+            snprintf(path, sizeof(path), "%s/ch_%d.bin", SD_MESSAGES_DIR, i);
+            if (p4_sdcard_file_exists(path) && unlink(path) == 0) removed++;
+        }
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u8(h, "chm_purge", 1);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        ESP_LOGI(TAG, "purgeLegacySlotMessageFiles: removed %d legacy "
+                      "slot-keyed history files", removed);
     }
 
 
@@ -1552,7 +1565,7 @@ public:
     // the file at which records_buf[i] was read. Callers use this to
     // populate file_offset on each in-memory message so subsequent
     // in-place rewrites can target the correct disk location.
-    int loadChannelMessageTail(uint8_t channel_idx,
+    int loadChannelMessageTail(uint32_t ident,
                                 uint32_t expected_magic,
                                 uint16_t expected_version,
                                 uint16_t record_size,
@@ -1564,7 +1577,7 @@ public:
         if (!p4_sdcard_is_mounted()) return 0;
 
         char path[80];
-        buildMessagePath(channel_idx, path, sizeof(path));
+        buildMessagePath(ident, path, sizeof(path));
         if (!p4_sdcard_file_exists(path)) return 0;
 
         FILE* f = fopen(path, "rb");
@@ -1586,17 +1599,17 @@ public:
             hdr.record_size != record_size ||
             hdr.version > expected_version) {
             fclose(f);
-            ESP_LOGW(TAG, "loadChannelMessageTail: schema mismatch on ch %u "
+            ESP_LOGW(TAG, "loadChannelMessageTail: schema mismatch on ch %08x "
                           "(file v%u, expected <= v%u, size %u vs %u), skipping",
-                     (unsigned)channel_idx,
+                     (unsigned)ident,
                      (unsigned)hdr.version, (unsigned)expected_version,
                      (unsigned)hdr.record_size, (unsigned)record_size);
             return 0;
         }
         if (hdr.version < expected_version) {
-            ESP_LOGI(TAG, "loadChannelMessageTail: ch %u loading legacy v%u "
+            ESP_LOGI(TAG, "loadChannelMessageTail: ch %08x loading legacy v%u "
                           "(layout-compatible with v%u)",
-                     (unsigned)channel_idx,
+                     (unsigned)ident,
                      (unsigned)hdr.version, (unsigned)expected_version);
         }
 
@@ -1627,8 +1640,8 @@ public:
             }
         }
 
-        ESP_LOGI(TAG, "loadChannelMessageTail: ch %u loaded %d of %ld total",
-                 (unsigned)channel_idx, loaded, total_records);
+        ESP_LOGI(TAG, "loadChannelMessageTail: ch %08x loaded %d of %ld total",
+                 (unsigned)ident, loaded, total_records);
         return loaded;
     }
 
