@@ -138,7 +138,9 @@ constexpr const uint32_t Tca8418_Map_Lvgl_Shift[] =
         '!', '@', '#', '$', '%', '^', '&', '*',
         '\'', '_', '-', '+', '=', '\\', '|', ';', ':', '"',
         0x8D, // Caps Lock  自定义值
-        '~', '[', ']', '{', '}', '\'', '`', '/', '?',
+        // Meck: Fn+H types ',' (was a duplicate apostrophe; the vendor
+        // map carried no comma anywhere, and H sits directly above B = '.')
+        '~', '[', ']', '{', '}', ',', '`', '/', '?',
         0x8E, // Alt  自定义值
         0x8F, 0x90, 0x91, 0x92, '.', '<', '>',
         0x93, // Ctrl  自定义值

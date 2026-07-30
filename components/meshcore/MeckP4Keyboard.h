@@ -63,7 +63,7 @@ public:
 
         // Keyboard backlight via the SY7200A's enable/dimming pin. Plain
         // high drives the LED string at full output, which measured about
-        // +1 A of battery draw, so the pin is driven with LEDC PWM at 50%
+        // +1 A of battery draw, so the pin is driven with LEDC PWM at 25%
         // duty instead (datasheet dimming range 20 kHz - 1 MHz; 20 kHz
         // keeps it above audible). Channel 1 is the one LilyGo's own
         // example reserves for KEYBOARD_BL; timer 1 avoids sharing
@@ -147,10 +147,11 @@ public:
 private:
     // Custom codes assigned to the modifier keys by Tca8418_Map_Lvgl in
     // t_display_p4_keyboard_config.h.
-    // Backlight PWM: LEDC channel 1 / timer 1, 10-bit, 20 kHz, 50% duty.
+    // Backlight PWM: LEDC channel 1 / timer 1, 10-bit, 20 kHz, 25% duty
+    // (50% still measured ~600 mA pack discharge with it on).
     static constexpr ledc_timer_t   kBlTimer   = LEDC_TIMER_1;
     static constexpr ledc_channel_t kBlChannel = LEDC_CHANNEL_1;
-    static constexpr uint32_t       kBlDuty    = 512;
+    static constexpr uint32_t       kBlDuty    = 256;
 
     static constexpr uint32_t kKeyCaps   = 0x8B;
     static constexpr uint32_t kKeyAlt    = 0x8C;
@@ -232,7 +233,7 @@ private:
         return base;
     }
 
-    // Backlight on = fixed 50% PWM duty (512 of 1024), off = 0. Session
+    // Backlight on = fixed 25% PWM duty (256 of 1024), off = 0. Session
     // state only -- not persisted, so it comes up off after every boot.
     void set_backlight(bool on) {
         ledc_set_duty(LEDC_LOW_SPEED_MODE, kBlChannel, on ? kBlDuty : 0);

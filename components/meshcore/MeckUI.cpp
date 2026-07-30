@@ -1626,6 +1626,11 @@ static void get_tile_colors(int idx, lv_color_t *bg, lv_color_t *border,
             break;
         }
     }
+
+    // Web (creation idx 9): deep purple instead of the palette's amber,
+    // which stacked directly under Notes' yellow in the landscape grid.
+    // (Rose #FF0055 was tried and read as a near-twin of Discover's pink.)
+    if (idx == 9) *border = lv_palette_main(LV_PALETTE_DEEP_PURPLE);
 }
 
 // Repaint every registered tile to match the current scheme. Cheap: just
