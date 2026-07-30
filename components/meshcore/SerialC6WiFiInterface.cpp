@@ -35,7 +35,7 @@ SerialC6WiFiInterface::SerialC6WiFiInterface()
       _rx_len(0), _parse_state(PS_LINE), _line_len(0),
       _ipd_remain(0), _stream_len(0),
       _recv_queue_len(0), _send_queue_len(0),
-      _last_write_ms(0)
+      _last_write_ms(0), _link_wedged(false)
 {
     _ssid[0] = '\0';
     _password[0] = '\0';
@@ -92,7 +92,16 @@ bool SerialC6WiFiInterface::atCmd(const char* cmd, int timeout_ms) {
 
     char buf[256];
     int n = snprintf(buf, sizeof(buf), "%s\r\n", cmd);
-    _at->send_packet(buf, n);
+    if (_at->send_packet(buf, n) == false) {
+        // The command never left the host: the SDIO TX buffer handshake
+        // timed out (esp_at get_tx_block_buffer_length). Waiting for a reply
+        // to a command that was never transmitted only burns the timeout.
+        // This is the wedged-link signature bulk contact traffic produces;
+        // flag it so the recovery pass can reset the C6.
+        _link_wedged = true;
+        C6WIFI_LOG("atCmd: TX failed (C6 link wedged): %s", cmd);
+        return false;
+    }
     // Mask credentials in log output
     if (strncmp(cmd, "AT+CWJAP=", 9) == 0) {
         C6WIFI_LOG(">> AT+CWJAP=\"%s\",\"****\"", _ssid);
@@ -428,18 +437,24 @@ void SerialC6WiFiInterface::disable() {
     if (!_enabled) return;
     _enabled = false;
 
-    // Close client connection if any
-    if (_client_connected && _client_id >= 0) {
-        char cmd[32];
-        snprintf(cmd, sizeof(cmd), "AT+CIPCLOSE=%d", _client_id);
-        atCmd(cmd, 1000);
+    // With a wedged SDIO link these commands cannot be carried; each one
+    // just burns its full timeout (observed: "AT timeout: AT+CIPSERVER=0" /
+    // "AT+CWQAP"). Skip them and clear state locally; the C6 reset that
+    // recovery performs supersedes any tidy-up they would have done.
+    if (!_link_wedged) {
+        // Close client connection if any
+        if (_client_connected && _client_id >= 0) {
+            char cmd[32];
+            snprintf(cmd, sizeof(cmd), "AT+CIPCLOSE=%d", _client_id);
+            atCmd(cmd, 1000);
+        }
+
+        // Stop server
+        atCmd("AT+CIPSERVER=0", 1000);
+
+        // Disconnect WiFi
+        atCmd("AT+CWQAP", 2000);
     }
-
-    // Stop server
-    atCmd("AT+CIPSERVER=0", 1000);
-
-    // Disconnect WiFi
-    atCmd("AT+CWQAP", 2000);
 
     _client_connected = false;
     _client_id = -1;
@@ -447,6 +462,20 @@ void SerialC6WiFiInterface::disable() {
     _ip_addr[0] = '\0';
     clearBuffers();
     C6WIFI_LOG("disabled");
+}
+
+// Tear down all state without touching the C6. Used when the SDIO link is
+// wedged: disable()'s AT commands cannot be carried by a dead link. Also the
+// first step of recovery before Esp_At::begin() reboots the C6.
+void SerialC6WiFiInterface::forceDown() {
+    _enabled = false;
+    _wifi_connected = false;
+    _client_connected = false;
+    _client_id = -1;
+    _ip_addr[0] = '\0';
+    clearBuffers();
+    _link_wedged = false;
+    C6WIFI_LOG("forceDown: state cleared (no AT traffic)");
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +530,8 @@ size_t SerialC6WiFiInterface::checkRecvFrame(uint8_t dest[]) {
 
         _got_prompt = false;
         _got_error = false;
-        _at->send_packet(cmd, cmd_n);
+        bool tx_ok = _at->send_packet(cmd, cmd_n);
+        bool any_tx_ok = tx_ok;
 
         // Wait for '>' prompt. The C6's SDIO TX buffer can overflow during
         // burst sends (e.g. 610-contact export), causing send_packet to
@@ -514,8 +544,12 @@ size_t SerialC6WiFiInterface::checkRecvFrame(uint8_t dest[]) {
                 vTaskDelay(pdMS_TO_TICKS(50 * retry));
                 _got_prompt = false;
                 _got_error = false;
-                _at->send_packet(cmd, cmd_n);
+                tx_ok = _at->send_packet(cmd, cmd_n);
+                any_tx_ok = any_tx_ok || tx_ok;
             }
+            // If the command never left the host there is no prompt to wait
+            // for; skip straight to the next retry instead of burning 500 ms.
+            if (!tx_ok) continue;
             unsigned long t0 = millis();
             while ((long)(millis() - t0) < 500) {
                 pollSDIO();
@@ -534,7 +568,16 @@ size_t SerialC6WiFiInterface::checkRecvFrame(uint8_t dest[]) {
             pollSDIO();
             drainLines();
         } else {
-            C6WIFI_LOG("CIPSEND: failed, client likely disconnected");
+            if (!any_tx_ok) {
+                // Not a client problem: the CIPSEND command itself never made
+                // it across SDIO on any attempt. Declaring "client
+                // disconnected" here is what left the UI showing a live IP
+                // while nothing could reply. Flag the link for recovery.
+                C6WIFI_LOG("CIPSEND: C6 SDIO TX wedged -- flagging for recovery");
+                _link_wedged = true;
+            } else {
+                C6WIFI_LOG("CIPSEND: failed, client likely disconnected");
+            }
             _client_connected = false;
             _client_id = -1;
             _send_queue_len = 0;  // flush remaining sends

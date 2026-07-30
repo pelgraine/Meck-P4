@@ -420,6 +420,11 @@ static int       tile_button_count = 0;
 
 static lv_obj_t *scr_home          = NULL;
 static lv_obj_t *g_tileview        = NULL;
+// The seven home tiles, kept so the active page index can be resolved.
+// lv_tileview_get_tile_act() hands back the tile object but not its column, and
+// the objects are otherwise locals in meck_ui_build_screens().
+#define MECK_HOME_TILE_COUNT 7
+static lv_obj_t *g_home_tiles[MECK_HOME_TILE_COUNT] = { NULL };
 
 // Web reader browser screen (Stage 3)
 static lv_obj_t   *scr_web          = NULL;
@@ -508,6 +513,17 @@ static lv_obj_t *lbl_radio_detail  = NULL;
 static lv_obj_t *lbl_advert_status = NULL;
 static lv_obj_t *lbl_gps_detail    = NULL;
 static lv_obj_t *lbl_battery_detail = NULL;
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+// Keyboard-pack column on the battery tile. One gauge serves both batteries
+// (the selector puts exactly one of them on the rail), so g_p4batt_source is
+// the user's declaration of the physical switch position: 0 = internal cell,
+// 1 = keyboard pack. It decides which column shows the live readings.
+static lv_obj_t *lbl_kbd_batt_header = NULL;
+static lv_obj_t *lbl_kbd_batt_detail = NULL;
+static lv_obj_t *lbl_kbd_batt_cap    = NULL;
+static uint8_t   g_p4batt_source  = 0;
+static uint16_t  g_p4batt_cap_mah = 5000;   // declared pack capacity (1 or 2 cells)
+#endif
 
 // Noise floor display cache. The estimator itself lives in P4SX1262Radio
 // (sampled every 2 s under the SPI lock via SX126x GetRssiInst, opcode
@@ -1559,6 +1575,32 @@ static void save_home_color_to_nvs() {
     nvs_commit(h);
     nvs_close(h);
 }
+
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+static void load_p4batt_prefs_from_nvs() {
+    nvs_handle_t h;
+    if (nvs_open("meckui", NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t  src = 0;
+    uint16_t cap = 5000;
+    if (nvs_get_u8(h, "p4batt_src", &src) == ESP_OK && src <= 1) {
+        g_p4batt_source = src;
+    }
+    if (nvs_get_u16(h, "p4batt_cap", &cap) == ESP_OK &&
+        (cap == 5000 || cap == 10000)) {
+        g_p4batt_cap_mah = cap;
+    }
+    nvs_close(h);
+}
+
+static void save_p4batt_prefs_to_nvs() {
+    nvs_handle_t h;
+    if (nvs_open("meckui", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h,  "p4batt_src", g_p4batt_source);
+    nvs_set_u16(h, "p4batt_cap", g_p4batt_cap_mah);
+    nvs_commit(h);
+    nvs_close(h);
+}
+#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
 
 // Returns the bg/border colours and border width for tile `idx` under the
 // current scheme. Adding a new scheme = adding a branch here.
@@ -5528,6 +5570,25 @@ static void on_battery_label_tap(lv_event_t *e) {
     battery_ticks = 600;
 }
 
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+// Blue "KBD" header: declares which battery the physical selector has on the
+// rail. Live in both states -- it is the way back.
+static void on_kbd_batt_header_tap(lv_event_t *e) {
+    (void)e;
+    g_p4batt_source = g_p4batt_source ? 0 : 1;
+    save_p4batt_prefs_to_nvs();
+}
+
+// Capacity line: cycles the declared pack size. Inert (self-gated) while the
+// internal cell is the declared source, per the grey-side-is-inert rule.
+static void on_kbd_batt_cap_tap(lv_event_t *e) {
+    (void)e;
+    if (g_p4batt_source != 1) return;
+    g_p4batt_cap_mah = (g_p4batt_cap_mah == 5000) ? 10000 : 5000;
+    save_p4batt_prefs_to_nvs();
+}
+#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+
 // Attach the clock + battery pair to a home tile and register them in the
 // per-tile arrays so ui_update_timer_cb can drive them. Called once from
 // each tile builder. The battery field is space-padded to 4 chars in the
@@ -5664,6 +5725,9 @@ static void create_page_home(lv_obj_t *page) {
     // rebuild) and clear the tile registry so this build's tiles are the
     // only ones tracked.
     load_home_color_from_nvs();
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    load_p4batt_prefs_from_nvs();
+#endif
     tile_button_count = 0;
     for (int i = 0; i < MECK_HOME_TILE_COUNT; i++) tile_buttons[i] = NULL;
 
@@ -5906,10 +5970,58 @@ static void create_page_battery(lv_obj_t *page) {
     lv_obj_set_style_text_color(lbl_battery_detail, lv_color_white(), 0);
     meck_set_font(lbl_battery_detail, &meck_montserrat_18, 0);
     lv_label_set_long_mode(lbl_battery_detail, LV_LABEL_LONG_WRAP);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // Two-column layout: internal cell left, keyboard pack right. 540 px wide
+    // panel, so each column gets just under half and the line labels in the
+    // update callback are compressed to match.
+    lv_obj_set_width(lbl_battery_detail, (SCREEN_WIDTH / 2) - NOTCH_SAFE_X - 10);
+#else
     lv_obj_set_width(lbl_battery_detail, SCREEN_WIDTH - 40);
+#endif
     lv_obj_align(lbl_battery_detail, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, 80);
 
     home_attach_clock_battery(page, 5);
+
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // Blue keyboard-pack header in the top row: right of the clock, level with
+    // the battery percent -- the slot the now-playing label uses on the other
+    // tiles. "KBD" rather than "Keyboard": the gap between the clock and the
+    // percent is ~80 px and the full word at this size is ~110 px.
+    lbl_kbd_batt_header = lv_label_create(page);
+    lv_label_set_text(lbl_kbd_batt_header, "KBD");
+    lv_obj_set_style_text_color(lbl_kbd_batt_header,
+                                lv_palette_main(LV_PALETTE_BLUE), 0);
+    meck_set_font(lbl_kbd_batt_header, &meck_montserrat_24, 0);
+    lv_obj_set_style_text_align(lbl_kbd_batt_header, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(lbl_kbd_batt_header, LV_ALIGN_TOP_RIGHT, -85, NOTCH_SAFE_Y);
+    lv_obj_add_flag(lbl_kbd_batt_header, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(lbl_kbd_batt_header, on_kbd_batt_header_tap,
+                        LV_EVENT_CLICKED, NULL);
+
+    // This tile's now-playing label shares that slot; hide it here so the two
+    // never overlap. The updater null-checks but writes to hidden labels
+    // harmlessly, so only the flag is needed.
+    if (lbl_home_audio[5]) lv_obj_add_flag(lbl_home_audio[5], LV_OBJ_FLAG_HIDDEN);
+
+    lbl_kbd_batt_detail = lv_label_create(page);
+    lv_label_set_text(lbl_kbd_batt_detail, "");
+    lv_obj_set_style_text_color(lbl_kbd_batt_detail, lv_color_hex(0x808080), 0);
+    meck_set_font(lbl_kbd_batt_detail, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_kbd_batt_detail, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_kbd_batt_detail, (SCREEN_WIDTH / 2) - 25);
+    lv_obj_align(lbl_kbd_batt_detail, LV_ALIGN_TOP_LEFT,
+                 (SCREEN_WIDTH / 2) + 5, 80);
+
+    lbl_kbd_batt_cap = lv_label_create(page);
+    lv_label_set_text(lbl_kbd_batt_cap, "");
+    lv_obj_set_style_text_color(lbl_kbd_batt_cap, lv_color_hex(0x808080), 0);
+    meck_set_font(lbl_kbd_batt_cap, &meck_montserrat_18, 0);
+    lv_obj_align(lbl_kbd_batt_cap, LV_ALIGN_TOP_LEFT,
+                 (SCREEN_WIDTH / 2) + 5, 215);
+    lv_obj_add_flag(lbl_kbd_batt_cap, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(lbl_kbd_batt_cap, on_kbd_batt_cap_tap,
+                        LV_EVENT_CLICKED, NULL);
+#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
 }
 
 // ============================================================================
@@ -13896,8 +14008,26 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         && lv_obj_get_parent(lbl_battery_detail) == lv_tileview_get_tile_act(g_tileview)
         && !meck_screen_is_off();
     if (battery_tile_visible) {
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+        // Two columns, one gauge. The declared source gets the live white
+        // column; the other side is grey and inert. Headers keep their colour
+        // in both states.
+        const bool kbd_src = (g_p4batt_source == 1);
+        lv_obj_set_style_text_color(lbl_battery_detail,
+            kbd_src ? lv_color_hex(0x808080) : lv_color_white(), 0);
+        if (lbl_kbd_batt_detail)
+            lv_obj_set_style_text_color(lbl_kbd_batt_detail,
+                kbd_src ? lv_color_white() : lv_color_hex(0x808080), 0);
+        if (lbl_kbd_batt_cap)
+            lv_obj_set_style_text_color(lbl_kbd_batt_cap,
+                kbd_src ? lv_color_white() : lv_color_hex(0x808080), 0);
+#endif
         if (!meck_battery_available()) {
             lv_label_set_text(lbl_battery_detail, "BQ27220 not detected");
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+            if (lbl_kbd_batt_detail) lv_label_set_text(lbl_kbd_batt_detail, "");
+            if (lbl_kbd_batt_cap)    lv_label_set_text(lbl_kbd_batt_cap, "");
+#endif
         } else {
             uint16_t mv         = meck_battery_voltage_mv();
             int16_t  ma         = meck_battery_current_ma();
@@ -13908,11 +14038,13 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             uint16_t full_mah   = meck_battery_full_charge_mah();
             uint16_t tte_min    = meck_battery_time_to_empty_min();
 
-            const char* current_label;
             int16_t     current_abs = ma < 0 ? -ma : ma;
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+            const char* current_label;
             if (current_abs < 5)      current_label = "idle";
-            else if (ma > 0)          current_label = "charging";
-            else                      current_label = "discharging";
+            else if (ma > 0)          current_label = "chg";
+            else                      current_label = "dis";
+#endif
 
             char tte_buf[32];
             if (tte_min == 0xFFFF || tte_min == 0 || ma > 0) {
@@ -13922,6 +14054,65 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                          (unsigned)(tte_min / 60),
                          (unsigned)(tte_min % 60));
             }
+
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+            char buf[512];
+            char kbuf[256];
+            char capbuf[48];
+            if (!kbd_src) {
+                // Internal cell live; keyboard side idle. Labels compressed to
+                // fit the half-width column.
+                int diff = (int)pct_chip - (int)pct_volts;
+                if (diff < 0) diff = -diff;
+                const char* trust_note = (diff > 30)
+                    ? "\nNote: chip vs volt\nSoC differ, check\ncalibration."
+                    : "";
+                snprintf(buf, sizeof(buf),
+                    "V:    %u mV\n"
+                    "Chg:  %u%% [chip]\n"
+                    "Cur:  %s%d mA %s\n"
+                    "Temp: %d C\n"
+                    "Rem:  %u/%u\n"
+                    "TTE:  %s%s",
+                    (unsigned)mv,
+                    (unsigned)pct_chip,
+                    ma > 0 ? "+" : "", (int)ma, current_label,
+                    (int)temp_c,
+                    (unsigned)rem_mah, (unsigned)full_mah,
+                    tte_buf,
+                    trust_note);
+                snprintf(kbuf, sizeof(kbuf), "Pack not\nselected");
+                snprintf(capbuf, sizeof(capbuf), "Cap: %u mAh",
+                         (unsigned)g_p4batt_cap_mah);
+            } else {
+                // Keyboard pack live. Percentage from the voltage curve --
+                // the chip's SoC is calibrated for the internal cell and is
+                // meaningless for this pack. Remaining is declared-capacity
+                // arithmetic, marked as an estimate.
+                uint32_t est_rem =
+                    (uint32_t)g_p4batt_cap_mah * (uint32_t)pct_volts / 100u;
+                snprintf(buf, sizeof(buf),
+                    "Not in circuit\n(source: kbd)");
+                snprintf(kbuf, sizeof(kbuf),
+                    "V:    %u mV\n"
+                    "Chg:  ~%u%%\n"
+                    "Cur:  %s%d mA %s\n"
+                    "Rem:  ~%u/%u",
+                    (unsigned)mv,
+                    (unsigned)pct_volts,
+                    ma > 0 ? "+" : "", (int)ma, current_label,
+                    (unsigned)est_rem, (unsigned)g_p4batt_cap_mah);
+                snprintf(capbuf, sizeof(capbuf), "Cap: %u mAh (tap)",
+                         (unsigned)g_p4batt_cap_mah);
+            }
+            lv_label_set_text(lbl_battery_detail, buf);
+            if (lbl_kbd_batt_detail) lv_label_set_text(lbl_kbd_batt_detail, kbuf);
+            if (lbl_kbd_batt_cap)    lv_label_set_text(lbl_kbd_batt_cap, capbuf);
+#else
+            const char* current_label_full;
+            if (current_abs < 5)      current_label_full = "idle";
+            else if (ma > 0)          current_label_full = "charging";
+            else                      current_label_full = "discharging";
 
             int diff = (int)pct_chip - (int)pct_volts;
             if (diff < 0) diff = -diff;
@@ -13939,12 +14130,13 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                 "Time empty: %s%s",
                 (unsigned)mv,
                 (unsigned)pct_chip,
-                ma > 0 ? "+" : "",      (int)ma,        current_label,
+                ma > 0 ? "+" : "",      (int)ma,        current_label_full,
                 (int)temp_c,
                 (unsigned)rem_mah,      (unsigned)full_mah,
                 tte_buf,
                 trust_note);
             lv_label_set_text(lbl_battery_detail, buf);
+#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
         }
     }
 
@@ -17721,42 +17913,108 @@ static void meck_cardkb_init(void) {
 static MeckP4Keyboard  g_p4kbd;
 static lv_timer_t     *g_p4kbd_timer = NULL;
 
+// Step the home tileview one page left or right, matching what a swipe does.
+// Does not wrap: the first tile only allows LV_DIR_RIGHT and the last only
+// LV_DIR_LEFT, so stopping at the ends mirrors the gesture behaviour.
+static void meck_home_page_step(int delta) {
+    if (!g_tileview) return;
+    lv_obj_t *act = lv_tileview_get_tile_act(g_tileview);
+    int idx = -1;
+    for (int i = 0; i < MECK_HOME_TILE_COUNT; i++) {
+        if (g_home_tiles[i] && g_home_tiles[i] == act) { idx = i; break; }
+    }
+    if (idx < 0) return;
+    const int next = idx + delta;
+    if ((next < 0) || (next >= MECK_HOME_TILE_COUNT)) return;
+    if (!g_home_tiles[next]) return;
+    lv_tileview_set_tile_by_index(g_tileview, (uint32_t)next, 0, LV_ANIM_ON);
+}
+
+// Find the focused textarea anywhere beneath `root`, or NULL. Walking the tree
+// rather than consulting a fixed list of composer objects means every screen
+// carrying a text field is handled -- settings, channel add, region and
+// position editors, WiFi, trace and path editors, repeater admin password and
+// command entry, the web URL and search bars -- including the Notes editor,
+// whose widgets live in another translation unit and are not visible here.
+static lv_obj_t *meck_find_focused_textarea(lv_obj_t *root) {
+    if (!root) return NULL;
+    if (lv_obj_check_type(root, &lv_textarea_class) &&
+        lv_obj_has_state(root, LV_STATE_FOCUSED)) {
+        return root;
+    }
+    const uint32_t n = lv_obj_get_child_count(root);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *hit = meck_find_focused_textarea(lv_obj_get_child(root, i));
+        if (hit) return hit;
+    }
+    return NULL;
+}
+
+// Find the keyboard bound to `ta`, or NULL if this screen has none. LVGL has no
+// reverse lookup from textarea to keyboard, so compare each keyboard's binding.
+static lv_obj_t *meck_find_keyboard_for_textarea(lv_obj_t *root, lv_obj_t *ta) {
+    if (!root) return NULL;
+    if (lv_obj_check_type(root, &lv_keyboard_class) &&
+        lv_keyboard_get_textarea(root) == ta) {
+        return root;
+    }
+    const uint32_t n = lv_obj_get_child_count(root);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *hit = meck_find_keyboard_for_textarea(lv_obj_get_child(root, i), ta);
+        if (hit) return hit;
+    }
+    return NULL;
+}
+
 static void meck_p4kbd_poll(lv_timer_t *t) {
     (void)t;
     uint32_t key = g_p4kbd.read_key();
     if (key == 0) return;
 
-    lv_obj_t *kb = meck_cardkb_active_kb();
-    if (!kb) {
-        // Type-to-compose: on the channel and room message screens a printable
-        // key focuses the composer, so typing can begin without tapping into
-        // the field first. Only printable keys do this -- arrows, Enter and Esc
-        // stay available for moving around the message list without the
-        // composer springing open.
-        //
-        // Sending LV_EVENT_FOCUSED rather than only adding the state matters
-        // twice: it runs on_compose_focused, which binds the textarea to the
-        // keyboard object this poll routes through, and LVGL's own textarea
-        // handler starts the cursor blink on that same event.
-        if (key >= 0x20 && key <= 0x7E) {
-            lv_obj_t *scr    = lv_screen_active();
-            lv_obj_t *target = NULL;
-            if      (scr == scr_messages      && ta_compose)      target = ta_compose;
-            else if (scr == scr_room_messages && ta_room_compose) target = ta_room_compose;
-            if (target) {
-                lv_obj_add_state(target, LV_STATE_FOCUSED);
-                lv_obj_send_event(target, LV_EVENT_FOCUSED, NULL);
-                kb = meck_cardkb_active_kb();
-            }
+    // The textarea this key belongs to: whatever is focused on the active
+    // screen. Generic by design, so screens built elsewhere are covered too.
+    lv_obj_t *ta = meck_find_focused_textarea(lv_screen_active());
+
+    // Type-to-compose: on the message screens a printable key focuses the
+    // composer, so typing can begin without tapping into the field first. Only
+    // printable keys do this -- arrows, Enter and Esc stay available for moving
+    // around the message list without the composer springing open.
+    //
+    // Sending LV_EVENT_FOCUSED rather than only adding the state matters twice:
+    // it runs on_compose_focused, which keeps the on-screen keyboard hidden and
+    // relays out the message list, and LVGL's own textarea handler starts the
+    // cursor blink on that same event.
+    if (!ta && (key >= 0x20) && (key <= 0x7E)) {
+        lv_obj_t *scr    = lv_screen_active();
+        lv_obj_t *target = NULL;
+        if      (scr == scr_messages      && ta_compose)      target = ta_compose;
+        else if (scr == scr_room_messages && ta_room_compose) target = ta_room_compose;
+        if (target) {
+            lv_obj_add_state(target, LV_STATE_FOCUSED);
+            lv_obj_send_event(target, LV_EVENT_FOCUSED, NULL);
+            ta = target;
         }
-        if (!kb) return;                            // no composer focused
     }
-    lv_obj_t *ta = lv_keyboard_get_textarea(kb);
-    if (!ta) return;
+    // Home screen: the left and right arrows page the tileview, the same
+    // movement a swipe produces. Only when nothing is focused for text entry,
+    // so arrows keep their cursor role inside any field.
+    if (!ta && (lv_screen_active() == scr_home) &&
+        ((key == LV_KEY_LEFT) || (key == LV_KEY_RIGHT))) {
+        meck_home_page_step((key == LV_KEY_RIGHT) ? 1 : -1);
+        return;
+    }
+
+    if (!ta) return;                            // nothing focused to type into
+
+    // The keyboard bound to that textarea, if the screen has one. Enter and Esc
+    // are replayed as the events its OK and close buttons emit, so each
+    // screen's existing commit/cancel handler runs unchanged. A textarea with
+    // no keyboard still takes characters; only Enter and Esc need the object.
+    lv_obj_t *kb = meck_find_keyboard_for_textarea(lv_screen_active(), ta);
 
     switch (key) {
-        case LV_KEY_ENTER:     lv_obj_send_event(kb, LV_EVENT_READY,  NULL); break;
-        case LV_KEY_ESC:       lv_obj_send_event(kb, LV_EVENT_CANCEL, NULL); break;
+        case LV_KEY_ENTER:     if (kb) lv_obj_send_event(kb, LV_EVENT_READY,  NULL); break;
+        case LV_KEY_ESC:       if (kb) lv_obj_send_event(kb, LV_EVENT_CANCEL, NULL); break;
         case LV_KEY_BACKSPACE: lv_textarea_delete_char(ta);                  break;
         case LV_KEY_LEFT:      lv_textarea_cursor_left(ta);                  break;
         case LV_KEY_RIGHT:     lv_textarea_cursor_right(ta);                 break;
@@ -17805,6 +18063,14 @@ static void meck_ui_build_screens() {
     lv_obj_t *t_gps      = lv_tileview_add_tile(g_tileview, 4, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
     lv_obj_t *t_battery  = lv_tileview_add_tile(g_tileview, 5, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
     lv_obj_t *t_shutdown = lv_tileview_add_tile(g_tileview, 6, 0, LV_DIR_LEFT);
+
+    g_home_tiles[0] = t_home;
+    g_home_tiles[1] = t_recent;
+    g_home_tiles[2] = t_radio;
+    g_home_tiles[3] = t_advert;
+    g_home_tiles[4] = t_gps;
+    g_home_tiles[5] = t_battery;
+    g_home_tiles[6] = t_shutdown;
 
     create_page_home(t_home);
     create_page_recent(t_recent);
@@ -17873,6 +18139,7 @@ static void meck_ui_teardown_screens() {
         if (*screens[i]) { lv_obj_delete(*screens[i]); *screens[i] = NULL; }
     }
     g_tileview = NULL;   // was a child of scr_home, already freed above
+    for (int i = 0; i < MECK_HOME_TILE_COUNT; i++) g_home_tiles[i] = NULL;
 
     meck_audio_ui_teardown();
     meck_reader_ui_teardown();

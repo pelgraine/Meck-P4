@@ -30,6 +30,15 @@ public:
     // BaseSerialInterface methods
     void enable() override;
     void disable() override;
+
+    // Tear down all interface state with zero AT traffic. For use when the
+    // SDIO link to the C6 is wedged and AT commands cannot be carried.
+    void forceDown();
+
+    // True when a send established that the SDIO TX path to the C6 is dead
+    // (commands not transmittable). Cleared by forceDown(). Consumed by the
+    // recovery pass in meck_app.
+    bool isLinkWedged() const { return _link_wedged; }
     bool isEnabled() const override { return _enabled; }
 
     bool isConnected() const override { return _client_connected; }
@@ -116,4 +125,8 @@ private:
 
     static constexpr int WRITE_MIN_INTERVAL_MS = 20;
     unsigned long _last_write_ms;
+
+    // Set when send_packet() itself fails (SDIO TX buffer handshake dead),
+    // as opposed to the C6 answering ERROR. See checkRecvFrame()/atCmd().
+    bool _link_wedged;
 };

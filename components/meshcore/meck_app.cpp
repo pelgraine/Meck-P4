@@ -271,10 +271,70 @@ extern "C" const char* meck_wifi_get_ip() {
     return g_wifi_interface.getIP();
 }
 
+// ---- C6 SDIO link-wedge recovery ----
+// Bulk companion traffic (contact import/delete storms) can wedge the C6's
+// SDIO TX path: get_tx_block_buffer_length times out, RX keeps working, and
+// every later AT command dies the same way -- including disable/enable,
+// which is why toggling WiFi could not recover and only a reboot did. The
+// reboot works because boot pulses the C6 enable line (XL9535_ESP32C6_EN)
+// through Esp_At's reset callback; Esp_At::begin() performs that same pulse
+// plus full SDIO + AT re-init. This pass does it in place: tear down
+// interface state with no AT traffic, reboot the C6, re-enable with stored
+// credentials. Budget of 3 attempts; any user toggle re-arms it (the
+// counter reset in meck_apply_pending_wifi below).
+static uint8_t g_wifi_recover_attempts = 0;
+
+static void meck_wifi_check_recovery() {
+    if (!g_wifi_interface.isLinkWedged()) return;
+    if (!g_c6_at) return;
+
+    if (g_wifi_recover_attempts >= 3) {
+        printf("WiFi recovery: giving up after 3 C6 resets; toggle WiFi in Settings to retry\n");
+        g_wifi_interface.forceDown();
+        return;
+    }
+    g_wifi_recover_attempts++;
+    printf("WiFi recovery: C6 SDIO link wedged -- resetting C6 (attempt %u/3)\n",
+           (unsigned)g_wifi_recover_attempts);
+
+#if MECK_BLE_KEYBOARD_ENABLED
+    // The BLE keyboard shares the AT link; a C6 reboot forgets its state.
+    // Follow the webfetch precedent: leave it off and tell the user.
+    const bool kbd_was_enabled = g_blekbd.isEnabled();
+#endif
+
+    g_wifi_interface.forceDown();
+
+    if (g_c6_at->begin() == false) {
+        printf("WiFi recovery: C6 reset/begin FAILED\n");
+        return;
+    }
+
+#if MECK_BLE_KEYBOARD_ENABLED
+    if (kbd_was_enabled) {
+        g_blekbd.disable();
+        printf("WiFi recovery: BLE keyboard was reset with the C6 -- re-enable it in Settings\n");
+    }
+#endif
+
+    g_wifi_interface.begin(g_c6_at);
+    g_wifi_interface.setCredentials(g_node_prefs.wifi_ssid, g_node_prefs.wifi_password);
+    g_wifi_interface.enable();
+    if (g_wifi_interface.isEnabled()) {
+        printf("WiFi recovery: recovered (IP: %s)\n", g_wifi_interface.getIP());
+        g_wifi_recover_attempts = 0;
+    } else {
+        printf("WiFi recovery: enable failed after C6 reset\n");
+    }
+}
+
 static void meck_apply_pending_wifi() {
     int action = g_wifi_pending_action;
     if (action == 0) return;
     g_wifi_pending_action = 0;
+
+    // Any user action grants a fresh recovery budget.
+    g_wifi_recover_attempts = 0;
 
     if (action > 0 && !g_wifi_interface.isEnabled() && g_c6_at) {
 #if MECK_BLE_ENABLED
@@ -753,6 +813,7 @@ static void meck_task(void* arg) {
         meck_apply_pending_ble();
 #endif
         meck_apply_pending_wifi();
+        meck_wifi_check_recovery();
         meck_apply_pending_webfetch();   // Stage 1 web reader plumbing test
 #if MECK_BLE_ENABLED
         // BLE companion protocol: drain SDIO, handle app commands
