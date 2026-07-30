@@ -5577,6 +5577,11 @@ static void on_kbd_batt_header_tap(lv_event_t *e) {
     (void)e;
     g_p4batt_source = g_p4batt_source ? 0 : 1;
     save_p4batt_prefs_to_nvs();
+    // The top-right battery % now follows the declared source; force its
+    // next 500 ms tick so the toggle shows there immediately instead of at
+    // the next 5-minute refresh (same mechanism as on_battery_label_tap
+    // and the orientation rebuild).
+    battery_ticks = 600;
 }
 
 // Capacity line: cycles the declared pack size. Inert (self-gated) while the
@@ -13838,7 +13843,17 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             // before calibration landed this used pct_from_voltage as a
             // stopgap. Battery Gauge detail tile still shows raw voltage as
             // a cross-check.
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+            // Follow the declared source: while the keyboard pack is live,
+            // the chip SoC is computed against the internal cell's 1000 mAh
+            // and is meaningless for the pack, so use the voltage-curve %
+            // -- the same number the pack column on the battery tile shows.
+            pct = (g_p4batt_source == 1)
+                      ? meck_battery_pct_from_voltage(meck_battery_voltage_mv())
+                      : meck_battery_pct_from_chip();
+#else
             pct = meck_battery_pct_from_chip();
+#endif
             if      (pct >= 70) col = lv_palette_main(LV_PALETTE_GREEN);
             else if (pct >= 40) col = lv_palette_main(LV_PALETTE_ORANGE);
             else if (pct >= 20) col = lv_palette_main(LV_PALETTE_YELLOW);
@@ -14091,19 +14106,37 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                 // arithmetic, marked as an estimate.
                 uint32_t est_rem =
                     (uint32_t)g_p4batt_cap_mah * (uint32_t)pct_volts / 100u;
+                // Pack time-to-empty: estimated remaining divided by the
+                // present discharge current. Only shown while actually
+                // discharging; "--" when idle or charging. Same ~ estimate
+                // marking as the Chg/Rem rows.
+                char ktte_buf[16];
+                if (ma < 0 && current_abs >= 5) {
+                    uint32_t est_min =
+                        est_rem * 60u / (uint32_t)current_abs;
+                    snprintf(ktte_buf, sizeof(ktte_buf), "~%uh %02um",
+                             (unsigned)(est_min / 60),
+                             (unsigned)(est_min % 60));
+                } else {
+                    snprintf(ktte_buf, sizeof(ktte_buf), "--");
+                }
                 snprintf(buf, sizeof(buf),
                     "Not in circuit\n(source: kbd)");
                 snprintf(kbuf, sizeof(kbuf),
                     "V:    %u mV\n"
                     "Chg:  ~%u%%\n"
                     "Cur:  %s%d mA %s\n"
-                    "Rem:  ~%u/%u",
+                    "Rem:  ~%u/%u est.\n"
+                    "TTE:  %s",
                     (unsigned)mv,
                     (unsigned)pct_volts,
                     ma > 0 ? "+" : "", (int)ma, current_label,
-                    (unsigned)est_rem, (unsigned)g_p4batt_cap_mah);
-                snprintf(capbuf, sizeof(capbuf), "Cap: %u mAh (tap)",
-                         (unsigned)g_p4batt_cap_mah);
+                    (unsigned)est_rem, (unsigned)g_p4batt_cap_mah,
+                    ktte_buf);
+                snprintf(capbuf, sizeof(capbuf), "%s",
+                    (g_p4batt_cap_mah == 10000)
+                        ? "Cap: 10,000mAh (tap to change)"
+                        : "Cap: 1 x 5000mAh (tap to change)");
             }
             lv_label_set_text(lbl_battery_detail, buf);
             if (lbl_kbd_batt_detail) lv_label_set_text(lbl_kbd_batt_detail, kbuf);
