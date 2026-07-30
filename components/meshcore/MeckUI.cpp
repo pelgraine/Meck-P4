@@ -3953,6 +3953,18 @@ static inline void meck_panel_edit_opened(lv_obj_t *ta, lv_obj_t *kb) { (void)ta
 static inline void meck_panel_edit_closed(lv_obj_t *ta) { (void)ta; }
 #endif
 
+// Cross-module versions for UI modules built outside this file (the notes
+// editor). Same semantics; the bool return reports whether the hardware
+// keyboard is present so callers can reclaim the hidden keyboard's space.
+extern "C" bool meck_ui_panel_edit_opened(lv_obj_t *ta, lv_obj_t *kb) {
+    bool hw = meck_hw_keyboard_active();
+    meck_panel_edit_opened(ta, kb);
+    return hw;
+}
+extern "C" void meck_ui_panel_edit_closed(lv_obj_t *ta) {
+    meck_panel_edit_closed(ta);
+}
+
 static void on_settings_name_save(lv_event_t *e) {
     Meck* mesh = meck_get_instance();
     if (!mesh) return;
@@ -8049,6 +8061,7 @@ static void on_web_link_panel_close(lv_event_t *e) {
 // the typed URL.
 static void on_web_url_save(lv_event_t *e) {
     (void)e;
+    meck_panel_edit_closed(ta_web_url);
     if (ta_web_url) {
         const char *text = lv_textarea_get_text(ta_web_url);
         if (text && text[0]) {
@@ -8065,6 +8078,7 @@ static void on_web_url_save(lv_event_t *e) {
 
 static void on_web_url_cancel(lv_event_t *e) {
     (void)e;
+    meck_panel_edit_closed(ta_web_url);
     if (obj_web_url_panel) lv_obj_add_flag(obj_web_url_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -8080,12 +8094,14 @@ static void on_web_go_tap(lv_event_t *e) {
         lv_textarea_set_text(ta_web_url, g_web_current_url);
         lv_obj_remove_flag(obj_web_url_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_web_url) lv_keyboard_set_textarea(kb_web_url, ta_web_url);
+        meck_panel_edit_opened(ta_web_url, kb_web_url);
     }
 }
 
 // ---- Search entry overlay (DuckDuckGo Lite) ---------------------------------
 static void on_web_search_save(lv_event_t *e) {
     (void)e;
+    meck_panel_edit_closed(ta_web_search);
     if (ta_web_search) {
         const char *q = lv_textarea_get_text(ta_web_search);
         if (q && q[0]) {
@@ -8118,6 +8134,7 @@ static void on_web_search_save(lv_event_t *e) {
 
 static void on_web_search_cancel(lv_event_t *e) {
     (void)e;
+    meck_panel_edit_closed(ta_web_search);
     if (obj_web_search_panel) lv_obj_add_flag(obj_web_search_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -8133,6 +8150,7 @@ static void on_web_search_tap(lv_event_t *e) {
         lv_textarea_set_text(ta_web_search, "");
         lv_obj_remove_flag(obj_web_search_panel, LV_OBJ_FLAG_HIDDEN);
         if (kb_web_search) lv_keyboard_set_textarea(kb_web_search, ta_web_search);
+        meck_panel_edit_opened(ta_web_search, kb_web_search);
     }
 }
 
@@ -8198,6 +8216,8 @@ static void open_form_fill(int f) {
     web_fill_rebuild(f);
     if (obj_web_form_panel) lv_obj_add_flag(obj_web_form_panel, LV_OBJ_FLAG_HIDDEN);
     if (obj_web_fill_panel) lv_obj_remove_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
+    // Focus the first field; its FOCUSED handler re-points kb_web_fill.
+    meck_panel_edit_opened(g_fill_ta_count > 0 ? g_fill_ta[0] : NULL, kb_web_fill);
 }
 
 static void on_fill_ta_focus(lv_event_t *e) {
@@ -8214,6 +8234,7 @@ static void on_web_fill_submit(lv_event_t *e) {
         const char *v = lv_textarea_get_text(g_fill_ta[k]);
         meck_web_form_set_field_value(f, g_fill_field_idx[k], v ? v : "");
     }
+    for (int k = 0; k < g_fill_ta_count; k++) meck_panel_edit_closed(g_fill_ta[k]);
     char url[512];
     int len = meck_web_form_build_get_url(f, url, sizeof(url));
     g_fill_form_idx = -1;
@@ -8226,6 +8247,7 @@ static void on_web_fill_submit(lv_event_t *e) {
 
 static void on_web_fill_close(lv_event_t *e) {
     (void)e;
+    for (int k = 0; k < g_fill_ta_count; k++) meck_panel_edit_closed(g_fill_ta[k]);
     g_fill_form_idx = -1;
     if (kb_web_fill) lv_keyboard_set_textarea(kb_web_fill, NULL);
     if (obj_web_fill_panel) lv_obj_add_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
@@ -8486,6 +8508,9 @@ static void cb_open_web(lv_event_t *e) {
     if (obj_web_search_panel) lv_obj_add_flag(obj_web_search_panel, LV_OBJ_FLAG_HIDDEN);
     if (obj_web_form_panel)   lv_obj_add_flag(obj_web_form_panel, LV_OBJ_FLAG_HIDDEN);
     if (obj_web_fill_panel)   lv_obj_add_flag(obj_web_fill_panel, LV_OBJ_FLAG_HIDDEN);
+    meck_panel_edit_closed(ta_web_url);
+    meck_panel_edit_closed(ta_web_search);
+    for (int k = 0; k < g_fill_ta_count; k++) meck_panel_edit_closed(g_fill_ta[k]);
     if (obj_web_home)         lv_obj_remove_flag(obj_web_home, LV_OBJ_FLAG_HIDDEN);
     lv_screen_load(scr_web);
     web_wip_toast_show();
@@ -8811,6 +8836,11 @@ static void create_web_screen() {
     kb_web_search = lv_keyboard_create(obj_web_search_panel);
     meck_style_keyboard(kb_web_search);
     lv_keyboard_set_textarea(kb_web_search, ta_web_search);
+    // These were never attached (the handler existed unused), so the search
+    // keyboard's OK/close -- and the hardware keyboard's Enter/Esc, which
+    // replay the same events -- did nothing.
+    lv_obj_add_event_cb(kb_web_search, on_web_search_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_web_search, on_web_search_kb_event, LV_EVENT_CANCEL, NULL);
 
     // ---- Form selection panel (shown only when a page has >1 form) ----------
     obj_web_form_panel = lv_obj_create(scr_web);

@@ -59,6 +59,14 @@ extern "C" void meck_ui_set_font(lv_obj_t* obj, const lv_font_t* base,
 /* Styles an lv_keyboard to match the composer (size, theme, layout pref). */
 extern "C" void meck_ui_style_keyboard(lv_obj_t* kb);
 
+/* Hardware-keyboard hooks from MeckUI.cpp: on open, focus the field so the
+ * TCA8418 poll has a target and hide the on-screen keyboard when that
+ * keyboard is present (the return says whether it is, so callers can
+ * reclaim the hidden keyboard's space); on close, drop the focus. No-ops on
+ * plain t_display_p4 builds. */
+extern "C" bool meck_ui_panel_edit_opened(lv_obj_t* ta, lv_obj_t* kb);
+extern "C" void meck_ui_panel_edit_closed(lv_obj_t* ta);
+
 /* Meck custom fonts (defined in meck_montserrat_<size>.c at the component
  * root, declared the same way in MeckUI.cpp). */
 extern "C" {
@@ -858,6 +866,7 @@ static void notes_open_rename(void) {
     if (dot) *dot = '\0';
     lv_textarea_set_text(ta_notes_rename, stem);
     lv_screen_load(scr_notes_rename);
+    meck_ui_panel_edit_opened(ta_notes_rename, kb_notes_rename);
 }
 
 static void on_notes_rename_cancel(lv_event_t* e) {
@@ -936,6 +945,8 @@ static void create_rename_screen(void) {
     /* On a single-line name, the keyboard's OK key commits the rename. */
     lv_keyboard_set_textarea(kb_notes_rename, ta_notes_rename);
     lv_obj_add_event_cb(kb_notes_rename, on_notes_rename_save, LV_EVENT_READY, NULL);
+    /* Esc from the hardware keyboard replays LV_EVENT_CANCEL on this kb. */
+    lv_obj_add_event_cb(kb_notes_rename, on_notes_rename_cancel, LV_EVENT_CANCEL, NULL);
 }
 
 /* ============================================================================
@@ -976,6 +987,10 @@ extern "C" void meck_notes_ui_teardown(void) {
 
 extern "C" void meck_notes_ui_show_browser(void) {
     if (!scr_notes_browser) return;
+    /* Leaving the editor or rename screen: drop any lingering field focus so
+     * the hardware-keyboard poll stops routing keys to a hidden screen. */
+    meck_ui_panel_edit_closed(ta_notes_edit);
+    meck_ui_panel_edit_closed(ta_notes_rename);
     browser_repopulate();
     lv_screen_load(scr_notes_browser);
 }
@@ -988,4 +1003,13 @@ extern "C" void meck_notes_ui_show_reader(void) {
 extern "C" void meck_notes_ui_show_editor(void) {
     if (!scr_notes_editor) return;
     lv_screen_load(scr_notes_editor);
+    /* Hardware keyboard: focus the note so typed keys land, hide the
+     * on-screen keyboard, and let the text area reclaim its space. On touch
+     * builds this only (re)focuses; the sizing matches create time. */
+    bool hw = meck_ui_panel_edit_opened(ta_notes_edit, kb_notes_edit);
+    if (ta_notes_edit && kb_notes_edit) {
+        int kbh = hw ? 0 : lv_obj_get_height(kb_notes_edit);
+        lv_obj_set_height(ta_notes_edit,
+                          SCREEN_HEIGHT - NOTES_HEADER_H - kbh);
+    }
 }
