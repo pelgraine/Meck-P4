@@ -58,6 +58,8 @@ idf_component_register(
         "meck_montserrat_28.c"
         "meck_montserrat_30.c"
         "meck_montserrat_32.c"
+        "meck_montserrat_bold_22.c"
+        "meck_montserrat_italic_22.c"
         "MeckEmoji.cpp"
         "meck_emoji_tables.c"
         "meck_emoji_blank.c"

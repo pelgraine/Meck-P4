@@ -41,30 +41,32 @@ bool meck_notes_new_path(char* out, size_t out_sz) {
         time_t t = (time_t)local;
         struct tm tm;
         gmtime_r(&t, &tm);   // local already has the offset folded in
-        snprintf(out, out_sz, "%s/note_%04d%02d%02d_%02d%02d.txt",
+        snprintf(out, out_sz, "%s/note_%04d%02d%02d_%02d%02d.md",
                  MECK_NOTES_DIR, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                  tm.tm_hour, tm.tm_min);
         struct stat st;
         if (stat(out, &st) != 0) return true;   // no file with that name yet
-        snprintf(out, out_sz, "%s/note_%04d%02d%02d_%02d%02d%02d.txt",
+        snprintf(out, out_sz, "%s/note_%04d%02d%02d_%02d%02d%02d.md",
                  MECK_NOTES_DIR, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
         return true;
     }
 
-    // Clock not synced: sequential note_NNN.txt, one past the highest existing.
+    // Clock not synced: sequential note_NNN.md, one past the highest
+    // existing of either extension (older installs left note_NNN.txt).
     int maxnum = 0;
     DIR* d = opendir(MECK_NOTES_DIR);
     if (d) {
         struct dirent* de;
         while ((de = readdir(d)) != NULL) {
             int n = 0;
-            if (sscanf(de->d_name, "note_%d.txt", &n) == 1 && n > maxnum)
+            if ((sscanf(de->d_name, "note_%d.md",  &n) == 1 ||
+                 sscanf(de->d_name, "note_%d.txt", &n) == 1) && n > maxnum)
                 maxnum = n;
         }
         closedir(d);
     }
-    snprintf(out, out_sz, "%s/note_%03d.txt", MECK_NOTES_DIR, maxnum + 1);
+    snprintf(out, out_sz, "%s/note_%03d.md", MECK_NOTES_DIR, maxnum + 1);
     return true;
 }
 

@@ -685,7 +685,12 @@ extern "C" bool meck_app_init() {
     //     investigation: prints the live registers and the CEDV profile /
     //     config data memory the chip is gauging with. Unseals, reads,
     //     exits CFG_UPDATE without reinit, re-seals.
-    meck_battery_dump_gauge_config();
+    //     Parked 2026-08-03: three boots showed the same deterministic
+    //     walls (sealed entry refused, default keys rejected in both
+    //     orders), and the full-failure path costs ~15 s of boot.
+    //     Uncomment to re-run when LilyGo answers on the gauge's
+    //     seal state and keys; the code stays in target.cpp.
+    // meck_battery_dump_gauge_config();
 
     // 1. NVS / DataStore
     if (!g_dataStore.begin()) {

@@ -2,7 +2,8 @@
 //
 // Notes backend for Meck-P4.
 //
-// Notes are plain UTF-8 .txt files stored under /sdcard/notes, so they live on
+// Notes are plain UTF-8 .md (markdown) and .txt files stored under
+// /sdcard/notes, so they live on
 // the removable card, survive a firmware reflash, and can be read or edited on
 // a computer. Reading reuses the MeckReader paging backend; create / edit /
 // save / delete / rename land in later stages.
@@ -26,9 +27,9 @@ extern "C" {
 // device gets the folder without the user having to create it by hand.
 void meck_notes_ensure_dir(void);
 
-// Build a path for a NEW note (does not create the file). Uses a timestamped
-// name (note_YYYYMMDD_HHMM.txt) when the clock is synced, falling back to a
-// sequential name (note_NNN.txt) otherwise. Writes the full path into out.
+// Build a path for a NEW note (does not create the file). New notes are
+// markdown: a timestamped name (note_YYYYMMDD_HHMM.md) when the clock is
+// synced, falling back to a sequential name (note_NNN.md) otherwise. Writes the full path into out.
 // Returns false only on bad arguments.
 bool meck_notes_new_path(char* out, size_t out_sz);
 

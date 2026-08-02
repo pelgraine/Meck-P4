@@ -73,6 +73,10 @@ extern "C" {
     extern lv_font_t meck_montserrat_18;
     extern lv_font_t meck_montserrat_22;
     extern lv_font_t meck_montserrat_24;
+    extern lv_font_t meck_montserrat_28;
+    extern lv_font_t meck_montserrat_32;
+    extern lv_font_t meck_montserrat_bold_22;
+    extern lv_font_t meck_montserrat_italic_22;
 }
 
 /* ============================================================================
@@ -90,6 +94,9 @@ static const int    BREADCRUMB_H = 50;
 static const int NOTES_HEADER_H = 95;
 static const int NOTES_MARGIN   = 15;
 static const int NOTES_FOOTER_H = 45;
+
+/* Editor formatting toolbar (its own row under the header). */
+static const int NOTES_TOOLBAR_H = 60;
 
 static int notes_page_w(void) { return SCREEN_WIDTH - 2 * NOTES_MARGIN; }
 static int notes_page_h(void) {
@@ -124,8 +131,25 @@ static lv_obj_t* list_container   = NULL;   /* scrollable list area */
 static lv_obj_t* lbl_notes_text     = NULL;   /* current page text */
 static lv_obj_t* lbl_notes_progress = NULL;   /* percentage */
 
+/* Markdown view: .md notes render whole-file into a scrollable spangroup
+ * instead of the paged reader (the pager splits at arbitrary byte offsets,
+ * which would cut marker pairs across page boundaries). */
+static lv_obj_t* md_view_cont = NULL;      /* hidden while a .txt is shown */
+static bool      g_view_is_md = false;
+static lv_obj_t* zone_prev    = NULL;      /* reader page-tap zones; hidden */
+static lv_obj_t* zone_next    = NULL;      /*   while an .md note is shown  */
+
 /* The note the user tapped to open. */
 static char g_current_file[PATH_MAX_LEN] = "";
+
+/* Load/scratch buffer shared by the editor text area, the markdown view
+ * load, and the toolbar's line rewrites. 16 KB matches the upstream notes
+ * cap and is ample for hand-typed text. Allocated once in PSRAM (not
+ * internal BSS) by meck_notes_ui_init; internal RAM is scarce during boot.
+ * Declared here, above the browser handlers, because on_file_row_clicked's
+ * .md branch loads through it. */
+static const size_t NOTES_EDIT_BUF_SZ = 16384;
+static char* g_edit_buf = NULL;
 
 /* ============================================================================
  * Forward declarations
@@ -155,6 +179,15 @@ static void on_notes_rename_cancel(lv_event_t* e);
 static void create_rename_screen(void);
 static void notes_open_rename(void);
 static void notes_modal_close(void);
+static void md_render_into(lv_obj_t* cont, const char* text);
+static void notes_view_set_md_mode(bool md);
+static void on_notes_ed_bold(lv_event_t* e);
+static void on_notes_ed_italic(lv_event_t* e);
+static void on_notes_ed_heading(lv_event_t* e);
+static void on_notes_ed_bullet(lv_event_t* e);
+static void on_notes_ed_indent(lv_event_t* e);
+static void on_notes_ed_outdent(lv_event_t* e);
+static void on_notes_ed_preview(lv_event_t* e);
 
 /* ============================================================================
  * Helpers — path manipulation, extension test
@@ -170,6 +203,10 @@ static std::string to_lower_ext(const char* name) {
 
 static bool is_txt_ext(const std::string& ext) {
     return ext == "txt";
+}
+
+static bool is_md_ext(const std::string& ext) {
+    return ext == "md";
 }
 
 /* Strip the last path component. Returns true if a strip happened; false if
@@ -226,7 +263,8 @@ static void scan_current_dir(void) {
             }
             if (!e.is_dir) {
                 e.ext = to_lower_ext(e.name.c_str());
-                if (!is_txt_ext(e.ext)) continue;   /* only folders + .txt */
+                if (!is_txt_ext(e.ext) && !is_md_ext(e.ext))
+                    continue;                   /* folders + .txt + .md */
 
                 char full[PATH_MAX_LEN];
                 snprintf(full, sizeof(full), "%s/%s", g_browser_path, de->d_name);
@@ -300,8 +338,8 @@ static void add_entry_row(lv_obj_t* parent, const NotesEntry& e, int y) {
     lv_obj_set_width(title, SCREEN_WIDTH - 100);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 44, 6);
 
-    /* Subtitle: size for files, "Folder" for directories. (All notes are
-     * .txt, so the extension is omitted as redundant.) */
+    /* Subtitle: size for files, "Folder" for directories. (The extension
+     * is visible in the title, which shows the full filename.) */
     char sub[64];
     if (e.is_dir) {
         snprintf(sub, sizeof(sub), "Folder");
@@ -396,7 +434,7 @@ static void browser_repopulate(void) {
         lv_obj_t* msg = lv_label_create(list_container);
         lv_label_set_text(msg,
             "No notes yet.\n\n"
-            "Notes are .txt files stored in\n"
+            "Notes are .md / .txt files stored in\n"
             "/notes on the SD card.");
         lv_obj_set_style_text_color(msg, lv_palette_main(LV_PALETTE_GREY), 0);
         meck_ui_set_font(msg, &meck_montserrat_18, 0);
@@ -449,7 +487,19 @@ static void on_file_row_clicked(lv_event_t* e) {
 
     snprintf(g_current_file, sizeof(g_current_file),
              "%s/%s", g_browser_path, name);
+
+    /* .md notes render whole-file as markdown; .txt keeps the paged reader.
+     * The 16 KB editor buffer bounds every note, so a full load is fine. */
+    if (is_md_ext(to_lower_ext(name))) {
+        int n = meck_notes_load(g_current_file, g_edit_buf, NOTES_EDIT_BUF_SZ);
+        if (n < 0 || !g_edit_buf) return;
+        notes_view_set_md_mode(true);
+        md_render_into(md_view_cont, g_edit_buf);
+        meck_notes_ui_show_reader();
+        return;
+    }
     if (!meck_reader_open(g_current_file)) return;
+    notes_view_set_md_mode(false);
     meck_notes_ui_show_reader();
     notes_render_current();
 }
@@ -554,7 +604,7 @@ static void on_notes_next_tap(lv_event_t* e) {
 
 static void on_notes_view_back(lv_event_t* e) {
     (void)e;
-    meck_reader_close();
+    if (!g_view_is_md) meck_reader_close();   /* reader never opened for .md */
     meck_notes_ui_show_browser();
 }
 
@@ -606,12 +656,24 @@ static void create_notes_view_screen(void) {
     lv_label_set_text(lbl_notes_progress, "0%");
     lv_obj_align(lbl_notes_progress, LV_ALIGN_BOTTOM_MID, 0, -10);
 
+    /* Markdown container: fills the page area (plus the footer row, since
+     * .md has no progress line), scrolls vertically, hidden until an .md
+     * note is opened. The spangroup is (re)created inside it per render. */
+    md_view_cont = lv_obj_create(scr_notes_view);
+    lv_obj_set_size(md_view_cont, SCREEN_WIDTH, notes_page_h() + NOTES_FOOTER_H);
+    lv_obj_set_pos(md_view_cont, 0, NOTES_HEADER_H);
+    lv_obj_set_style_bg_color(md_view_cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(md_view_cont, 0, 0);
+    lv_obj_set_style_pad_all(md_view_cont, NOTES_MARGIN, 0);
+    lv_obj_set_scroll_dir(md_view_cont, LV_DIR_VER);
+    lv_obj_add_flag(md_view_cont, LV_OBJ_FLAG_HIDDEN);
+
     /* Transparent tap zones over the text area: left third = previous page,
      * right two thirds = next page. Created last so they sit above the text. */
     int zone_h = notes_page_h();
     int prev_w = (SCREEN_WIDTH * 35) / 100;
 
-    lv_obj_t* zone_prev = lv_obj_create(scr_notes_view);
+    zone_prev = lv_obj_create(scr_notes_view);
     lv_obj_set_size(zone_prev, prev_w, zone_h);
     lv_obj_set_pos(zone_prev, 0, NOTES_HEADER_H);
     lv_obj_set_style_bg_opa(zone_prev, LV_OPA_TRANSP, 0);
@@ -619,7 +681,7 @@ static void create_notes_view_screen(void) {
     lv_obj_add_flag(zone_prev, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(zone_prev, on_notes_prev_tap, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t* zone_next = lv_obj_create(scr_notes_view);
+    zone_next = lv_obj_create(scr_notes_view);
     lv_obj_set_size(zone_next, SCREEN_WIDTH - prev_w, zone_h);
     lv_obj_set_pos(zone_next, prev_w, NOTES_HEADER_H);
     lv_obj_set_style_bg_opa(zone_next, LV_OPA_TRANSP, 0);
@@ -629,18 +691,159 @@ static void create_notes_view_screen(void) {
 }
 
 /* ============================================================================
+ * Markdown rendering (deliberate subset)
+ * ----------------------------------------------------------------------------
+ * Supported: #, ##, ### headings at line start (rendered in larger regular
+ * Montserrat 32/28/24), "- " bullets (rendered as a bullet dot), leading
+ * spaces (indent, preserved), and inline **bold** / *italic* runs. When a
+ * run is both bold and italic, bold wins (there is no bold-italic font).
+ * Anything else renders literally, so files remain ordinary markdown that
+ * opens correctly in any viewer off-device. Span styles are not lv_obj_t
+ * and cannot join the font-scale registry, so this view uses fixed sizes
+ * (body/bold/italic 22) and does not follow the Settings font-size pref.
+ * ==========================================================================*/
+
+static lv_style_t md_st_body, md_st_bold, md_st_italic;
+static lv_style_t md_st_h1, md_st_h2, md_st_h3;
+static bool md_styles_inited = false;
+
+static void md_styles_init(void) {
+    if (md_styles_inited) return;
+    lv_style_t* all[6] = { &md_st_body, &md_st_bold, &md_st_italic,
+                           &md_st_h1, &md_st_h2, &md_st_h3 };
+    const lv_font_t* fonts[6] = {
+        &meck_montserrat_22, &meck_montserrat_bold_22,
+        &meck_montserrat_italic_22,
+        &meck_montserrat_32, &meck_montserrat_28, &meck_montserrat_24
+    };
+    for (int i = 0; i < 6; i++) {
+        lv_style_init(all[i]);
+        lv_style_set_text_font(all[i], fonts[i]);
+        lv_style_set_text_color(all[i], lv_color_white());
+    }
+    md_styles_inited = true;
+}
+
+/* Append one styled run. LVGL copies the text, so a stack chunk buffer is
+ * fine; long runs split across spans (visually seamless, same style). The
+ * chunk boundary is backed off continuation bytes so a UTF-8 sequence is
+ * never split. */
+static void md_emit(lv_obj_t* grp, const char* s, int len, lv_style_t* st) {
+    while (len > 0) {
+        char tmp[257];
+        int take = len > 256 ? 256 : len;
+        while (take < len && take > 1 &&
+               ((unsigned char)s[take] & 0xC0) == 0x80) take--;
+        memcpy(tmp, s, take);
+        tmp[take] = '\0';
+        lv_span_t* sp = lv_spangroup_add_span(grp);
+        if (!sp) return;
+        lv_spangroup_set_span_text(grp, sp, tmp);
+        lv_spangroup_set_span_style(grp, sp, st);
+        s += take;
+        len -= take;
+    }
+}
+
+/* Parse text into a fresh spangroup inside cont. Recreating the group each
+ * render sidesteps span-deletion bookkeeping: lv_obj_clean frees the old
+ * group and every span with it. */
+static void md_render_into(lv_obj_t* cont, const char* text) {
+    if (!cont || !text) return;
+    md_styles_init();
+    lv_obj_clean(cont);
+
+    lv_obj_t* grp = lv_spangroup_create(cont);
+    lv_obj_set_width(grp, lv_obj_get_content_width(cont));
+    lv_spangroup_set_mode(grp, LV_SPAN_MODE_BREAK);
+    lv_spangroup_set_overflow(grp, LV_SPAN_OVERFLOW_CLIP);
+
+    const char* p = text;
+    while (*p) {
+        const char* nl = strchr(p, '\n');
+        int llen = nl ? (int)(nl - p) : (int)strlen(p);
+        const char* line = p;
+
+        int ind = 0;
+        while (ind < llen && line[ind] == ' ') ind++;
+
+        /* Headings only at a true line start (no indent). '#x' without the
+         * space is not a heading and falls through to literal text. */
+        int hlevel = 0;
+        if (ind == 0) {
+            while (hlevel < 3 && hlevel < llen && line[hlevel] == '#') hlevel++;
+            if (hlevel > 0 && (hlevel >= llen || line[hlevel] != ' '))
+                hlevel = 0;
+        }
+
+        if (hlevel > 0) {
+            int skip = hlevel;
+            while (skip < llen && line[skip] == ' ') skip++;
+            lv_style_t* hs = hlevel == 1 ? &md_st_h1
+                           : hlevel == 2 ? &md_st_h2 : &md_st_h3;
+            md_emit(grp, line + skip, llen - skip, hs);
+        } else {
+            int pos = ind;
+            if (ind) md_emit(grp, line, ind, &md_st_body);
+            if (pos + 1 < llen && line[pos] == '-' && line[pos + 1] == ' ') {
+                md_emit(grp, "\xE2\x80\xA2 ", 4, &md_st_body);
+                pos += 2;
+            }
+            bool bold = false, ital = false;
+            int run = pos;
+            while (pos < llen) {
+                if (line[pos] == '*') {
+                    bool dbl = (pos + 1 < llen && line[pos + 1] == '*');
+                    lv_style_t* st = bold ? &md_st_bold
+                                   : ital ? &md_st_italic : &md_st_body;
+                    md_emit(grp, line + run, pos - run, st);
+                    if (dbl) { bold = !bold; pos += 2; }
+                    else     { ital = !ital; pos += 1; }
+                    run = pos;
+                } else {
+                    pos++;
+                }
+            }
+            lv_style_t* st = bold ? &md_st_bold
+                           : ital ? &md_st_italic : &md_st_body;
+            md_emit(grp, line + run, pos - run, st);
+        }
+        md_emit(grp, "\n", 1, &md_st_body);
+
+        if (!nl) break;
+        p = nl + 1;
+    }
+    lv_spangroup_refresh(grp);
+}
+
+/* Flip the read view between markdown mode (scrolling spangroup) and the
+ * paged .txt reader (label + tap zones + progress). */
+static void notes_view_set_md_mode(bool md) {
+    g_view_is_md = md;
+    if (md_view_cont) {
+        if (md) lv_obj_clear_flag(md_view_cont, LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_add_flag(md_view_cont,   LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_t* rd[4] = { lbl_notes_text, lbl_notes_progress,
+                        zone_prev, zone_next };
+    for (int i = 0; i < 4; i++) {
+        if (!rd[i]) continue;
+        if (md) lv_obj_add_flag(rd[i],   LV_OBJ_FLAG_HIDDEN);
+        else    lv_obj_clear_flag(rd[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* ============================================================================
  * Editor
  * ==========================================================================*/
 
 static lv_obj_t* scr_notes_editor = NULL;
 static lv_obj_t* ta_notes_edit    = NULL;
 static lv_obj_t* kb_notes_edit    = NULL;
+static lv_obj_t* ed_toolbar       = NULL;
+static lv_obj_t* ed_preview_cont  = NULL;   /* in-editor markdown preview */
+static bool      g_ed_preview_on  = false;
 
-/* Load/scratch buffer for the text area. 16 KB matches the upstream notes cap
- * and is ample for hand-typed text. Allocated once in PSRAM (not internal BSS)
- * by meck_notes_ui_init; internal RAM is scarce during boot. */
-static const size_t NOTES_EDIT_BUF_SZ = 16384;
-static char* g_edit_buf = NULL;
 
 /* Write the text area back to g_current_file. Empty text is skipped so a
  * "New Note" that was opened and abandoned doesn't leave a zero-byte file. */
@@ -675,7 +878,7 @@ static void on_new_note_clicked(lv_event_t* e) {
 /* From the read view: close the reader, load the note's text into the editor. */
 static void on_notes_edit_from_read(lv_event_t* e) {
     (void)e;
-    meck_reader_close();
+    if (!g_view_is_md) meck_reader_close();   /* reader never opened for .md */
     int n = meck_notes_load(g_current_file, g_edit_buf, NOTES_EDIT_BUF_SZ);
     if (ta_notes_edit)
         lv_textarea_set_text(ta_notes_edit, n >= 0 ? g_edit_buf : "");
@@ -701,6 +904,56 @@ static void create_editor_screen(void) {
     lv_obj_center(sl);
     lv_obj_add_event_cb(btn_save, on_notes_edit_save, LV_EVENT_CLICKED, NULL);
 
+    /* Formatting toolbar -- its own row under the header. Buttons act on
+     * the text area at the cursor / selection: markdown markers for bold,
+     * italic, heading cycle and bullet toggle, two-space indent / outdent,
+     * plus a live markdown preview toggle (the eye). */
+    ed_toolbar = lv_obj_create(scr_notes_editor);
+    lv_obj_set_size(ed_toolbar, SCREEN_WIDTH, NOTES_TOOLBAR_H);
+    lv_obj_set_pos(ed_toolbar, 0, NOTES_HEADER_H);
+    lv_obj_set_style_bg_color(ed_toolbar, lv_color_make(15, 15, 15), 0);
+    lv_obj_set_style_border_width(ed_toolbar, 0, 0);
+    lv_obj_set_style_pad_all(ed_toolbar, 4, 0);
+    lv_obj_set_style_pad_column(ed_toolbar, 6, 0);
+    lv_obj_clear_flag(ed_toolbar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(ed_toolbar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ed_toolbar, LV_FLEX_ALIGN_SPACE_EVENLY,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    struct ToolBtn { const char* txt; const lv_font_t* font; lv_event_cb_t cb; };
+    static const ToolBtn bt[7] = {
+        { "B",                &meck_montserrat_bold_22,   on_notes_ed_bold    },
+        { "I",                &meck_montserrat_italic_22, on_notes_ed_italic  },
+        { "H",                &meck_montserrat_22,        on_notes_ed_heading },
+        { "\xE2\x80\xA2",  &meck_montserrat_22,        on_notes_ed_bullet  },
+        { LV_SYMBOL_RIGHT,    NULL,                       on_notes_ed_indent  },
+        { LV_SYMBOL_LEFT,     NULL,                       on_notes_ed_outdent },
+        { LV_SYMBOL_EYE_OPEN, NULL,                       on_notes_ed_preview },
+    };
+    for (int i = 0; i < 7; i++) {
+        lv_obj_t* b = lv_button_create(ed_toolbar);
+        lv_obj_set_size(b, 60, NOTES_TOOLBAR_H - 8);
+        lv_obj_set_style_bg_color(b, lv_color_make(40, 40, 40), 0);
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_t* l = lv_label_create(b);
+        lv_label_set_text(l, bt[i].txt);
+        lv_obj_set_style_text_color(l, lv_color_white(), 0);
+        lv_obj_set_style_text_font(l,
+            bt[i].font ? bt[i].font : &lv_font_montserrat_18, 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, bt[i].cb, LV_EVENT_CLICKED, NULL);
+    }
+
+    /* In-editor preview container (hidden until toggled). Geometry mirrors
+     * the text area's live geometry at toggle time, which varies with the
+     * hardware keyboard. */
+    ed_preview_cont = lv_obj_create(scr_notes_editor);
+    lv_obj_set_style_bg_color(ed_preview_cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(ed_preview_cont, 0, 0);
+    lv_obj_set_style_pad_all(ed_preview_cont, NOTES_MARGIN, 0);
+    lv_obj_set_scroll_dir(ed_preview_cont, LV_DIR_VER);
+    lv_obj_add_flag(ed_preview_cont, LV_OBJ_FLAG_HIDDEN);
+
     /* On-screen keyboard: the primary input. Styled to match the composer and
      * honour the layout preference via the helper exposed from MeckUI.cpp,
      * which also sizes it to SCREEN_WIDTH x MECK_KB_HEIGHT and bottom-aligns
@@ -717,13 +970,166 @@ static void create_editor_screen(void) {
     lv_obj_set_style_border_width(ta_notes_edit, 0, 0);
     meck_ui_set_font(ta_notes_edit, &meck_montserrat_22, 0);
     int kbh = lv_obj_get_height(kb_notes_edit);
-    lv_obj_set_pos(ta_notes_edit, NOTES_MARGIN, NOTES_HEADER_H);
+    lv_obj_set_pos(ta_notes_edit, NOTES_MARGIN,
+                   NOTES_HEADER_H + NOTES_TOOLBAR_H);
     lv_obj_set_size(ta_notes_edit, SCREEN_WIDTH - 2 * NOTES_MARGIN,
-                    SCREEN_HEIGHT - NOTES_HEADER_H - kbh);
+                    SCREEN_HEIGHT - NOTES_HEADER_H - NOTES_TOOLBAR_H - kbh);
 
     /* Keyboard types into the text area; its OK key inserts a newline. */
     lv_keyboard_set_textarea(kb_notes_edit, ta_notes_edit);
     lv_obj_add_event_cb(kb_notes_edit, on_notes_kb_ready, LV_EVENT_READY, NULL);
+}
+
+/* ============================================================================
+ * Toolbar actions
+ * ==========================================================================*/
+
+/* Byte offset in a UTF-8 string for a character index (textarea cursor
+ * positions count characters; the buffer is bytes). */
+static int md_byte_for_char(const char* s, uint32_t chpos) {
+    int b = 0;
+    while (chpos > 0 && s[b]) {
+        b++;
+        while (((unsigned char)s[b] & 0xC0) == 0x80) b++;
+        chpos--;
+    }
+    return b;
+}
+
+/* Character index for a byte offset (counts UTF-8 lead bytes). */
+static uint32_t md_char_for_byte(const char* s, int byte) {
+    uint32_t c = 0;
+    for (int b = 0; b < byte && s[b]; b++)
+        if (((unsigned char)s[b] & 0xC0) != 0x80) c++;
+    return c;
+}
+
+/* Bold / italic: wrap the selection in the marker if one is active (needs
+ * LV_LABEL_TEXT_SELECTION in the LVGL config); otherwise insert an empty
+ * marker pair and park the cursor between the halves. */
+static void md_wrap_or_insert(const char* marker) {
+    if (!ta_notes_edit) return;
+    int mlen = (int)strlen(marker);
+#if LV_LABEL_TEXT_SELECTION
+    lv_obj_t* lbl = lv_textarea_get_label(ta_notes_edit);
+    uint32_t s0 = lv_label_get_text_selection_start(lbl);
+    uint32_t s1 = lv_label_get_text_selection_end(lbl);
+    if (s0 != LV_LABEL_TEXT_SELECTION_OFF &&
+        s1 != LV_LABEL_TEXT_SELECTION_OFF && s1 > s0 && g_edit_buf) {
+        const char* txt = lv_textarea_get_text(ta_notes_edit);
+        int len = (int)strlen(txt);
+        int b0 = md_byte_for_char(txt, s0);
+        int b1 = md_byte_for_char(txt, s1);
+        if (len + 2 * mlen < (int)NOTES_EDIT_BUF_SZ) {
+            memcpy(g_edit_buf, txt, b0);
+            memcpy(g_edit_buf + b0, marker, mlen);
+            memcpy(g_edit_buf + b0 + mlen, txt + b0, b1 - b0);
+            memcpy(g_edit_buf + b0 + mlen + (b1 - b0), marker, mlen);
+            strcpy(g_edit_buf + b0 + 2 * mlen + (b1 - b0), txt + b1);
+            lv_textarea_set_text(ta_notes_edit, g_edit_buf);
+            lv_textarea_set_cursor_pos(ta_notes_edit,
+                                       (int32_t)(s1 + 2 * mlen));
+            return;
+        }
+    }
+#endif
+    uint32_t p = lv_textarea_get_cursor_pos(ta_notes_edit);
+    char pair[9];
+    snprintf(pair, sizeof(pair), "%s%s", marker, marker);
+    lv_textarea_add_text(ta_notes_edit, pair);
+    lv_textarea_set_cursor_pos(ta_notes_edit, (int32_t)(p + mlen));
+}
+
+/* Rewrite the current line's prefix. op: 0 heading cycle (none -> # -> ##
+ * -> ### -> none), 1 bullet toggle, 2 indent (two spaces), 3 outdent.
+ * Rebuilds through g_edit_buf; prefix edits are ASCII, so the cursor's
+ * character delta equals the byte delta. */
+static void md_line_op(int op) {
+    if (!ta_notes_edit || !g_edit_buf) return;
+    const char* txt = lv_textarea_get_text(ta_notes_edit);
+    int len = (int)strlen(txt);
+
+    uint32_t cur = lv_textarea_get_cursor_pos(ta_notes_edit);
+    int cb = md_byte_for_char(txt, cur);
+    int ls = cb;
+    while (ls > 0 && txt[ls - 1] != '\n') ls--;
+
+    int hashes = 0;
+    while (hashes < 3 && txt[ls + hashes] == '#') hashes++;
+    bool h_sp   = hashes > 0 && txt[ls + hashes] == ' ';
+    bool bullet = txt[ls] == '-' && txt[ls + 1] == ' ';
+
+    char add[5] = "";
+    int  drop   = 0;
+
+    switch (op) {
+        case 0: {
+            if (h_sp) drop = hashes + 1;
+            int newh = h_sp ? (hashes < 3 ? hashes + 1 : 0) : 1;
+            for (int i = 0; i < newh; i++) add[i] = '#';
+            if (newh) { add[newh] = ' '; add[newh + 1] = '\0'; }
+            break;
+        }
+        case 1:
+            if (bullet) drop = 2;
+            else { add[0] = '-'; add[1] = ' '; add[2] = '\0'; }
+            break;
+        case 2:
+            add[0] = ' '; add[1] = ' '; add[2] = '\0';
+            break;
+        case 3:
+            if (txt[ls] == ' ') drop = (txt[ls + 1] == ' ') ? 2 : 1;
+            break;
+    }
+    int addl = (int)strlen(add);
+    if (drop == 0 && addl == 0) return;
+    if (len + addl - drop >= (int)NOTES_EDIT_BUF_SZ) return;
+
+    memcpy(g_edit_buf, txt, ls);
+    memcpy(g_edit_buf + ls, add, addl);
+    strcpy(g_edit_buf + ls + addl, txt + ls + drop);
+    lv_textarea_set_text(ta_notes_edit, g_edit_buf);
+
+    uint32_t lschar = md_char_for_byte(txt, ls);
+    int ncur;
+    if ((int)cur < (int)lschar + drop) ncur = (int)lschar + addl;
+    else                               ncur = (int)cur + addl - drop;
+    if (ncur < 0) ncur = 0;
+    lv_textarea_set_cursor_pos(ta_notes_edit, ncur);
+}
+
+static void on_notes_ed_bold(lv_event_t* e)    { (void)e; md_wrap_or_insert("**"); }
+static void on_notes_ed_italic(lv_event_t* e)  { (void)e; md_wrap_or_insert("*");  }
+static void on_notes_ed_heading(lv_event_t* e) { (void)e; md_line_op(0); }
+static void on_notes_ed_bullet(lv_event_t* e)  { (void)e; md_line_op(1); }
+static void on_notes_ed_indent(lv_event_t* e)  { (void)e; md_line_op(2); }
+static void on_notes_ed_outdent(lv_event_t* e) { (void)e; md_line_op(3); }
+
+/* In-editor preview: swap the text area for a rendered spangroup of the
+ * current (unsaved) buffer. The field is defocused while previewing so
+ * hardware-keyboard input can't edit the hidden text unseen, and refocused
+ * on the way back. */
+static void ed_preview_set(bool on) {
+    if (!ta_notes_edit || !ed_preview_cont) return;
+    g_ed_preview_on = on;
+    if (on) {
+        lv_obj_set_pos(ed_preview_cont, 0, lv_obj_get_y(ta_notes_edit));
+        lv_obj_set_size(ed_preview_cont, SCREEN_WIDTH,
+                        lv_obj_get_height(ta_notes_edit));
+        md_render_into(ed_preview_cont, lv_textarea_get_text(ta_notes_edit));
+        lv_obj_add_flag(ta_notes_edit, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(ed_preview_cont, LV_OBJ_FLAG_HIDDEN);
+        meck_ui_panel_edit_closed(ta_notes_edit);
+    } else {
+        lv_obj_add_flag(ed_preview_cont, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(ta_notes_edit, LV_OBJ_FLAG_HIDDEN);
+        meck_ui_panel_edit_opened(ta_notes_edit, kb_notes_edit);
+    }
+}
+
+static void on_notes_ed_preview(lv_event_t* e) {
+    (void)e;
+    ed_preview_set(!g_ed_preview_on);
 }
 
 /* ============================================================================
@@ -732,6 +1138,10 @@ static void create_editor_screen(void) {
 
 /* Full path of the note the action menu / rename / delete is operating on. */
 static char g_action_target[PATH_MAX_LEN] = "";
+
+/* Extension of the note being renamed, captured when the rename screen
+ * opens and re-added on save, so a .md stays .md and a .txt stays .txt. */
+static char g_rename_ext[8] = "txt";
 
 /* Current modal backdrop (action menu or delete confirm). Deleting it dismisses
  * the modal and all its children. */
@@ -856,14 +1266,20 @@ static void on_action_rename(lv_event_t* e) {
     notes_open_rename();
 }
 
-/* Prefill the rename field with the current name minus its .txt extension and
- * show the rename screen. */
+/* Prefill the rename field with the current name minus its extension
+ * (remembered in g_rename_ext and re-added on save) and show the rename
+ * screen. */
 static void notes_open_rename(void) {
     if (!ta_notes_rename) return;
     char stem[PATH_MAX_LEN];
     snprintf(stem, sizeof(stem), "%s", action_basename());
     char* dot = strrchr(stem, '.');
-    if (dot) *dot = '\0';
+    if (dot) {
+        snprintf(g_rename_ext, sizeof(g_rename_ext), "%s", dot + 1);
+        *dot = '\0';
+    } else {
+        snprintf(g_rename_ext, sizeof(g_rename_ext), "txt");
+    }
     lv_textarea_set_text(ta_notes_rename, stem);
     lv_screen_load(scr_notes_rename);
     meck_ui_panel_edit_opened(ta_notes_rename, kb_notes_rename);
@@ -880,7 +1296,8 @@ static void on_notes_rename_save(lv_event_t* e) {
         const char* stem = lv_textarea_get_text(ta_notes_rename);
         if (stem && stem[0] != '\0') {
             char newp[PATH_MAX_LEN];
-            snprintf(newp, sizeof(newp), "%s/%s.txt", g_browser_path, stem);
+            snprintf(newp, sizeof(newp), "%s/%s.%s",
+                     g_browser_path, stem, g_rename_ext);
             meck_notes_rename(g_action_target, newp);
         }
     }
@@ -931,8 +1348,8 @@ static void create_rename_screen(void) {
     meck_ui_style_keyboard(kb_notes_rename);
     lv_obj_update_layout(kb_notes_rename);
 
-    /* Single-line name field below the header. The ".txt" extension is implied
-     * and re-added on save, so the user edits only the name. */
+    /* Single-line name field below the header. The original extension is
+     * implied and re-added on save, so the user edits only the name. */
     ta_notes_rename = lv_textarea_create(scr_notes_rename);
     lv_textarea_set_one_line(ta_notes_rename, true);
     lv_obj_set_style_text_color(ta_notes_rename, lv_color_white(), 0);
@@ -981,6 +1398,13 @@ extern "C" void meck_notes_ui_teardown(void) {
     kb_notes_edit   = NULL;
     ta_notes_rename = NULL;
     kb_notes_rename = NULL;
+    md_view_cont    = NULL;
+    zone_prev       = NULL;
+    zone_next       = NULL;
+    ed_toolbar      = NULL;
+    ed_preview_cont = NULL;
+    g_view_is_md    = false;
+    g_ed_preview_on = false;
     g_modal = NULL;   /* was a child of scr_notes_browser, already deleted above */
     g_notes_ui_inited = false;
 }
@@ -1003,6 +1427,7 @@ extern "C" void meck_notes_ui_show_reader(void) {
 extern "C" void meck_notes_ui_show_editor(void) {
     if (!scr_notes_editor) return;
     lv_screen_load(scr_notes_editor);
+    if (g_ed_preview_on) ed_preview_set(false);   /* always open in edit mode */
     /* Hardware keyboard: focus the note so typed keys land, hide the
      * on-screen keyboard, and let the text area reclaim its space. On touch
      * builds this only (re)focuses; the sizing matches create time. */
@@ -1010,6 +1435,7 @@ extern "C" void meck_notes_ui_show_editor(void) {
     if (ta_notes_edit && kb_notes_edit) {
         int kbh = hw ? 0 : lv_obj_get_height(kb_notes_edit);
         lv_obj_set_height(ta_notes_edit,
-                          SCREEN_HEIGHT - NOTES_HEADER_H - kbh);
+                          SCREEN_HEIGHT - NOTES_HEADER_H
+                          - NOTES_TOOLBAR_H - kbh);
     }
 }
