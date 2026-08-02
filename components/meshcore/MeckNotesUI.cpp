@@ -58,6 +58,8 @@ extern "C" void meck_ui_set_font(lv_obj_t* obj, const lv_font_t* base,
                                  lv_style_selector_t part);
 /* Styles an lv_keyboard to match the composer (size, theme, layout pref). */
 extern "C" void meck_ui_style_keyboard(lv_obj_t* kb);
+/* Current font-scale pref (0/1/2) for render-time font selection. */
+extern "C" uint8_t meck_ui_font_scale(void);
 
 /* Hardware-keyboard hooks from MeckUI.cpp: on open, focus the field so the
  * TCA8418 poll has a target and hide the on-screen keyboard when that
@@ -74,9 +76,14 @@ extern "C" {
     extern lv_font_t meck_montserrat_22;
     extern lv_font_t meck_montserrat_24;
     extern lv_font_t meck_montserrat_28;
+    extern lv_font_t meck_montserrat_30;
     extern lv_font_t meck_montserrat_32;
     extern lv_font_t meck_montserrat_bold_22;
+    extern lv_font_t meck_montserrat_bold_24;
+    extern lv_font_t meck_montserrat_bold_28;
     extern lv_font_t meck_montserrat_italic_22;
+    extern lv_font_t meck_montserrat_italic_24;
+    extern lv_font_t meck_montserrat_italic_28;
 }
 
 /* ============================================================================
@@ -699,8 +706,11 @@ static void create_notes_view_screen(void) {
  * run is both bold and italic, bold wins (there is no bold-italic font).
  * Anything else renders literally, so files remain ordinary markdown that
  * opens correctly in any viewer off-device. Span styles are not lv_obj_t
- * and cannot join the font-scale registry, so this view uses fixed sizes
- * (body/bold/italic 22) and does not follow the Settings font-size pref.
+ * and cannot join the live font-scale registry, so the fonts are instead
+ * chosen per render from the Settings font-size preference (this view
+ * rebuilds every time it is shown): body/bold/italic step 22 -> 24 -> 28
+ * and the headings step through the same map meck_font uses, with 32 as
+ * the ceiling.
  * ==========================================================================*/
 
 static lv_style_t md_st_body, md_st_bold, md_st_italic;
@@ -711,17 +721,41 @@ static void md_styles_init(void) {
     if (md_styles_inited) return;
     lv_style_t* all[6] = { &md_st_body, &md_st_bold, &md_st_italic,
                            &md_st_h1, &md_st_h2, &md_st_h3 };
-    const lv_font_t* fonts[6] = {
-        &meck_montserrat_22, &meck_montserrat_bold_22,
-        &meck_montserrat_italic_22,
-        &meck_montserrat_32, &meck_montserrat_28, &meck_montserrat_24
-    };
     for (int i = 0; i < 6; i++) {
         lv_style_init(all[i]);
-        lv_style_set_text_font(all[i], fonts[i]);
         lv_style_set_text_color(all[i], lv_color_white());
     }
     md_styles_inited = true;
+}
+
+/* Point the six styles at the faces for the current Settings font scale.
+ * Body/bold/italic follow 22 -> 24 -> 28; the headings follow meck_font's
+ * regular-size map (24 -> 28 -> 30, 28 -> 30 -> 32, 32 is the ceiling).
+ * Called after the old spangroup is cleaned and before the new one is
+ * built, so no live span references the styles while they change. */
+static void md_styles_apply_scale(void) {
+    uint8_t sc = meck_ui_font_scale();
+    const lv_font_t* body   = sc == 2 ? &meck_montserrat_28
+                            : sc == 1 ? &meck_montserrat_24
+                                      : &meck_montserrat_22;
+    const lv_font_t* bold   = sc == 2 ? &meck_montserrat_bold_28
+                            : sc == 1 ? &meck_montserrat_bold_24
+                                      : &meck_montserrat_bold_22;
+    const lv_font_t* italic = sc == 2 ? &meck_montserrat_italic_28
+                            : sc == 1 ? &meck_montserrat_italic_24
+                                      : &meck_montserrat_italic_22;
+    const lv_font_t* h2     = sc == 2 ? &meck_montserrat_32
+                            : sc == 1 ? &meck_montserrat_30
+                                      : &meck_montserrat_28;
+    const lv_font_t* h3     = sc == 2 ? &meck_montserrat_30
+                            : sc == 1 ? &meck_montserrat_28
+                                      : &meck_montserrat_24;
+    lv_style_set_text_font(&md_st_body,   body);
+    lv_style_set_text_font(&md_st_bold,   bold);
+    lv_style_set_text_font(&md_st_italic, italic);
+    lv_style_set_text_font(&md_st_h1,     &meck_montserrat_32);
+    lv_style_set_text_font(&md_st_h2,     h2);
+    lv_style_set_text_font(&md_st_h3,     h3);
 }
 
 /* Append one styled run. LVGL copies the text, so a stack chunk buffer is
@@ -752,6 +786,7 @@ static void md_render_into(lv_obj_t* cont, const char* text) {
     if (!cont || !text) return;
     md_styles_init();
     lv_obj_clean(cont);
+    md_styles_apply_scale();
 
     lv_obj_t* grp = lv_spangroup_create(cont);
     lv_obj_set_width(grp, lv_obj_get_content_width(cont));

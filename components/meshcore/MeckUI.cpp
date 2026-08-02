@@ -219,6 +219,17 @@ static const char* meck_font_scale_name(uint8_t scale) {
     }
 }
 
+// Current font-scale preference (0 Classic, 1 Larger, 2 Extra Large).
+// Exported for renderers that pick fonts at render time rather than
+// through the widget registry -- the notes markdown view rebuilds its
+// spangroup on every show, so it selects scaled faces itself.
+extern "C" uint8_t meck_ui_font_scale(void) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return 0;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    return prefs ? prefs->font_scale : 0;
+}
+
 // Pick a font for the home-screen node name based on its character count.
 // Long names get a smaller font so they fit on the panel without being
 // obscured by the camera punch-hole or running off the right edge.
