@@ -144,6 +144,20 @@ public:
         return (_head != _tail) ? pop() : 0;
     }
 
+    // Set the backlight brightness as a percent of full drive (5..100),
+    // mapped to LEDC duty. Stores the level for future toggles; if the
+    // backlight is currently on, re-applies immediately so the Settings
+    // slider is live. 25% == the previous fixed duty (~398 mA measured).
+    void set_backlight_level_pct(uint8_t pct) {
+        if (pct < 5)   pct = 5;
+        if (pct > 100) pct = 100;
+        _bl_duty = ((uint32_t)pct * 1023 + 50) / 100;
+        if (_backlight) {
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, kBlChannel, _bl_duty);
+            ledc_update_duty(LEDC_LOW_SPEED_MODE, kBlChannel);
+        }
+    }
+
 private:
     // Custom codes assigned to the modifier keys by Tca8418_Map_Lvgl in
     // t_display_p4_keyboard_config.h.
@@ -233,10 +247,11 @@ private:
         return base;
     }
 
-    // Backlight on = fixed 25% PWM duty (256 of 1024), off = 0. Session
-    // state only -- not persisted, so it comes up off after every boot.
+    // Backlight on = the stored duty level (default kBlDuty = 25%), off = 0.
+    // On/off is session state only -- it comes up off after every boot; the
+    // level is applied from prefs at keyboard init (set_backlight_level_pct).
     void set_backlight(bool on) {
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, kBlChannel, on ? kBlDuty : 0);
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, kBlChannel, on ? _bl_duty : 0);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, kBlChannel);
         _backlight = on;
     }
@@ -264,6 +279,7 @@ private:
     bool _caps     = false;
     bool _fn       = false;
     bool _backlight = false;
+    uint32_t _bl_duty = kBlDuty;   // current on-level (LEDC duty, 10-bit)
 
     uint32_t _ring[kRing] = {0};
     size_t   _head = 0;

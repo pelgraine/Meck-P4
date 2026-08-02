@@ -681,6 +681,12 @@ extern "C" bool meck_app_init() {
     //    after the first successful run it returns in milliseconds.
     meck_battery_calibrate();
 
+    // 0a. Read-only gauge configuration dump for the accuracy
+    //     investigation: prints the live registers and the CEDV profile /
+    //     config data memory the chip is gauging with. Unseals, reads,
+    //     exits CFG_UPDATE without reinit, re-seals.
+    meck_battery_dump_gauge_config();
+
     // 1. NVS / DataStore
     if (!g_dataStore.begin()) {
         printf("meck_app_init: dataStore.begin() failed\n");

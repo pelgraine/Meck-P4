@@ -459,6 +459,7 @@ static constexpr uint16_t kBqAddrQmaxCell0      = 0x9106;  // IT Cfg
 
 // Standard registers
 static constexpr uint8_t kBqRegControl      = 0x00;
+static constexpr uint8_t kBqRegTemperature  = 0x06;
 static constexpr uint8_t kBqRegOpStatus     = 0x3A;
 static constexpr uint8_t kBqRegMACAddress   = 0x3E;
 static constexpr uint8_t kBqRegMACDataStart = 0x40;  // through 0x5F
@@ -507,6 +508,16 @@ static bool bq_write_control(uint16_t subcmd) {
         (uint8_t)((subcmd >> 8) & 0xFF)
     };
     return BQ27220_IIC_Bus->write(buf, 3);
+}
+
+// Raw Temperature() register read, units 0.1 K. Per TRM SLUUBD4A Table 2-5
+// this returns whichever temperature source the [TEMPS]/[WRTEMP] config
+// bits select -- i.e. the value the gauge is actually using for gauging.
+// Returns 0 on I2C failure or when the gauge bus is absent (a raw 0
+// converts to -273.1 C on the battery page, flagging a failed read).
+extern "C" uint16_t meck_battery_gauging_temp_raw() {
+    if (!BQ27220_IIC_Bus) return 0;
+    return bq_read16(kBqRegTemperature);
 }
 
 // Differential-checksum write of a 16-bit value to a data-memory address.
@@ -713,4 +724,258 @@ extern "C" void meck_battery_calibrate() {
         printf("meck_battery_calibrate: WARNING FCC still stale at %u - "
                "software clamp active\n", (unsigned)new_fcc);
     }
+}
+
+// ============================================================================
+// BQ27220 configuration dump (read-only diagnostic)
+// ----------------------------------------------------------------------------
+// Dumps the live standard registers, then unseals, enters CFG_UPDATE, reads
+// the CEDV profile / configuration data-memory cells the gauge computes
+// with, exits CFG_UPDATE *without* reinit (0x0092 -- gauge state untouched)
+// and re-seals. Purpose: establish whether the chip is running the TRM
+// factory-default CEDV profile (generic 18650 values: EMF 3743, R0 867,
+// EDV2 3501, OCV table for a 3000 mAh cell) or values matched to the
+// 1000 mAh cell actually fitted. Addresses from TRM SLUUBD4A Table 3-2
+// (fetched 2026-08-02); Qmax Cell 0 and Design Energy from the addresses
+// meck_battery_calibrate already writes.
+// ============================================================================
+
+// Select a data-memory address (little-endian to 0x3E/0x3F). Caller must be
+// unsealed and in CFG_UPDATE mode, same as bq_dm_write16.
+static bool bq_dm_select(uint16_t addr) {
+    uint8_t sel[3] = {
+        kBqRegMACAddress,
+        (uint8_t)(addr & 0xFF),
+        (uint8_t)((addr >> 8) & 0xFF)
+    };
+    if (!BQ27220_IIC_Bus->write(sel, 3)) return false;
+    vTaskDelay(pdMS_TO_TICKS(10));
+    return true;
+}
+
+// Read a 16-bit data-memory value (big-endian: MSB at 0x40, LSB at 0x41).
+static uint16_t bq_dm_read16(uint16_t addr) {
+    if (!bq_dm_select(addr)) return 0xFFFF;
+    return ((uint16_t)bq_read8(kBqRegMACDataStart) << 8) |
+           bq_read8(kBqRegMACDataStart + 1);
+}
+
+// Read an 8-bit data-memory value.
+static uint8_t bq_dm_read8(uint16_t addr) {
+    if (!bq_dm_select(addr)) return 0xFF;
+    return bq_read8(kBqRegMACDataStart);
+}
+
+// Print OperationStatus with its SEC field decoded (TRM: 01 = Full Access,
+// 10 = Unsealed, 11 = Sealed). Returns the raw register.
+static uint16_t bq_print_sec(const char *stage) {
+    uint16_t op = bq_read16(kBqRegOpStatus);
+    static const char *sec_names[4] = {
+        "00(reserved)", "FULL_ACCESS", "UNSEALED", "SEALED"
+    };
+    printf("meck_gauge_dump: %s: OperationStatus=0x%04X SEC=%s\n",
+           stage, (unsigned)op, sec_names[(op >> 1) & 0x3]);
+    return op;
+}
+
+// Attempt ENTER_CFG_UPDATE with an extended poll. Reports the write result,
+// how long entry took, or the final OperationStatus on timeout.
+static bool bq_try_enter_cfg(const char *label, int poll_ms_total) {
+    if (!bq_write_control(kBqSubEnterCfg)) {
+        printf("meck_gauge_dump: %s: ENTER_CFG_UPDATE write FAILED (I2C)\n",
+               label);
+        return false;
+    }
+    int iters = poll_ms_total / 20;
+    uint16_t op = 0;
+    for (int i = 0; i < iters; i++) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        op = bq_read16(kBqRegOpStatus);
+        if (op & kBqOpStatusCfgUpdate) {
+            printf("meck_gauge_dump: %s: entered CFG_UPDATE after ~%d ms\n",
+                   label, (i + 1) * 20);
+            return true;
+        }
+    }
+    printf("meck_gauge_dump: %s: no CFG_UPDATE after %d ms "
+           "(OperationStatus=0x%04X)\n",
+           label, poll_ms_total, (unsigned)op);
+    return false;
+}
+
+// Send a two-word key pair consecutively (TRM: nothing else may be written
+// to Control() between the two words), then report the resulting SEC.
+static void bq_send_keys(const char *label, uint16_t k1, uint16_t k2) {
+    bool ok1 = bq_write_control(k1);
+    vTaskDelay(pdMS_TO_TICKS(2));
+    bool ok2 = bq_write_control(k2);
+    vTaskDelay(pdMS_TO_TICKS(2));
+    if (!ok1 || !ok2) {
+        printf("meck_gauge_dump: %s: key write FAILED (I2C) [w1=%d w2=%d]\n",
+               label, (int)ok1, (int)ok2);
+    }
+    bq_print_sec(label);
+}
+
+extern "C" void meck_battery_dump_gauge_config() {
+    if (!BQ27220 || !BQ27220_IIC_Bus) {
+        printf("meck_gauge_dump: fuel gauge not available, skipping\n");
+        return;
+    }
+
+    // ---- Live standard registers (readable while sealed) ----
+    printf("meck_gauge_dump: ---- live registers ----\n");
+    printf("meck_gauge_dump: Voltage=%u mV Current=%d mA\n",
+           (unsigned)bq_read16(0x08), (int)(int16_t)bq_read16(0x0C));
+    printf("meck_gauge_dump: RM=%u FCC=%u DC=%u mAh SOC=%u%%\n",
+           (unsigned)bq_read16(0x10), (unsigned)bq_read16(0x12),
+           (unsigned)bq_read16(0x3C), (unsigned)bq_read16(0x2C));
+    printf("meck_gauge_dump: Temperature=%u InternalTemperature=%u (0.1K)\n",
+           (unsigned)bq_read16(kBqRegTemperature), (unsigned)bq_read16(0x28));
+    printf("meck_gauge_dump: BatteryStatus=0x%04X OperationStatus=0x%04X\n",
+           (unsigned)bq_read16(0x0A), (unsigned)bq_read16(kBqRegOpStatus));
+
+    // GaugingStatus (MAC 0x0056): EDV0/1/2 latched flags + VDQ. Echo-verify
+    // the subcommand at 0x3E/0x3F before trusting the data at 0x40.
+    {
+        uint8_t sel[3] = { kBqRegMACAddress, 0x56, 0x00 };
+        if (BQ27220_IIC_Bus->write(sel, 3)) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            uint16_t echo = ((uint16_t)bq_read8(kBqRegMACAddress + 1) << 8) |
+                            bq_read8(kBqRegMACAddress);
+            uint16_t gs   = ((uint16_t)bq_read8(kBqRegMACDataStart + 1) << 8) |
+                            bq_read8(kBqRegMACDataStart);
+            if (echo == 0x0056) {
+                printf("meck_gauge_dump: GaugingStatus=0x%04X\n", (unsigned)gs);
+            } else {
+                printf("meck_gauge_dump: GaugingStatus n/a (echo=0x%04X)\n",
+                       (unsigned)echo);
+            }
+        }
+    }
+
+    // ---- Security decision tree (all read-only). One boot distinguishes:
+    // transport fault (key/entry writes fail), sealed entry refused vs
+    // allowed (Table 2-2 says sealed ENTER_CFG_UPDATE is permitted), slow
+    // entry from SLEEP (5 s polls), default keys rejected, or wrong key
+    // order. Worst case adds ~15 s to boot on the full-failure path. ----
+    bq_print_sec("initial");
+
+    bool in_cfg = false;
+    bool tried_unseal = false;
+
+    // Stage A: sealed entry with a 5 s poll.
+    in_cfg = bq_try_enter_cfg("stage A (sealed entry)", 5000);
+
+    // Stage B: default unseal keys in TRM order, full access, then entry.
+    if (!in_cfg) {
+        tried_unseal = true;
+        bq_send_keys("stage B unseal 0x0414,0x3672",
+                     kBqSubUnseal1, kBqSubUnseal2);
+        bq_send_keys("stage B fullaccess 0xFFFF,0xFFFF",
+                     kBqSubFullAccess, kBqSubFullAccess);
+        in_cfg = bq_try_enter_cfg("stage B (entry)", 5000);
+    }
+
+    // Stage C: reversed key order -- distinguishes wrong-order from
+    // wrong-keys.
+    if (!in_cfg) {
+        bq_send_keys("stage C unseal 0x3672,0x0414",
+                     kBqSubUnseal2, kBqSubUnseal1);
+        bq_send_keys("stage C fullaccess 0xFFFF,0xFFFF",
+                     kBqSubFullAccess, kBqSubFullAccess);
+        in_cfg = bq_try_enter_cfg("stage C (entry)", 5000);
+    }
+
+    if (!in_cfg) {
+        printf("meck_gauge_dump: all entry stages failed -- "
+               "data memory unreadable\n");
+        if (tried_unseal) {
+            bq_write_control(kBqSubSeal);   // restore sealed state in case
+            vTaskDelay(pdMS_TO_TICKS(5));   // any key stage landed
+            bq_print_sec("after re-seal");
+        }
+        return;
+    }
+
+    // ---- Data memory: configuration + CEDV profile 1 ----
+    printf("meck_gauge_dump: ---- data memory (TRM default in parens) ----\n");
+    printf("meck_gauge_dump: OperationConfigA[0x9206]=0x%04X (0x0484)\n",
+           (unsigned)bq_dm_read16(0x9206));
+    printf("meck_gauge_dump: OperationConfigB[0x9208]=0x%04X (0x1000)\n",
+           (unsigned)bq_dm_read16(0x9208));
+    printf("meck_gauge_dump: QmaxCell0[0x9106]=%u\n",
+           (unsigned)bq_dm_read16(kBqAddrQmaxCell0));
+    printf("meck_gauge_dump: BatteryLowPct[0x9251]=%u (700=7.00%%)\n",
+           (unsigned)bq_dm_read16(0x9251));
+    printf("meck_gauge_dump: LearningLowTemp[0x925B]=%u (119=11.9C)\n",
+           (unsigned)bq_dm_read8(0x925B));
+    printf("meck_gauge_dump: OverloadCurrent[0x9264]=%u (1500)\n",
+           (unsigned)bq_dm_read16(0x9264));
+    printf("meck_gauge_dump: SelfDischargeRate[0x9268]=%u (20)\n",
+           (unsigned)bq_dm_read8(0x9268));
+    printf("meck_gauge_dump: NearFull[0x926B]=%u (200)\n",
+           (unsigned)bq_dm_read16(0x926B));
+    printf("meck_gauge_dump: SmoothingConfig[0x9271]=0x%02X (0x08)\n",
+           (unsigned)bq_dm_read8(0x9271));
+    printf("meck_gauge_dump: SmoothingStartV[0x9272]=%u (3700)\n",
+           (unsigned)bq_dm_read16(0x9272));
+    printf("meck_gauge_dump: SmoothingDeltaV[0x9274]=%u (100)\n",
+           (unsigned)bq_dm_read16(0x9274));
+    printf("meck_gauge_dump: GaugingConfig[0x929B]=0x%04X (0x102A)\n",
+           (unsigned)bq_dm_read16(0x929B));
+    printf("meck_gauge_dump: StoredFCC[0x929D]=%u (3000)\n",
+           (unsigned)bq_dm_read16(kBqAddrStoredFCC));
+    printf("meck_gauge_dump: DesignCapacity[0x929F]=%u (3000)\n",
+           (unsigned)bq_dm_read16(kBqAddrDesignCapacity));
+    printf("meck_gauge_dump: DesignEnergy[0x92A1]=%u mWh\n",
+           (unsigned)bq_dm_read16(kBqAddrDesignEnergy));
+    printf("meck_gauge_dump: DesignVoltage[0x92A3]=%u (3700)\n",
+           (unsigned)bq_dm_read16(0x92A3));
+    printf("meck_gauge_dump: ChgTermV[0x92A5]=%u (100)\n",
+           (unsigned)bq_dm_read16(0x92A5));
+    printf("meck_gauge_dump: EMF[0x92A7]=%u (3743)\n",
+           (unsigned)bq_dm_read16(0x92A7));
+    printf("meck_gauge_dump: C0[0x92A9]=%u (149)\n",
+           (unsigned)bq_dm_read16(0x92A9));
+    printf("meck_gauge_dump: R0[0x92AB]=%u (867)\n",
+           (unsigned)bq_dm_read16(0x92AB));
+    printf("meck_gauge_dump: T0[0x92AD]=%u (4030)\n",
+           (unsigned)bq_dm_read16(0x92AD));
+    printf("meck_gauge_dump: R1[0x92AF]=%u (316)\n",
+           (unsigned)bq_dm_read16(0x92AF));
+    printf("meck_gauge_dump: TC[0x92B1]=%u (9)\n",
+           (unsigned)bq_dm_read8(0x92B1));
+    printf("meck_gauge_dump: C1[0x92B2]=%u (0)\n",
+           (unsigned)bq_dm_read8(0x92B2));
+    printf("meck_gauge_dump: AgeFactor[0x92B3]=%u (0)\n",
+           (unsigned)bq_dm_read8(0x92B3));
+    printf("meck_gauge_dump: FixedEDV0[0x92B4]=%u (3031)\n",
+           (unsigned)bq_dm_read16(0x92B4));
+    printf("meck_gauge_dump: EDV0Hold[0x92B6]=%u (1)\n",
+           (unsigned)bq_dm_read8(0x92B6));
+    printf("meck_gauge_dump: FixedEDV1[0x92B7]=%u (3385)\n",
+           (unsigned)bq_dm_read16(0x92B7));
+    printf("meck_gauge_dump: EDV1Hold[0x92B9]=%u (1)\n",
+           (unsigned)bq_dm_read8(0x92B9));
+    printf("meck_gauge_dump: FixedEDV2[0x92BA]=%u (3501)\n",
+           (unsigned)bq_dm_read16(0x92BA));
+    printf("meck_gauge_dump: EDV2Hold[0x92BC]=%u (1)\n",
+           (unsigned)bq_dm_read8(0x92BC));
+    printf("meck_gauge_dump: OCV DOD table (default 4173..2713):\n");
+    static const uint16_t dod_addr[11] = {
+        0x92BD, 0x92BF, 0x92C1, 0x92C3, 0x92C5, 0x92C7,
+        0x92C9, 0x92CB, 0x92CD, 0x92CF, 0x92D1
+    };
+    for (int i = 0; i < 11; i++) {
+        printf("meck_gauge_dump:   V%d%%DOD[0x%04X]=%u\n",
+               i * 10, (unsigned)dod_addr[i], (unsigned)bq_dm_read16(dod_addr[i]));
+    }
+
+    // ---- Exit CFG_UPDATE without reinit (gauge state untouched), re-seal ----
+    bq_write_control(kBqSubExitOnly);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    bq_write_control(kBqSubSeal);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    printf("meck_gauge_dump: done (exited without reinit, re-sealed)\n");
 }

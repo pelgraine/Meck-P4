@@ -192,6 +192,12 @@ struct P4NodePrefs {
     // meck_set_antenna(); the Settings toggle saves this and applies live.
     uint8_t antenna;                 // 0=Internal (RF1), 1=External (RF2)
 
+    // Keyboard backlight brightness (K270 hardware keyboard, KEYBOARD builds
+    // only). Percent of full drive, 5..100; 0 = not set (default 25%).
+    // Appending here is safe -- loadPrefs memsets to zero and tolerates
+    // short reads, so existing NVS blobs come up as 0 -> default 25%.
+    uint8_t kb_backlight_pct;        // 0=default (25), else 5..100
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -232,6 +238,7 @@ struct P4NodePrefs {
         orientation = 0;        // portrait by default
         memset(kbd_addr, 0, sizeof(kbd_addr));   // no keyboard paired yet
         antenna = 0;            // Internal (RF1) by default
+        kb_backlight_pct = 25;  // 25% duty (~398 mA measured, backlight on)
     }
 };
 

@@ -344,6 +344,13 @@ extern "C" uint16_t meck_battery_full_charge_mah();
 extern "C" uint16_t meck_battery_time_to_empty_min();
 extern "C" uint8_t  meck_battery_pct_from_voltage(uint16_t mv);
 
+// Raw Temperature() register (0x06/0x07) in 0.1 K -- the temperature the
+// gauge is actually using for CEDV gauging (source selected by the
+// [TEMPS]/[WRTEMP] config bits; TRM SLUUBD4A Table 2-5). Surfaced on the
+// battery page to diagnose the EXTERNAL_NTC-mode-with-no-thermistor
+// question. Returns 0 on I2C failure or when the gauge bus is absent.
+extern "C" uint16_t meck_battery_gauging_temp_raw();
+
 // ---- Battery calibration (BQ27220 fuel gauge, full TI procedure) ----
 //
 // LilyGo's main.cpp calls BQ27220->set_design_capacity(1000) on every boot
@@ -364,6 +371,13 @@ extern "C" uint8_t  meck_battery_pct_from_voltage(uint16_t mv);
 // about 2 seconds because of the post-RESET settling delay; later boots
 // short-circuit at the FCC band check and return in milliseconds.
 extern "C" void meck_battery_calibrate();
+
+// Read-only diagnostic: dump the live gauge registers plus the CEDV profile
+// and configuration data-memory cells (TRM SLUUBD4A Table 3-2 addresses) to
+// serial. Unseals and enters CFG_UPDATE for the data-memory reads, exits
+// with 0x0092 (no reinit -- gauge state untouched) and re-seals. Called at
+// boot from meck_app_init while the accuracy investigation is open.
+extern "C" void meck_battery_dump_gauge_config();
 
 // ---- GPS readout (L76K module owned by main.cpp) ----
 //

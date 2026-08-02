@@ -571,6 +571,10 @@ static char g_debug_log_path[96]    = "";     // most-recent session file path
 static char g_debug_export_path[96] = "";     // most-recent export path (after Export tap)
 static lv_obj_t *slider_set_brightness   = NULL;
 static lv_obj_t *lbl_set_brightness_pct  = NULL;
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+static lv_obj_t *slider_set_kb_backlight  = NULL;
+static lv_obj_t *lbl_set_kb_backlight_pct = NULL;
+#endif
 static lv_obj_t *lbl_set_screen_off  = NULL;
 static lv_obj_t *lbl_set_kb_theme    = NULL;
 static lv_obj_t *lbl_set_kb_layout   = NULL;
@@ -1496,6 +1500,9 @@ static void on_retry_modal_cancel(lv_event_t *e);
 static void create_retry_modal();
 static void create_path_modal();
 static void on_settings_brightness_slider_event(lv_event_t *e);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+static void on_settings_kb_backlight_slider_event(lv_event_t *e);
+#endif
 static void on_settings_screen_off_tap(lv_event_t *e);
 static void on_settings_kb_theme_tap(lv_event_t *e);
 static void on_settings_kb_layout_tap(lv_event_t *e);
@@ -2668,6 +2675,19 @@ static void settings_update_labels() {
             lv_label_set_text(lbl_set_brightness_pct, buf);
         }
     }
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    if (slider_set_kb_backlight) {
+        int kpct = prefs->kb_backlight_pct ? prefs->kb_backlight_pct : 25;
+        if (kpct < 5)   kpct = 5;
+        if (kpct > 100) kpct = 100;
+        lv_slider_set_value(slider_set_kb_backlight, kpct, LV_ANIM_OFF);
+        if (lbl_set_kb_backlight_pct) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%d%%", kpct);
+            lv_label_set_text(lbl_set_kb_backlight_pct, buf);
+        }
+    }
+#endif
     if (lbl_set_screen_off) {
         char buf[16];
         if (prefs->screen_off_minutes == 0) {
@@ -9551,6 +9571,52 @@ static void create_settings_screen() {
     }
     y += 65;
 
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // Keyboard backlight brightness -- percent of full drive on the SY7200A
+    // enable pin, applied as LEDC duty. 5-100% in 1% steps; 25% is the
+    // previous fixed level (~398 mA measured with the backlight on), 100%
+    // approaches full drive (~+1 A). Live-applies while dragging -- visible
+    // when the backlight is on (LilyGo key toggles it) -- persists on
+    // release.
+    {
+        lv_obj_t *row = lv_obj_create(scroll);
+        lv_obj_set_size(row, SCREEN_WIDTH - 40, 55);
+        lv_obj_set_pos(row, 20, y);
+        lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(row, 10, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(50, 50, 60), 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *title_lbl = lv_label_create(row);
+        lv_label_set_text(title_lbl, "Keyboard Backlight");
+        lv_obj_set_style_text_color(title_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(title_lbl, &meck_montserrat_14, 0);
+        lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 10, -12);
+
+        lbl_set_kb_backlight_pct = lv_label_create(row);
+        lv_label_set_text(lbl_set_kb_backlight_pct, "...");
+        lv_obj_set_style_text_color(lbl_set_kb_backlight_pct, lv_color_white(), 0);
+        meck_set_font(lbl_set_kb_backlight_pct, &meck_montserrat_14, 0);
+        lv_obj_align(lbl_set_kb_backlight_pct, LV_ALIGN_RIGHT_MID, -10, -12);
+
+        slider_set_kb_backlight = lv_slider_create(row);
+        lv_obj_set_size(slider_set_kb_backlight, SCREEN_WIDTH - 60, 8);
+        lv_slider_set_range(slider_set_kb_backlight, 5, 100);
+        lv_obj_align(slider_set_kb_backlight, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lv_obj_set_style_bg_color(slider_set_kb_backlight,
+            lv_palette_darken(LV_PALETTE_CYAN, 2), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(slider_set_kb_backlight,
+            lv_palette_darken(LV_PALETTE_CYAN, 2), LV_PART_KNOB);
+        lv_obj_add_event_cb(slider_set_kb_backlight,
+            on_settings_kb_backlight_slider_event, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_add_event_cb(slider_set_kb_backlight,
+            on_settings_kb_backlight_slider_event, LV_EVENT_RELEASED, NULL);
+    }
+    y += 65;
+#endif
+
     // Auto screen-off — six-step ladder (Never / 1 / 2 / 5 / 10 / 30 min).
     // The 4 Hz screen_idle_timer_cb dims to 0 once inactive_ms exceeds the
     // threshold; only a boot-button press wakes the screen back to the
@@ -14195,6 +14261,12 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             uint8_t  pct_chip   = meck_battery_pct_from_chip();
             uint8_t  pct_volts  = meck_battery_pct_from_voltage(mv);
             int8_t   temp_c     = meck_battery_temp_c();
+            // Gauging temperature: raw Temperature() register (0.1 K) --
+            // the value the chip is actually using for CEDV math. A raw 0
+            // (failed read) converts to -273.1 C.
+            uint16_t gtemp_raw  = meck_battery_gauging_temp_raw();
+            int      gt_tenths  = (int)gtemp_raw - 2731;
+            int      gt_abs     = gt_tenths < 0 ? -gt_tenths : gt_tenths;
             uint16_t rem_mah    = meck_battery_remaining_mah();
             uint16_t full_mah   = meck_battery_full_charge_mah();
             uint16_t tte_min    = meck_battery_time_to_empty_min();
@@ -14233,12 +14305,14 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                     "Chg:  %u%% [chip]\n"
                     "Cur:  %s%d mA %s\n"
                     "Temp: %d C\n"
+                    "GaugeT: %s%d.%d C\n"
                     "Rem:  %u/%u\n"
                     "TTE:  %s%s",
                     (unsigned)mv,
                     (unsigned)pct_chip,
                     ma > 0 ? "+" : "", (int)ma, current_label,
                     (int)temp_c,
+                    gt_tenths < 0 ? "-" : "", gt_abs / 10, gt_abs % 10,
                     (unsigned)rem_mah, (unsigned)full_mah,
                     tte_buf,
                     trust_note);
@@ -14304,13 +14378,15 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                 "Voltage:    %u mV\n"
                 "Charge:     %u%%  [BQ27220]\n"
                 "Current:    %s%d mA  (%s)\n"
-                "Chip temp:  %d C\n\n"
+                "Chip temp:  %d C\n"
+                "Gauge temp: %s%d.%d C\n\n"
                 "Remaining:  %u / %u mAh\n"
                 "Time empty: %s%s",
                 (unsigned)mv,
                 (unsigned)pct_chip,
                 ma > 0 ? "+" : "",      (int)ma,        current_label_full,
                 (int)temp_c,
+                gt_tenths < 0 ? "-" : "", gt_abs / 10, gt_abs % 10,
                 (unsigned)rem_mah,      (unsigned)full_mah,
                 tte_buf,
                 trust_note);
@@ -18212,12 +18288,50 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
     }
 }
 
+// Keyboard backlight slider. Live-applies the duty while dragging (visible
+// only while the backlight is on -- the LilyGo key toggles it); persists on
+// release, same pattern as the screen brightness slider.
+static void on_settings_kb_backlight_slider_event(lv_event_t *e) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    if (!slider_set_kb_backlight) return;
+
+    int pct = (int)lv_slider_get_value(slider_set_kb_backlight);
+    if (pct < 5)   pct = 5;
+    if (pct > 100) pct = 100;
+
+    g_p4kbd.set_backlight_level_pct((uint8_t)pct);
+
+    if (lbl_set_kb_backlight_pct) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", pct);
+        lv_label_set_text(lbl_set_kb_backlight_pct, buf);
+    }
+
+    if (lv_event_get_code(e) == LV_EVENT_RELEASED) {
+        prefs->kb_backlight_pct = (uint8_t)pct;
+        mesh->getDataStore()->savePrefs(*prefs);
+        printf("Settings: kb backlight = %d%%\n", pct);
+    }
+}
+
 // Probe for the keyboard and, if present, start the poll timer. Absence is a
 // normal outcome -- the on-screen keyboard then behaves exactly as it does on
 // a plain T-Display-P4 build.
 static void meck_p4kbd_init(void) {
     if (g_p4kbd.begin()) {
         g_p4kbd_present = true;
+        // Apply the persisted backlight level so the LilyGo-key toggle
+        // comes on at the chosen brightness (default 25%).
+        {
+            Meck* mesh = meck_get_instance();
+            P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : NULL;
+            uint8_t kpct = (prefs && prefs->kb_backlight_pct)
+                               ? prefs->kb_backlight_pct : 25;
+            g_p4kbd.set_backlight_level_pct(kpct);
+        }
         g_p4kbd_timer = lv_timer_create(meck_p4kbd_poll, 30, NULL);
         printf("MeckUI: P4 keyboard poll timer started\n");
     } else {
