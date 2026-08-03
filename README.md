@@ -23,6 +23,12 @@ with a `meshcore` ESP-IDF component added on top.
 - [Screen-Off Power Saving](#screen-off-power-saving)
 - [Screen Orientation](#screen-orientation)
 - [Virtual Keyboard](#virtual-keyboard)
+- [T-Display P4 Keyboard (K270)](#t-display-p4-keyboard-k270)
+  - [Connecting it](#connecting-it)
+  - [Batteries](#batteries)
+  - [Keyboard backlight](#keyboard-backlight)
+  - [Typing](#typing)
+  - [The onboard radios](#the-onboard-radios)
 - [Physical Keyboard (CardKB)](#physical-keyboard-cardkb)
 - [Channel Messages](#channel-messages)
 - [Channel Picker](#channel-picker)
@@ -280,6 +286,187 @@ Tap **`abc`** to switch back to letters.
 The two message-composer keyboards (channel and DM compose) have an **emoji key** just to the right of the space bar. Tap it to open a scrollable picker; tap an emoji to insert it and the picker closes, or tap outside the picker to dismiss without inserting.
 
 Emoji render in colour both in the picker and inline in your messages, drawn from a set of Twemoji images baked into the firmware. Codepoints outside that set fall back to the normal text font.
+
+-----
+
+## T-Display P4 Keyboard (K270)
+
+The **LilyGo T-Display-P4-Keyboard (K270)** is a clamshell expansion board that
+turns the P4 into a small handheld terminal: a physical QWERTY keyboard, a
+battery compartment for 21700 cells, and two radios of its own. Meck-P4 has full
+support for it, selected at build time.
+
+Support is a **board type**, not a runtime option. In `idf.py menuconfig`, under
+the Meck options, set **Board type** to `t_display_p4_keyboard` (the default is
+`t_display_p4`). That defines `CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD`, which
+gates the driver, the keyboard-backlight setting, and the keyboard-battery
+column on the Battery tile. A plain `t_display_p4` build ignores an attached
+keyboard entirely.
+
+Electrically, the keyboard hangs off the **1x4 "P2" connector** as a bit-banged
+I2C bus on **SDA = GPIO 46, SCL = GPIO 45**, carrying two chips: an **XL9555**
+I/O expander at `0x20` and a **TCA8418** keypad scanner at `0x34`. The TCA8418's
+reset line is on expander pin IO6 rather than a P4 GPIO, so Meck pulses it by
+hand before starting the scanner. The keypad is polled from a 30 ms LVGL timer
+rather than driven from the TCA8418 interrupt line, which keeps the driver off
+GPIO 47/48 and avoids registering a second GPIO ISR service alongside the
+radio's. The scan window is the full 10 x 7 matrix.
+
+Detection is a normal probe at boot, and absence is not an error. With a
+keyboard attached you get:
+
+```
+[P4KBD] keyboard detected (XL9555 0x20 + TCA8418 0x34)
+MeckUI: P4 keyboard poll timer started
+```
+
+Without one:
+
+```
+[P4KBD] no XL9555 at 0x20 - keyboard not attached
+MeckUI: no P4 keyboard found, using the on-screen keyboard
+```
+
+In the second case everything behaves exactly as on a plain T-Display P4 — the
+on-screen keyboard is the only input. You can flash a keyboard build to a bare
+board safely.
+
+### Connecting it
+
+**Follow this order every time. Do not hot-plug the keyboard.**
+
+1. Switch the **P4 off** at its own power switch.
+2. Switch the **keyboard off** at its power switch.
+3. Insert the 21700 cell or cells into the keyboard.
+4. Attach the P4 to the keyboard.
+5. Switch the **keyboard on**.
+
+Attaching or detaching with either side powered risks the board. The keyboard
+carries its own power path and its own cells, and the two sides share a rail
+once mated, so both switches must be off before they are joined or separated.
+
+On the firmware side, Meck acquires **LDO channel 4 at 3.3 V** before it touches
+the keyboard bus. That rail powers the I/O domain the bit-banged bus sits in;
+without it the bus is marginal and reads fail intermittently, which is
+indistinguishable from "no key pressed" — dropped reads show up as keystrokes
+that need repeating. This is handled automatically, but it is the reason a
+keyboard build powers a rail a plain build leaves alone.
+
+### Batteries
+
+The keyboard takes **one or two 21700 cells**. Two are wired as a single pack;
+you do not have to fit both.
+
+There is only **one fuel gauge in the system** — the P4's BQ27220 — and the
+keyboard's selector switch puts exactly one battery on the rail at a time. The
+gauge therefore always reads whichever cell is currently selected, and it has no
+way to tell you which one that is. Meck handles this by asking you to *declare*
+the switch position rather than pretending to sense it.
+
+On the **Battery** tile you get two columns:
+
+- the left column is the P4's internal 1000 mAh cell
+- the right column, headed **KBD** in blue, is the keyboard pack
+
+Only one column is live at a time. The declared source is drawn in white and
+carries the readings; the other is grey and inert, and says either
+`Pack not selected` or `Not in circuit (source: kbd)`. **Tap the blue KBD
+header** to switch which side is declared live — the header stays tappable in
+both states, so it is always the way back. The choice persists in NVS, and the
+battery percentage in the top-right of the home screen follows it too.
+
+**Capacity is a declaration as well.** With the keyboard pack selected, the
+capacity line reads `Cap: 1 x 5000mAh (tap to change)`; **tap it** to toggle
+between **5,000 mAh** (one cell) and **10,000 mAh** (two). The line is inert
+while the internal cell is the declared source. This also persists.
+
+**Read the keyboard-pack numbers as estimates, and understand what they rest
+on.** The BQ27220's own state-of-charge comes from a coulomb counter referenced
+against the internal cell's 1000 mAh design capacity; it is meaningless for a
+21700 pack. So while the pack is selected, Meck ignores the chip's SoC and
+derives everything from the measured voltage instead:
+
+- **Chg** is a voltage-curve percentage, shown as `~NN% est.`
+- **Rem** is simply *declared capacity x voltage percentage*, shown as
+  `~N/M est.` — arithmetic against the number you declared, not a measurement
+- **TTE** is estimated remaining divided by present discharge current, shown
+  only while actually discharging (5 mA or more) and `--` when idle or charging
+
+The 5,000 mAh figure is a **nominal assumption for a typical 21700 cell**, not
+something read from the cells. If yours are a different capacity the percentage
+still tracks voltage correctly, but the mAh and time-to-empty figures scale off
+whatever you declared. Voltage and current are direct gauge readings and are
+unaffected by any of this.
+
+Tapping **any** battery label anywhere in the UI toggles that reading between
+percentage and voltage — that is separate from, and works alongside, the KBD
+source toggle.
+
+### Keyboard backlight
+
+The key legends are lit by an SY7200A LED driver on the keyboard, wired to its
+enable/dimming pin. Meck drives it with LEDC PWM at 20 kHz (timer 1, channel 1,
+10-bit) rather than a plain high level, because full drive measured about
+**+1 A** of extra battery draw.
+
+**The LilyGo key toggles the backlight on and off.** It is the key marked with
+the LilyGo logo (the Windows-key position); pressing it produces no character,
+it only switches the light. The backlight always comes up **off** after a boot.
+
+**Brightness is set in Settings -> Keyboard Backlight**, a slider from **5% to
+100%**, defaulting to **25%**. Dragging applies the new level live — visible
+only while the backlight is actually on — and the value is saved when you
+release the slider. 25% measured about **398 mA** of pack draw with the
+backlight lit, which is why it is the default rather than something brighter.
+The setting only appears on keyboard builds.
+
+### Typing
+
+Keystrokes go to **whatever text field is focused on the current screen**. Meck
+walks the active screen for a focused textarea rather than consulting a fixed
+list, so every text field in the firmware is covered — settings, channel and
+region editors, WiFi, trace and path editors, repeater admin, the web URL and
+search bars, and the Notes editor.
+
+Beyond plain characters:
+
+|Key|Action|
+|---|---|
+|**Enter**|Commits the field — the same action as the on-screen keyboard's OK button, so each screen's existing save/send handler runs|
+|**Esc**|Cancels the field, as the on-screen keyboard's close button does|
+|**Backspace**|Deletes the character before the cursor|
+|**Left / Right**|Move the cursor within the field|
+|**Left / Right** (home screen, nothing focused)|Page the home tileview left or right, the same movement a swipe produces|
+|**Shift**|One-shot upper case for the next letter|
+|**Caps**|Caps Lock toggle. Shift and Caps together cancel, as on a normal keyboard|
+|**Fn**|One-shot symbol layer for the next key|
+|**LilyGo key**|Toggles the keyboard backlight (see above)|
+|**Alt, Ctrl, Record, F1-F11**|Produce nothing in Meck|
+
+**Type-to-compose.** On the channel and room message screens, pressing any
+printable key when nothing is focused opens the composer and starts typing into
+it, so you do not have to tap the field first. Arrows, Enter and Esc are left
+alone, so you can still move around the message list without the composer
+springing open.
+
+**The symbol layer.** Fn plus a key gives the symbol printed on it. A few
+positions in LilyGo's vendor key map carry no printable symbol — Fn with Z, X, C
+or V among them — and those combinations produce nothing. One deliberate Meck
+change: **Fn+H types a comma**, because the vendor map carried no comma anywhere
+and duplicated the apostrophe instead.
+
+### The onboard radios
+
+The keyboard carries two radios of its own: a **CC1101** and an **nRF24L01+**.
+**Neither is available in Meck.** There is no driver for either anywhere in the
+firmware — the only trace of them in the tree is a block of pin definitions in
+LilyGo's vendor header, and they are reachable only through LilyGo's own
+standalone example builds (`radiolib_cc1101_send_receive` and
+`radiolib_nrf24l01_send_receive`), which are separate applications rather than
+part of Meck.
+
+Meck's mesh traffic goes over the P4's own **SX1262** on the HPD16A module, and
+that is the only radio it uses.
 
 -----
 
@@ -653,15 +840,80 @@ Tap a file to start reading. In the reading view, tap the **left third** of the 
 
 ## Notes
 
-Tap **Notes** from the home grid to open the notes app. Notes are plain UTF-8 `.txt` files stored under `/sdcard/notes`, so they live on the removable card, survive a firmware reflash, and can be read or edited on a computer. The notes folder is created automatically on first run.
+Tap **Notes** from the home grid to open the notes app. Notes are plain UTF-8
+files stored under `/sdcard/notes`, so they live on the removable card, survive
+a firmware reflash, and can be read or edited on a computer. The notes folder is
+created automatically on first run.
 
-The browser works like the reader's: folder navigation with an up-one-level button and a breadcrumb, rooted at `/sdcard/notes`. A green **+ New Note** row sits at the top of every folder, so you can start a note even in an empty folder. New notes are created in the folder you are currently viewing.
+Both **`.md`** and **`.txt`** files are listed, and **new notes are created as
+`.md`**. Nothing about the storage format changed with markdown support: a `.md`
+note is ordinary markdown text, so it opens correctly in any editor or viewer
+off-device.
 
-**Creating and editing.** Tapping **+ New Note** opens the editor with the on-screen keyboard (which honours your KB Theme and KB Layout settings). New notes are named by date and time when the clock is synced (`note_YYYYMMDD_HHMM.txt`), or sequentially (`note_NNN.txt`) when it is not. Opening an existing note shows it in a read view with an **Edit** button in the top-right that reopens it in the editor. Tap **Save** to write your changes back to the card.
+The browser works like the reader's: folder navigation with an up-one-level
+button and a breadcrumb, rooted at `/sdcard/notes`. A green **+ New Note** row
+sits at the top of every folder, so you can start a note even in an empty
+folder. New notes are created in the folder you are currently viewing, named by
+date and time when the clock is synced (`note_YYYYMMDD_HHMM.md`, falling back to
+seconds precision on a same-minute collision) or sequentially (`note_NNN.md`)
+when it is not.
 
-**Reading.** The read view uses the same paging engine as the reader: tap the left third of the screen to turn back a page and the right two-thirds to turn forward, with a progress percentage at the bottom and a saved-position bookmark so you can resume where you left off.
+**Reading.** The two extensions open differently. A **`.md`** note is loaded
+whole and rendered as markdown into a single scrolling view — swipe to scroll,
+with no page turns, tap zones or progress percentage. A **`.txt`** note keeps
+the original paged reader: tap the left third of the screen to turn back a page
+and the right two-thirds to turn forward, with a progress percentage and a
+saved-position bookmark so you can resume where you left off. Either way an
+**Edit** button in the top-right reopens the note in the editor.
 
-**Rename and delete.** Long-press a note in the browser to open an action menu with **Rename**, **Delete**, and **Cancel**. Delete asks for confirmation first. Both operations move or remove the note's resume bookmark alongside the file.
+**What the markdown renderer supports.** It is a deliberate subset, chosen so
+notes stay readable as plain text:
+
+- `#`, `##` and `###` headings at the start of a line
+- `- ` bullets, rendered as a bullet dot
+- leading spaces, preserved as indentation
+- inline `**bold**` and `*italic*` runs
+
+Anything else renders literally. Where a run is marked both bold and italic,
+bold wins — there is no bold-italic face on the device. Heading and body sizes
+follow your **Settings -> Font Size** preference (Classic / Larger / Extra
+Large), picked fresh each time the view is drawn.
+
+**The editor and its toolbar.** Tapping **+ New Note**, or **Edit** on an
+existing one, opens the editor with the on-screen keyboard (which honours your
+KB Theme and KB Layout settings), or accepts the physical keyboard if one is
+attached. A seven-button formatting toolbar sits on its own row under the
+header:
+
+|Button|Action|
+|---|---|
+|**B**|Inserts `**` at the cursor|
+|**I**|Inserts `*` at the cursor|
+|**H**|Cycles the current line's heading: none -> `#` -> `##` -> `###` -> none|
+|**Bullet**|Toggles `- ` on the current line|
+|**Right arrow**|Indents the current line by two spaces|
+|**Left arrow**|Outdents the current line by two spaces|
+|**Eye**|Toggles a live preview of the note rendered as markdown|
+
+**B** and **I** insert a single marker per tap, so the flow is: tap the button
+to open, type the word, tap the button again to close. They do not insert a pair
+or move the cursor for you.
+
+Focus stays in the text field across a toolbar tap, so you can format and keep
+typing without tapping back into the note. The insertion point is a **blinking
+white I-beam**. The one exception is the preview eye, which deliberately drops
+focus while the preview is up so a physical keyboard cannot edit text you cannot
+see; focus returns when you toggle the preview off. Tap **Save** to write your
+changes back to the card.
+
+Notes are bounded by a 16 KB editor buffer, which is what makes loading a `.md`
+note whole for rendering safe.
+
+**Rename and delete.** Long-press a note in the browser to open an action menu
+with **Rename**, **Delete**, and **Cancel**. Delete asks for confirmation first.
+Rename edits the name only — the original extension is preserved and re-added on
+save, so renaming a `.md` note cannot accidentally turn it into a `.txt`. Both
+operations move or remove the note's resume bookmark alongside the file.
 
 -----
 
@@ -804,6 +1056,7 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Path Hash Mode**  |Tap to cycle: 1-byte / 2-byte / 3-byte (default 2-byte matches the AU mesh)                                                                                                                                                     |
 |**Default Region**  |Tap to open text editor, enter region name (e.g. `au-nsw`), **Confirm** to save. Empty = unscoped. See [Region Scope](#region-scope).                                                                                           |
 |**UTC Offset**      |Tap to adjust (-12 to +14)                                                                                                                                                                                                      |
+|**Font Size**       |Tap to cycle: Classic / Larger / Extra Large. Rescales every label live, without a reboot or screen rebuild. Also sizes the reader's body text and the Notes markdown view.|
 |**Home Color**      |Tap to cycle: Plain / Multi                                                                                                                                                                                                     |
 |**Position >>**     |Opens the Position sub-screen (latitude, longitude, share position mode, copy position). See [Position Adverts and Share Position](#position-adverts-and-share-position).|
 |**Contacts >>**     |Opens the Contacts sub-screen (auto-add policies, type toggles)                                                                                                                                                                 |
@@ -812,6 +1065,7 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Export Config**   |Opens a modal with four section checkboxes (Identity, Channels, Contacts, Radio). Tap Export to write a MeshCore-app-compatible JSON file to SD. See [Config Export](#config-export).                                               |
 |**Debug Logs >>**   |Opens the Debug Logs sub-screen. Captures all firmware printf output to an SD log file for troubleshooting. See [Debug Logs](#debug-logs).                                                                                          |
 |**Brightness**      |Slider: 12% to 100% -- applies live                                                                                                                                                                                              |
+|**Keyboard Backlight**|Slider: 5% to 100%, default 25% -- applies live, saved on release. Keyboard builds only. The LilyGo key on the keyboard toggles the light on and off; this sets the level it comes on at. See [T-Display P4 Keyboard (K270)](#t-display-p4-keyboard-k270).|
 |**Auto Off**        |Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — when idle, the screen tears down the MIPI-DSI bus and CPU usage drops from ~94% to ~57% CPU_MAX. Wake with the **boot button** (touch wake is not yet supported)            |
 |**Orientation**     |Tap to toggle: Portrait (default) / Landscape. Applies live, rebuilding every screen at the new rotation, and persists across reboots. See [Screen Orientation](#screen-orientation).|
 |**KB Theme**        |Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details.                                                                                                  |
@@ -899,6 +1153,14 @@ The Battery tile shows:
   ambient when idle.
 - **Remaining mAh / Full mAh**
 - **Time empty** estimate when discharging
+
+Tap any battery label anywhere in the UI to switch that reading between
+percentage and voltage.
+
+On keyboard builds this tile gains a second column for the keyboard's 21700
+pack, with its own source and capacity toggles — see
+[Batteries](#batteries) under the keyboard section, which also explains why
+the pack's percentage and mAh figures are estimates.
 
 -----
 
