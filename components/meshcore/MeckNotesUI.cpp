@@ -967,6 +967,10 @@ static void create_editor_screen(void) {
     };
     for (int i = 0; i < 7; i++) {
         lv_obj_t* b = lv_button_create(ed_toolbar);
+        /* A toolbar tap must not steal LV_STATE_FOCUSED from the text
+         * area: the hardware-keyboard poll routes keys by that state, and
+         * the cursor is only drawn while it holds. */
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICK_FOCUSABLE);
         lv_obj_set_size(b, 60, NOTES_TOOLBAR_H - 8);
         lv_obj_set_style_bg_color(b, lv_color_make(40, 40, 40), 0);
         lv_obj_set_style_radius(b, 8, 0);
@@ -1004,6 +1008,23 @@ static void create_editor_screen(void) {
     lv_obj_set_style_bg_color(ta_notes_edit, lv_color_make(18, 18, 18), 0);
     lv_obj_set_style_border_width(ta_notes_edit, 0, 0);
     meck_ui_set_font(ta_notes_edit, &meck_montserrat_22, 0);
+    /* Cursor: white 2 px I-beam, same styling as the web URL/search fields
+     * in MeckUI.cpp.
+     *
+     * The selector must carry LV_STATE_FOCUSED. LVGL's default theme adds
+     * its own ta_cursor style at LV_PART_CURSOR | LV_STATE_FOCUSED, which
+     * paints the cursor in theme->color_text -- dark grey under the light
+     * theme, invisible on this black background. get_prop_core resolves by
+     * state weight alone and gives local styles no priority, so a local
+     * style at plain LV_PART_CURSOR (state DEFAULT) always loses to the
+     * theme's while the field is focused, which is whenever you are typing.
+     * Matching the state puts this style first in the list and it wins.
+     *
+     * Blink is left to the theme (anim_duration 400 on the same style). */
+    lv_obj_set_style_border_color(ta_notes_edit, lv_color_white(),    LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(ta_notes_edit, 2,                   LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_side(ta_notes_edit,  LV_BORDER_SIDE_LEFT, LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_opa(ta_notes_edit,   LV_OPA_COVER,        LV_PART_CURSOR | LV_STATE_FOCUSED);
     int kbh = lv_obj_get_height(kb_notes_edit);
     lv_obj_set_pos(ta_notes_edit, NOTES_MARGIN,
                    NOTES_HEADER_H + NOTES_TOOLBAR_H);
@@ -1040,12 +1061,14 @@ static uint32_t md_char_for_byte(const char* s, int byte) {
 }
 
 /* Bold / italic: wrap the selection in the marker if one is active (needs
- * LV_LABEL_TEXT_SELECTION in the LVGL config); otherwise insert an empty
- * marker pair and park the cursor between the halves. */
+ * LV_LABEL_TEXT_SELECTION in the LVGL config); otherwise insert one marker
+ * at the cursor and leave the cursor after it. Tapping the button is a
+ * plain marker insert, so the flow is tap to open, type the word, tap
+ * again to close -- the button does not track an open/closed state. */
 static void md_wrap_or_insert(const char* marker) {
     if (!ta_notes_edit) return;
-    int mlen = (int)strlen(marker);
 #if LV_LABEL_TEXT_SELECTION
+    int mlen = (int)strlen(marker);
     lv_obj_t* lbl = lv_textarea_get_label(ta_notes_edit);
     uint32_t s0 = lv_label_get_text_selection_start(lbl);
     uint32_t s1 = lv_label_get_text_selection_end(lbl);
@@ -1068,11 +1091,7 @@ static void md_wrap_or_insert(const char* marker) {
         }
     }
 #endif
-    uint32_t p = lv_textarea_get_cursor_pos(ta_notes_edit);
-    char pair[9];
-    snprintf(pair, sizeof(pair), "%s%s", marker, marker);
-    lv_textarea_add_text(ta_notes_edit, pair);
-    lv_textarea_set_cursor_pos(ta_notes_edit, (int32_t)(p + mlen));
+    lv_textarea_add_text(ta_notes_edit, marker);
 }
 
 /* Rewrite the current line's prefix. op: 0 heading cycle (none -> # -> ##
@@ -1133,12 +1152,23 @@ static void md_line_op(int op) {
     lv_textarea_set_cursor_pos(ta_notes_edit, ncur);
 }
 
-static void on_notes_ed_bold(lv_event_t* e)    { (void)e; md_wrap_or_insert("**"); }
-static void on_notes_ed_italic(lv_event_t* e)  { (void)e; md_wrap_or_insert("*");  }
-static void on_notes_ed_heading(lv_event_t* e) { (void)e; md_line_op(0); }
-static void on_notes_ed_bullet(lv_event_t* e)  { (void)e; md_line_op(1); }
-static void on_notes_ed_indent(lv_event_t* e)  { (void)e; md_line_op(2); }
-static void on_notes_ed_outdent(lv_event_t* e) { (void)e; md_line_op(3); }
+/* Return typing focus to the note after a toolbar action, so the flow is
+ * tap-format, keep typing, tap-format, keep typing -- no re-tap into the
+ * field. Raw focus idiom rather than meck_ui_panel_edit_opened, which is
+ * a no-op on plain touch builds where the cursor restart is still wanted;
+ * the FOCUSED event (not just the state) is what restarts LVGL's blink. */
+static void ed_refocus(void) {
+    if (!ta_notes_edit) return;
+    lv_obj_add_state(ta_notes_edit, LV_STATE_FOCUSED);
+    lv_obj_send_event(ta_notes_edit, LV_EVENT_FOCUSED, NULL);
+}
+
+static void on_notes_ed_bold(lv_event_t* e)    { (void)e; md_wrap_or_insert("**"); ed_refocus(); }
+static void on_notes_ed_italic(lv_event_t* e)  { (void)e; md_wrap_or_insert("*");  ed_refocus(); }
+static void on_notes_ed_heading(lv_event_t* e) { (void)e; md_line_op(0); ed_refocus(); }
+static void on_notes_ed_bullet(lv_event_t* e)  { (void)e; md_line_op(1); ed_refocus(); }
+static void on_notes_ed_indent(lv_event_t* e)  { (void)e; md_line_op(2); ed_refocus(); }
+static void on_notes_ed_outdent(lv_event_t* e) { (void)e; md_line_op(3); ed_refocus(); }
 
 /* In-editor preview: swap the text area for a rendered spangroup of the
  * current (unsaved) buffer. The field is defocused while previewing so
