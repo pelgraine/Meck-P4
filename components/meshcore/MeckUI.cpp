@@ -5467,6 +5467,15 @@ static void on_kb_event(lv_event_t *e) {
     if (code == LV_EVENT_READY) {
         on_send_clicked(NULL);
     } else if (code == LV_EVENT_CANCEL) {
+        // Drop the composer's focus, not just the keyboard. With the
+        // hardware keyboard the on-screen keyboard is already hidden, so
+        // without this the cancel was a visual no-op: the textarea stayed
+        // focused forever and every subsequent Esc was routed back here
+        // instead of to the screen's Back button.
+        if (ta_compose) {
+            lv_obj_remove_state(ta_compose, LV_STATE_FOCUSED);
+            lv_obj_send_event(ta_compose, LV_EVENT_DEFOCUSED, NULL);
+        }
         if (kb_compose) lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
         if (ta_compose) lv_obj_align(ta_compose, LV_ALIGN_BOTTOM_LEFT, 75, -10);
         if (btn_send)   lv_obj_align(btn_send,   LV_ALIGN_BOTTOM_RIGHT, -10, -10);
@@ -5545,6 +5554,13 @@ static void on_room_kb_event(lv_event_t *e) {
     if (code == LV_EVENT_READY) {
         on_room_send_clicked(NULL);
     } else if (code == LV_EVENT_CANCEL) {
+        // Same focus drop as on_kb_event: without it the room composer
+        // stayed focused after a hardware-keyboard Esc and the screen's
+        // Back button was unreachable from the keyboard.
+        if (ta_room_compose) {
+            lv_obj_remove_state(ta_room_compose, LV_STATE_FOCUSED);
+            lv_obj_send_event(ta_room_compose, LV_EVENT_DEFOCUSED, NULL);
+        }
         if (kb_room_compose) lv_obj_add_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
         if (ta_room_compose) lv_obj_align(ta_room_compose,
             LV_ALIGN_BOTTOM_LEFT, 10, -10);
