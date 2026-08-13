@@ -370,11 +370,20 @@ extern "C" uint16_t meck_battery_time_to_empty_min() {
 // check against the chip's reported SoC.
 extern "C" uint8_t meck_battery_pct_from_voltage(uint16_t mv) {
     struct Point { uint16_t mv; uint8_t pct; };
+    // Mid-band recalibrated against published 21700 OCV tables and an
+    // on-bench cross-check: cells the previous table called 29% (filtered
+    // rest ~3745 mV) read a stabilised 44% on an external charger, matching
+    // the typical ~3.75 V ~= 45-50% of NMC 21700 rest curves. The old
+    // 3700->20 / 3850->50 points sat well below that. Both ends are kept:
+    // the bottom points are unchanged and the 4000->85 / 4200->100 top
+    // segment was independently confirmed (fully charged cells read 97%).
     static const Point curve[] = {
         {3300,   0},
         {3500,   5},
-        {3700,  20},
-        {3850,  50},
+        {3600,  12},
+        {3680,  25},
+        {3745,  44},
+        {3850,  62},
         {4000,  85},
         {4200, 100},
     };

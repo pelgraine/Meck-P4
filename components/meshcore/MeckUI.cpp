@@ -627,6 +627,7 @@ static lv_obj_t *lbl_set_orientation = NULL;
 
 // WiFi settings sub-screen (Settings > WiFi Companion)
 static lv_obj_t *scr_settings_wifi        = NULL;
+static lv_obj_t *obj_wifi_settings_scroll = NULL;   // rows container (keyboard row cycling)
 // BLE keyboard pairing sub-screen (Settings > BLE Keyboard)
 #if MECK_BLE_KEYBOARD_ENABLED
 static lv_obj_t   *scr_settings_keyboard  = NULL;
@@ -970,6 +971,7 @@ static ContactFilter g_contact_filter = CONTACT_FILTER_ALL;
 
 // Contacts → auto-add submenu under Settings
 static lv_obj_t *scr_settings_contacts        = NULL;
+static lv_obj_t *obj_contacts_settings_scroll = NULL;   // rows container (keyboard row cycling)
 static lv_obj_t *lbl_set_contact_mode         = NULL;
 static lv_obj_t *lbl_set_autoadd_chat         = NULL;
 static lv_obj_t *lbl_set_autoadd_repeater     = NULL;
@@ -9495,6 +9497,7 @@ static void create_settings_wifi_screen() {
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *scroll = lv_obj_create(scr_settings_wifi);
+    obj_wifi_settings_scroll = scroll;
     lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
     lv_obj_set_pos(scroll, 0, 90);
     lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
@@ -9751,6 +9754,7 @@ static void create_settings_contacts_screen() {
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
 
     lv_obj_t *scroll = lv_obj_create(scr_settings_contacts);
+    obj_contacts_settings_scroll = scroll;
     lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
     lv_obj_set_pos(scroll, 0, 90);
     lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
@@ -18906,11 +18910,32 @@ static void meck_home_tile_ring_step(int delta) {
 static lv_obj_t *g_row_ring_cont = NULL;
 static int       g_row_ring_idx  = -1;
 
+// Only visible lv_button children count as rows, and back/cancel buttons
+// (label starting with the left chevron) are excluded -- Esc already covers
+// those, and excluding them lets a screen whose rows sit directly on it
+// serve as its own ring container. Skipping hidden buttons keeps the ring
+// off rows a screen conditionally hides (e.g. Channel Detail's Delete row
+// on the primary channel).
+static bool meck_row_ring_is_row(lv_obj_t *child) {
+    if (!lv_obj_check_type(child, &lv_button_class)) return false;
+    if (lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN))  return false;
+    const uint32_t c = lv_obj_get_child_count(child);
+    for (uint32_t i = 0; i < c; i++) {
+        lv_obj_t *lbl = lv_obj_get_child(child, i);
+        if (!lv_obj_check_type(lbl, &lv_label_class)) continue;
+        const char *txt = lv_label_get_text(lbl);
+        if (txt && (strncmp(txt, LV_SYMBOL_LEFT, strlen(LV_SYMBOL_LEFT)) == 0)) {
+            return false;                       // back / cancel button
+        }
+    }
+    return true;
+}
+
 static int meck_row_ring_count(lv_obj_t *cont) {
     int n = 0;
     const uint32_t c = lv_obj_get_child_count(cont);
     for (uint32_t i = 0; i < c; i++) {
-        if (lv_obj_check_type(lv_obj_get_child(cont, i), &lv_button_class)) n++;
+        if (meck_row_ring_is_row(lv_obj_get_child(cont, i))) n++;
     }
     return n;
 }
@@ -18920,7 +18945,7 @@ static lv_obj_t *meck_row_ring_button_at(lv_obj_t *cont, int idx) {
     const uint32_t c = lv_obj_get_child_count(cont);
     for (uint32_t i = 0; i < c; i++) {
         lv_obj_t *child = lv_obj_get_child(cont, i);
-        if (!lv_obj_check_type(child, &lv_button_class)) continue;
+        if (!meck_row_ring_is_row(child)) continue;
         if (n == idx) return child;
         n++;
     }
@@ -18928,12 +18953,24 @@ static lv_obj_t *meck_row_ring_button_at(lv_obj_t *cont, int idx) {
 }
 
 // The row-cycling container for the active screen, or NULL on screens that
-// keep the generic page scroll.
+// keep the generic page scroll. Screens whose rows live in a dedicated
+// scroll container map to it; screens whose rows sit directly on the
+// screen map to themselves (the back button and hidden rows are excluded
+// by meck_row_ring_is_row).
 static lv_obj_t *meck_row_ring_container(void) {
     lv_obj_t *scr = lv_screen_active();
-    if (scr == scr_settings)        return obj_settings_scroll;
-    if (scr == scr_channel_picker)  return obj_ch_picker_scroll;
-    if (scr == scr_settings_canned) return obj_canned_rows;
+    if (scr == scr_settings)          return obj_settings_scroll;
+    if (scr == scr_channel_picker)    return obj_ch_picker_scroll;
+    if (scr == scr_settings_canned)   return obj_canned_rows;
+    if (scr == scr_settings_wifi)     return obj_wifi_settings_scroll;
+    if (scr == scr_settings_contacts) return obj_contacts_settings_scroll;
+    if (scr == scr_settings_channels) return obj_ch_settings_scroll;
+    if (scr == scr_channel_detail)    return scr_channel_detail;
+    if (scr == scr_settings_position) return scr_settings_position;
+    if (scr == scr_debug_logs)        return scr_debug_logs;
+#if MECK_BLE_KEYBOARD_ENABLED
+    if (scr == scr_settings_keyboard) return scr_settings_keyboard;
+#endif
     return NULL;
 }
 
@@ -19674,18 +19711,25 @@ static void meck_ui_build_screens() {
     // longer exist) and clear the ring whenever either screen unloads.
     g_row_ring_cont = NULL;
     g_row_ring_idx  = -1;
-    lv_obj_add_event_cb(scr_settings, [](lv_event_t *e) {
-        (void)e;
-        meck_row_ring_clear();
-    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
-    lv_obj_add_event_cb(scr_channel_picker, [](lv_event_t *e) {
-        (void)e;
-        meck_row_ring_clear();
-    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
-    lv_obj_add_event_cb(scr_settings_canned, [](lv_event_t *e) {
-        (void)e;
-        meck_row_ring_clear();
-    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+    // One clear hook per ring-capable screen (see
+    // meck_row_ring_container for the container each maps to).
+    {
+        lv_obj_t *ring_screens[] = {
+            scr_settings, scr_channel_picker, scr_settings_canned,
+            scr_settings_wifi, scr_settings_contacts, scr_settings_channels,
+            scr_channel_detail, scr_settings_position, scr_debug_logs,
+#if MECK_BLE_KEYBOARD_ENABLED
+            scr_settings_keyboard,
+#endif
+        };
+        for (size_t i = 0; i < sizeof(ring_screens) / sizeof(ring_screens[0]); i++) {
+            if (!ring_screens[i]) continue;
+            lv_obj_add_event_cb(ring_screens[i], [](lv_event_t *e) {
+                (void)e;
+                meck_row_ring_clear();
+            }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+        }
+    }
 #endif
     create_messages_screen();
     create_retry_modal();
