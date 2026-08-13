@@ -2779,9 +2779,10 @@ static void settings_update_labels() {
 // format_local_time
 // ----------------------------------------------------------------------------
 // Format a UTC epoch into a local display string, applying prefs->utc_offset_hours.
-// Same calendar day (in local time) -> "8:11PM"; otherwise "15/May/26 8:53PM".
-// If our clock isn't synced (epoch < 1750000000), always show date+time so a
-// stale fallback timestamp doesn't get misread as "today".
+// Same calendar day (in local time) -> "20:11"; otherwise "15/May/26 20:53".
+// 24-hour, matching the header clock. If our clock isn't synced (epoch <
+// 1750000000), always show date+time so a stale fallback timestamp doesn't
+// get misread as "today".
 // ============================================================================
 
 static void format_local_time(uint32_t utc_epoch, char* buf, size_t buf_len) {
@@ -2813,9 +2814,9 @@ static void format_local_time(uint32_t utc_epoch, char* buf, size_t buf_len) {
     }
 
     if (same_day) {
-        strftime(buf, buf_len, "%I:%M%p", &tm_msg);
+        strftime(buf, buf_len, "%H:%M", &tm_msg);
     } else {
-        strftime(buf, buf_len, "%d/%b/%y %I:%M%p", &tm_msg);
+        strftime(buf, buf_len, "%d/%b/%y %H:%M", &tm_msg);
     }
 }
 
