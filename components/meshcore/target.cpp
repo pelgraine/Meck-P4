@@ -21,6 +21,7 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 #include <stdio.h>
 
 // LilyGo's main.cpp defines `auto SX1262 = std::make_unique<...>(...)` at
@@ -390,6 +391,58 @@ extern "C" uint8_t meck_battery_pct_from_voltage(uint16_t mv) {
         }
     }
     return 100;
+}
+
+// ============================================================================
+// Keyboard pack SoC estimate (IR-compensated, time-filtered)
+// ----------------------------------------------------------------------------
+// meck_battery_pct_from_voltage() maps a *rest* voltage, but the pack is
+// never at rest in use: the raw reading is depressed by I*R sag while
+// discharging (systematically low, worst with the key backlight on) and
+// inflated by the charger-driven rail while charging. This wrapper
+// compensates with an estimated series resistance for the whole loop --
+// cell + selector + wiring + sense placement -- and then smooths the
+// result with a time-based exponential filter so plug/unplug transients
+// settle over a few seconds instead of stepping.
+//
+// MECK_PACK_IR_MOHM starting point: derived from an observed pair on the
+// reference unit (~3906 mV while charging at ~+304 mA vs ~3660 mV under
+// discharge moments after unplug), roughly 300 milliohm across the loop.
+// Tune against the Vrest line on the Battery tile: with the right value,
+// Vrest barely moves when the charger is plugged in or pulled.
+//
+// Sign convention: the BQ27220 reports discharge as negative current, so
+// the sag is added back while discharging and the charge elevation is
+// subtracted while charging -- one formula covers both.
+#define MECK_PACK_IR_MOHM  300
+
+extern "C" uint8_t meck_battery_pack_pct_est(uint16_t mv, int16_t ma,
+                                             uint16_t *rest_mv_out) {
+    int32_t rest = (int32_t)mv - ((int32_t)ma * MECK_PACK_IR_MOHM) / 1000;
+    if (rest < 0)    rest = 0;
+    if (rest > 5000) rest = 5000;
+
+    // Time-based EMA, tau ~8 s. Reseeds on first use or after a gap of more
+    // than a minute (pack deselected, battery tile closed, screen off), so
+    // stale state never bleeds into a fresh viewing. While the battery tile
+    // is open the callers arrive every 500 ms and the filter runs normally;
+    // the 5-minute home-header tick alone always reseeds, which leaves it
+    // compensated but unfiltered -- correct for a single isolated sample.
+    static int32_t  ema_mv  = -1;
+    static uint64_t last_us = 0;
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+    const uint64_t dt_us  = now_us - last_us;
+    last_us = now_us;
+    if ((ema_mv < 0) || (dt_us > 60ULL * 1000000ULL)) {
+        ema_mv = rest;
+    } else {
+        const uint64_t tau_us = 8ULL * 1000000ULL;
+        const int64_t delta = (int64_t)(rest - ema_mv) * (int64_t)dt_us /
+                              (int64_t)(tau_us + dt_us);
+        ema_mv += (int32_t)delta;
+    }
+    if (rest_mv_out) *rest_mv_out = (uint16_t)ema_mv;
+    return meck_battery_pct_from_voltage((uint16_t)ema_mv);
 }
 
 // ============================================================================

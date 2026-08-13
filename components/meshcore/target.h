@@ -343,6 +343,11 @@ extern "C" uint16_t meck_battery_remaining_mah();
 extern "C" uint16_t meck_battery_full_charge_mah();
 extern "C" uint16_t meck_battery_time_to_empty_min();
 extern "C" uint8_t  meck_battery_pct_from_voltage(uint16_t mv);
+// Keyboard pack SoC: IR-compensated + time-filtered voltage estimate.
+// Pass the voltage and current already read this pass; optionally returns
+// the compensated rest voltage for display/calibration.
+extern "C" uint8_t  meck_battery_pack_pct_est(uint16_t mv, int16_t ma,
+                                              uint16_t *rest_mv_out);
 
 // Raw Temperature() register (0x06/0x07) in 0.1 K -- the temperature the
 // gauge is actually using for CEDV gauging (source selected by the

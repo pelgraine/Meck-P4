@@ -14710,10 +14710,15 @@ static void ui_update_timer_cb(lv_timer_t *t) {
 #if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
             // Follow the declared source: while the keyboard pack is live,
             // the chip SoC is computed against the internal cell's 1000 mAh
-            // and is meaningless for the pack, so use the voltage-curve %
-            // -- the same number the pack column on the battery tile shows.
+            // and is meaningless for the pack, so use the IR-compensated
+            // voltage estimate -- the same number the pack column on the
+            // battery tile shows. One isolated sample every 5 minutes, so
+            // the estimator reseeds rather than filters here (see
+            // meck_battery_pack_pct_est).
             pct = (g_p4batt_source == 1)
-                      ? meck_battery_pct_from_voltage(meck_battery_voltage_mv())
+                      ? meck_battery_pack_pct_est(meck_battery_voltage_mv(),
+                                                  meck_battery_current_ma(),
+                                                  NULL)
                       : meck_battery_pct_from_chip();
 #else
             pct = meck_battery_pct_from_chip();
@@ -14972,12 +14977,20 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                 snprintf(capbuf, sizeof(capbuf), "Cap: %u mAh",
                          (unsigned)g_p4batt_cap_mah);
             } else {
-                // Keyboard pack live. Percentage from the voltage curve --
-                // the chip's SoC is calibrated for the internal cell and is
+                // Keyboard pack live. Percentage from the IR-compensated,
+                // time-filtered voltage estimate (meck_battery_pack_pct_est)
+                // -- the raw rest-curve reading was systematically low under
+                // load and inflated while charging. The chip's SoC remains
+                // ignored: it is calibrated for the internal cell and is
                 // meaningless for this pack. Remaining is declared-capacity
-                // arithmetic, marked as an estimate.
+                // arithmetic, marked as an estimate. Vrest shows the
+                // compensated voltage the percentage is derived from, for
+                // tuning MECK_PACK_IR_MOHM: with the right value it barely
+                // moves when the charger is plugged or pulled.
+                uint16_t rest_mv = 0;
+                uint8_t  pct_pack = meck_battery_pack_pct_est(mv, ma, &rest_mv);
                 uint32_t est_rem =
-                    (uint32_t)g_p4batt_cap_mah * (uint32_t)pct_volts / 100u;
+                    (uint32_t)g_p4batt_cap_mah * (uint32_t)pct_pack / 100u;
                 // Pack time-to-empty: estimated remaining divided by the
                 // present discharge current. Only shown while actually
                 // discharging; "--" when idle or charging. Same ~ estimate
@@ -14996,12 +15009,14 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                     "Not in circuit\n(source: kbd)");
                 snprintf(kbuf, sizeof(kbuf),
                     "V:    %u mV\n"
+                    "Vrest: ~%u mV\n"
                     "Chg:  ~%u%% est.\n"
                     "Cur:  %s%d mA %s\n"
                     "Rem:  ~%u/%u est.\n"
                     "TTE:  %s",
                     (unsigned)mv,
-                    (unsigned)pct_volts,
+                    (unsigned)rest_mv,
+                    (unsigned)pct_pack,
                     ma > 0 ? "+" : "", (int)ma, current_label,
                     (unsigned)est_rem, (unsigned)g_p4batt_cap_mah,
                     ktte_buf);

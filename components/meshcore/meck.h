@@ -35,7 +35,7 @@
 // Firmware identity -- single source of truth for UI and companion protocol.
 // Update MECK_FIRMWARE_VERSION here before each release.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.7.2"
+#define MECK_FIRMWARE_VERSION "0.7.2.1"
 
 #ifdef __cplusplus
 extern "C" {

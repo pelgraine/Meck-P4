@@ -432,8 +432,9 @@ against the internal cell's 1000 mAh design capacity; it is meaningless for a
 21700 pack. So while the pack is selected, Meck ignores the chip's SoC and
 derives everything from the measured voltage instead:
 
-- **Chg** is a voltage-curve percentage, shown as `~NN% est.`
-- **Rem** is simply *declared capacity x voltage percentage*, shown as
+- **Chg** is a voltage-based percentage, shown as `~NN% est.` — but not the raw reading. The measured voltage sags under load and is pushed up by the charger while plugged in, so Meck first compensates for the estimated resistance of the pack circuit and then smooths the result over a few seconds. This is what stops the percentage reading chronically low with the backlight on, or leaping when the charger is plugged or pulled.
+- **Vrest** is the compensated voltage the percentage is derived from. A well-tuned compensation means Vrest barely moves when you plug or unplug the charger; the raw **V** line above it will still jump, and that difference is the sag being corrected.
+- **Rem** is simply *declared capacity x percentage*, shown as
   `~N/M est.` — arithmetic against the number you declared, not a measurement
 - **TTE** is estimated remaining divided by present discharge current, shown
   only while actually discharging (5 mA or more) and `--` when idle or charging
@@ -447,6 +448,8 @@ unaffected by any of this.
 Tapping **any** battery label anywhere in the UI toggles that reading between
 percentage and voltage — that is separate from, and works alongside, the KBD
 source toggle.
+
+> **If the pack stops taking charge** (plugged in on a port that normally charges it, selector on the keyboard, but the current reads 0 mA), power-cycle the keyboard: switch the keyboard **off** at its power switch, leave it off for a minute, switch it back **on**, then press the P4 **reset** button. The charge path can latch out after an odd power event on the shared rail, and a reflash is not the fix — the keyboard power cycle is.
 
 ### Keyboard backlight
 
