@@ -797,6 +797,13 @@ void MeckCompanion::handleCmdFrame(size_t len) {
     // ---- CMD_SET_OTHER_PARAMS (38) ----
     if (cmd == CMD_SET_OTHER_PARAMS && len >= 2) {
         prefs->manual_add_contacts = _cmd[1];
+        if (_cmd[1] == 0) {
+            // Auto mode: shouldAutoAddContactType() consults the per-type
+            // bits, so they must all be on (0x1E = chat|repeater|room|sensor)
+            // or nothing gets added. Mirrors the on-screen Auto All fix in
+            // MeckUI.cpp. The overwrite bit (0x01) is left as it was.
+            prefs->autoadd_config |= 0x1E;
+        }
         if (len >= 4) {
             // byte[3] = advert_loc_policy: 0=don't share, 1+=share
             uint8_t loc_policy = _cmd[3];

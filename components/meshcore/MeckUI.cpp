@@ -546,6 +546,7 @@ static int g_last_noise_floor_displayed = INT_MIN;
 
 // Settings screen
 static lv_obj_t *scr_settings      = NULL;
+static lv_obj_t *obj_settings_scroll = NULL;   // rows container (keyboard row cycling)
 static lv_obj_t *lbl_set_name      = NULL;
 static lv_obj_t *lbl_set_freq      = NULL;
 static lv_obj_t *lbl_set_bw        = NULL;
@@ -2739,7 +2740,7 @@ static void settings_update_labels() {
     }
     if (lbl_set_antenna) {
         lv_label_set_text(lbl_set_antenna,
-            prefs->antenna != 0 ? "External (RF2)" : "Internal (RF1)");
+            prefs->antenna != 0 ? "External" : "Internal");
     }
     if (lbl_set_orientation) {
         lv_label_set_text(lbl_set_orientation,
@@ -6230,9 +6231,10 @@ static void settings_contacts_apply_mode(int mode) {
     switch (mode) {
         case CONTACT_MODE_AUTO_ALL:
             prefs->manual_add_contacts &= ~1;          // bit 0 clear → auto
-            // Leave per-type bits as they were; in this mode they're ignored
-            // by isAutoAddEnabled() but we keep them around for round-tripping
-            // to Custom without losing the user's last selection.
+            // shouldAutoAddContactType() still consults the per-type bits when
+            // manual_add_contacts is 0, so Auto All must switch them all on or
+            // nothing gets added.
+            prefs->autoadd_config |= AUTO_ADD_ALL_TYPES;
             break;
         case CONTACT_MODE_CUSTOM:
             prefs->manual_add_contacts |= 1;
@@ -9328,10 +9330,10 @@ static void on_settings_antenna_tap(lv_event_t *e) {
 
     if (lbl_set_antenna) {
         lv_label_set_text(lbl_set_antenna,
-            prefs->antenna != 0 ? "External (RF2)" : "Internal (RF1)");
+            prefs->antenna != 0 ? "External" : "Internal");
     }
     printf("Settings: antenna = %s\n",
-           prefs->antenna != 0 ? "External (RF2)" : "Internal (RF1)");
+           prefs->antenna != 0 ? "External" : "Internal");
 }
 
 static void on_settings_orientation_tap(lv_event_t *e) {
@@ -9374,6 +9376,7 @@ static void create_settings_screen() {
     lv_obj_set_style_border_width(scroll, 0, 0);
     lv_obj_set_style_pad_all(scroll, 0, 0);
     lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+    obj_settings_scroll = scroll;
 
     int y = 5;
 
@@ -18185,21 +18188,165 @@ static void meck_cardkb_init(void) {
 static MeckP4Keyboard  g_p4kbd;
 static lv_timer_t     *g_p4kbd_timer = NULL;
 
+// The tileview page currently showing, or -1 if it cannot be determined.
+// LVGL only records the active tile on a programmatic set_tile or at the
+// end of a touch swipe (tileview_event_cb, LV_EVENT_SCROLL_END), so from
+// boot until the first swipe lv_tileview_get_tile_act() returns NULL and
+// the lookup finds nothing. Derive the page from the scroll position in
+// that case -- the same nearest-tile arithmetic LVGL's own scroll-end
+// handler uses -- so the arrows work from a fresh boot.
+static int meck_home_page_index(void) {
+    if (!g_tileview) return -1;
+    lv_obj_t *act = lv_tileview_get_tile_act(g_tileview);
+    for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
+        if (g_home_tiles[i] && g_home_tiles[i] == act) return i;
+    }
+    const int32_t w = lv_obj_get_content_width(g_tileview);
+    if (w <= 0) return -1;
+    int idx = (int)((lv_obj_get_scroll_x(g_tileview) + (w / 2)) / w);
+    if (idx < 0) idx = 0;
+    if (idx >= MECK_HOME_PAGE_COUNT) idx = MECK_HOME_PAGE_COUNT - 1;
+    return idx;
+}
+
 // Step the home tileview one page left or right, matching what a swipe does.
 // Does not wrap: the first tile only allows LV_DIR_RIGHT and the last only
 // LV_DIR_LEFT, so stopping at the ends mirrors the gesture behaviour.
 static void meck_home_page_step(int delta) {
-    if (!g_tileview) return;
-    lv_obj_t *act = lv_tileview_get_tile_act(g_tileview);
-    int idx = -1;
-    for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
-        if (g_home_tiles[i] && g_home_tiles[i] == act) { idx = i; break; }
-    }
+    const int idx = meck_home_page_index();
     if (idx < 0) return;
     const int next = idx + delta;
     if ((next < 0) || (next >= MECK_HOME_PAGE_COUNT)) return;
     if (!g_home_tiles[next]) return;
     lv_tileview_set_tile_by_index(g_tileview, (uint32_t)next, 0, LV_ANIM_ON);
+}
+
+// Keyboard selection ring on the home tile grid. Up/Down cycle a thin white
+// outline around the tiles in creation order; Enter opens the selected one.
+// The ring exists only while keyboard navigation is in use: it first appears
+// on an Up/Down press and is cleared on paging, on opening a tile, on any
+// touch swipe of the tileview, and when the home screen unloads -- so touch
+// operation never shows it. The outline style property is separate from the
+// tile's own border, so the coloured borders are untouched.
+static int g_home_tile_sel = -1;
+
+static void meck_home_tile_ring_clear(void) {
+    if ((g_home_tile_sel >= 0) && (g_home_tile_sel < tile_button_count) &&
+        tile_buttons[g_home_tile_sel]) {
+        lv_obj_set_style_outline_width(tile_buttons[g_home_tile_sel], 0, 0);
+    }
+    g_home_tile_sel = -1;
+}
+
+static void meck_home_tile_ring_step(int delta) {
+    if (tile_button_count <= 0) return;
+    int next;
+    if (g_home_tile_sel < 0) {
+        // First press: Down starts at the first tile, Up at the last.
+        next = (delta > 0) ? 0 : (tile_button_count - 1);
+    } else {
+        const int n = tile_button_count;
+        next = ((g_home_tile_sel + delta) % n + n) % n;
+        if (tile_buttons[g_home_tile_sel]) {
+            lv_obj_set_style_outline_width(tile_buttons[g_home_tile_sel], 0, 0);
+        }
+    }
+    if (!tile_buttons[next]) { g_home_tile_sel = -1; return; }
+    lv_obj_set_style_outline_width(tile_buttons[next], 3, 0);
+    lv_obj_set_style_outline_color(tile_buttons[next], lv_color_white(), 0);
+    lv_obj_set_style_outline_pad(tile_buttons[next], 2, 0);
+    g_home_tile_sel = next;
+}
+
+// Keyboard row cycling on the Settings screen and the channel picker. The
+// same thin white ring as the home tiles, moved through the button rows of
+// the screen's list container by Up/Down, with Enter replaying the row's
+// own LV_EVENT_CLICKED handler. Each step scrolls the ringed row into view
+// with lv_obj_scroll_to_view, so keyboard movement is row-by-row rather
+// than the page jumps of the generic scroll. Touch scrolling is untouched.
+//
+// State is container + index, never a stored row pointer: the picker's rows
+// are rebuilt by refresh_channel_picker (lv_obj_clean), so the row is
+// re-resolved from the index on every use. Only lv_button children count as
+// rows, matching how both screens build their lists.
+static lv_obj_t *g_row_ring_cont = NULL;
+static int       g_row_ring_idx  = -1;
+
+static int meck_row_ring_count(lv_obj_t *cont) {
+    int n = 0;
+    const uint32_t c = lv_obj_get_child_count(cont);
+    for (uint32_t i = 0; i < c; i++) {
+        if (lv_obj_check_type(lv_obj_get_child(cont, i), &lv_button_class)) n++;
+    }
+    return n;
+}
+
+static lv_obj_t *meck_row_ring_button_at(lv_obj_t *cont, int idx) {
+    int n = 0;
+    const uint32_t c = lv_obj_get_child_count(cont);
+    for (uint32_t i = 0; i < c; i++) {
+        lv_obj_t *child = lv_obj_get_child(cont, i);
+        if (!lv_obj_check_type(child, &lv_button_class)) continue;
+        if (n == idx) return child;
+        n++;
+    }
+    return NULL;
+}
+
+// The row-cycling container for the active screen, or NULL on screens that
+// keep the generic page scroll.
+static lv_obj_t *meck_row_ring_container(void) {
+    lv_obj_t *scr = lv_screen_active();
+    if (scr == scr_settings)       return obj_settings_scroll;
+    if (scr == scr_channel_picker) return obj_ch_picker_scroll;
+    return NULL;
+}
+
+static void meck_row_ring_clear(void) {
+    if (g_row_ring_cont && (g_row_ring_idx >= 0)) {
+        lv_obj_t *old = meck_row_ring_button_at(g_row_ring_cont, g_row_ring_idx);
+        if (old) lv_obj_set_style_outline_width(old, 0, 0);
+    }
+    g_row_ring_cont = NULL;
+    g_row_ring_idx  = -1;
+}
+
+static void meck_row_ring_step(lv_obj_t *cont, int delta) {
+    if (!cont) return;
+    const int n = meck_row_ring_count(cont);
+    if (n <= 0) return;
+    if (cont != g_row_ring_cont) {
+        g_row_ring_cont = cont;
+        g_row_ring_idx  = -1;
+    }
+    int next;
+    if (g_row_ring_idx < 0) {
+        // First press: Down starts at the first row, Up at the last.
+        next = (delta > 0) ? 0 : (n - 1);
+    } else {
+        next = ((g_row_ring_idx + delta) % n + n) % n;
+        lv_obj_t *old = meck_row_ring_button_at(cont, g_row_ring_idx);
+        if (old) lv_obj_set_style_outline_width(old, 0, 0);
+    }
+    lv_obj_t *btn = meck_row_ring_button_at(cont, next);
+    if (!btn) { g_row_ring_idx = -1; return; }
+    lv_obj_set_style_outline_width(btn, 3, 0);
+    lv_obj_set_style_outline_color(btn, lv_color_white(), 0);
+    lv_obj_set_style_outline_pad(btn, 2, 0);
+    lv_obj_scroll_to_view(btn, LV_ANIM_ON);
+    g_row_ring_idx = next;
+}
+
+// Replays the ringed row's click. Returns true if a row was activated. The
+// ring is left in place: on Settings most rows toggle or cycle a value in
+// situ, so keeping the selection lets Enter be pressed repeatedly; rows
+// that load another screen clear it via the screen-unload hook.
+static bool meck_row_ring_enter(void) {
+    if (!g_row_ring_cont || (g_row_ring_idx < 0)) return false;
+    lv_obj_t *btn = meck_row_ring_button_at(g_row_ring_cont, g_row_ring_idx);
+    if (!btn) return false;
+    lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
+    return true;
 }
 
 // Find the focused textarea anywhere beneath `root`, or NULL. Walking the tree
@@ -18238,6 +18385,92 @@ static lv_obj_t *meck_find_keyboard_for_textarea(lv_obj_t *root, lv_obj_t *ta) {
     return NULL;
 }
 
+// Esc = the touch Back button. Every screen builds its own back (or cancel)
+// button ad hoc, but all of them share one signature: an lv_button whose
+// child label text begins with LV_SYMBOL_LEFT -- either the bare chevron or
+// "LV_SYMBOL_LEFT Back". Rather than maintain a per-screen table of exit
+// callbacks, walk the widget tree for that signature and replay
+// LV_EVENT_CLICKED on the button, so each screen's existing handler runs
+// unchanged -- the same replay pattern Enter and Esc already use for the
+// on-screen keyboard's OK and close buttons.
+//
+// Hidden subtrees are skipped (a closed overlay's Cancel must not swallow the
+// key), and children are visited in reverse creation order so an overlay
+// drawn on top of a screen is found before the screen's own Back button
+// underneath it. Returns true once a button has been clicked.
+static bool meck_kbd_press_back_in(lv_obj_t *root) {
+    if (!root) return false;
+    if (lv_obj_has_flag(root, LV_OBJ_FLAG_HIDDEN)) return false;
+    const int32_t n = (int32_t)lv_obj_get_child_count(root);
+    for (int32_t i = n - 1; i >= 0; i--) {
+        if (meck_kbd_press_back_in(lv_obj_get_child(root, i))) return true;
+    }
+    if (lv_obj_check_type(root, &lv_button_class)) {
+        const uint32_t c = lv_obj_get_child_count(root);
+        for (uint32_t i = 0; i < c; i++) {
+            lv_obj_t *lbl = lv_obj_get_child(root, i);
+            if (!lv_obj_check_type(lbl, &lv_label_class)) continue;
+            const char *txt = lv_label_get_text(lbl);
+            if (txt && (strncmp(txt, LV_SYMBOL_LEFT, strlen(LV_SYMBOL_LEFT)) == 0)) {
+                lv_obj_send_event(root, LV_EVENT_CLICKED, NULL);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void meck_kbd_press_back(void) {
+    // The top layer first: overlays such as the tone picker live on
+    // lv_layer_top(), above whatever screen is active, so a visible overlay's
+    // Cancel wins. Then the active screen. The home screen has no back
+    // button, so Esc there is a no-op.
+    if (meck_kbd_press_back_in(lv_layer_top())) return;
+    meck_kbd_press_back_in(lv_screen_active());
+}
+
+// Up/Down = a vertical swipe. Every screen does its scrolling through one
+// main inner container (settings list, message scroll, contact list, admin
+// response view), so find the largest visible object that is vertically
+// scrollable and actually has overflowing content, and page it. Overlays on
+// the top layer are searched first for the same reason as above.
+static void meck_kbd_find_scrollable(lv_obj_t *root, lv_obj_t **best,
+                                     int32_t *best_area) {
+    if (!root) return;
+    if (lv_obj_has_flag(root, LV_OBJ_FLAG_HIDDEN)) return;
+    if (lv_obj_has_flag(root, LV_OBJ_FLAG_SCROLLABLE) &&
+        ((lv_obj_get_scroll_dir(root) & LV_DIR_VER) != 0) &&
+        ((lv_obj_get_scroll_top(root) > 0) || (lv_obj_get_scroll_bottom(root) > 0))) {
+        const int32_t area = lv_obj_get_width(root) * lv_obj_get_height(root);
+        if (area > *best_area) {
+            *best      = root;
+            *best_area = area;
+        }
+    }
+    const uint32_t n = lv_obj_get_child_count(root);
+    for (uint32_t i = 0; i < n; i++) {
+        meck_kbd_find_scrollable(lv_obj_get_child(root, i), best, best_area);
+    }
+}
+
+static void meck_kbd_scroll_page(int dir) {
+    lv_obj_t *best = NULL;
+    int32_t   area = 0;
+    meck_kbd_find_scrollable(lv_layer_top(), &best, &area);
+    if (!best) meck_kbd_find_scrollable(lv_screen_active(), &best, &area);
+    if (!best) return;
+
+    // Page by 80% of the view so consecutive pages keep a line of overlap,
+    // clamped to the distance actually remaining in that direction.
+    int32_t page = (lv_obj_get_height(best) * 8) / 10;
+    if (page < 1) return;
+    int32_t remain = (dir > 0) ? lv_obj_get_scroll_bottom(best)
+                               : lv_obj_get_scroll_top(best);
+    if (remain <= 0) return;
+    if (remain < page) page = remain;
+    lv_obj_scroll_to_y(best, lv_obj_get_scroll_y(best) + dir * page, LV_ANIM_ON);
+}
+
 static void meck_p4kbd_poll(lv_timer_t *t) {
     (void)t;
     uint32_t key = g_p4kbd.read_key();
@@ -18267,16 +18500,84 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
             ta = target;
         }
     }
-    // Home screen: the left and right arrows page the tileview, the same
-    // movement a swipe produces. Only when nothing is focused for text entry,
+    // Home screen keyboard navigation. Left/Right page the tileview, the
+    // same movement a swipe produces. On the tile grid page, Up/Down cycle
+    // the selection ring and Enter opens the selected tile by replaying its
+    // own LV_EVENT_CLICKED handler. On the other home pages Up/Down fall
+    // through to the generic scroll below, and Esc falls through to the
+    // (no-op) back handling. Only when nothing is focused for text entry,
     // so arrows keep their cursor role inside any field.
-    if (!ta && (lv_screen_active() == scr_home) &&
-        ((key == LV_KEY_LEFT) || (key == LV_KEY_RIGHT))) {
-        meck_home_page_step((key == LV_KEY_RIGHT) ? 1 : -1);
-        return;
+    if (!ta && (lv_screen_active() == scr_home)) {
+        switch (key) {
+            case LV_KEY_LEFT:
+            case LV_KEY_RIGHT:
+                meck_home_tile_ring_clear();
+                meck_home_page_step((key == LV_KEY_RIGHT) ? 1 : -1);
+                return;
+            case LV_KEY_UP:
+            case LV_KEY_DOWN:
+                if (meck_home_page_index() == 0) {
+                    meck_home_tile_ring_step((key == LV_KEY_DOWN) ? +1 : -1);
+                    return;
+                }
+                break;
+            case LV_KEY_ENTER:
+                if ((g_home_tile_sel >= 0) &&
+                    (g_home_tile_sel < tile_button_count) &&
+                    tile_buttons[g_home_tile_sel]) {
+                    lv_obj_t *btn = tile_buttons[g_home_tile_sel];
+                    meck_home_tile_ring_clear();
+                    lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
+                    return;
+                }
+                break;
+            default:
+                break;
+        }
     }
 
-    if (!ta) return;                            // nothing focused to type into
+    // No textarea focused: the remaining navigation keys reproduce what the
+    // touch gestures do. Esc replays the active screen's Back (or Cancel)
+    // button; Up/Down page the screen's scroll view the way a vertical swipe
+    // does; Left/Right on the Contacts screen cycle the type filter, the one
+    // screen-level horizontal swipe, mirroring on_contacts_screen_gesture.
+    // Arrow direction follows travel through the content -- Right = forward,
+    // Down = further down the list -- the same convention as the home
+    // tileview paging above.
+    if (!ta) {
+        switch (key) {
+            case LV_KEY_ESC:
+                meck_kbd_press_back();
+                break;
+            case LV_KEY_UP:
+            case LV_KEY_DOWN: {
+                // Settings and the channel picker cycle a row-selection ring
+                // instead of the page scroll; everywhere else keeps the
+                // vertical-swipe paging.
+                lv_obj_t *cont = meck_row_ring_container();
+                const int dir  = (key == LV_KEY_DOWN) ? +1 : -1;
+                if (cont) meck_row_ring_step(cont, dir);
+                else      meck_kbd_scroll_page(dir);
+                break;
+            }
+            case LV_KEY_ENTER:
+                meck_row_ring_enter();
+                break;
+            case LV_KEY_LEFT:
+            case LV_KEY_RIGHT:
+                if (lv_screen_active() == scr_contacts) {
+                    const int dir = (key == LV_KEY_RIGHT) ? +1 : -1;
+                    const int n   = (int)CONTACT_FILTER_COUNT;
+                    g_contact_filter =
+                        (ContactFilter)(((int)g_contact_filter + dir + n) % n);
+                    refresh_contacts_list();
+                }
+                break;
+            default:
+                break;
+        }
+        return;                                 // nothing focused to type into
+    }
 
     // The keyboard bound to that textarea, if the screen has one. Enter and Esc
     // are replayed as the events its OK and close buttons emit, so each
@@ -18382,6 +18683,21 @@ static void meck_ui_build_screens() {
     g_home_tiles[5] = t_battery;
     g_home_tiles[6] = t_shutdown;
 
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // Keyboard tile-selection ring: clear it whenever the home screen is
+    // left or the tileview starts scrolling (a touch swipe, or the keyboard
+    // paging itself, which has already cleared it), so the ring is only ever
+    // visible during active keyboard navigation of the grid.
+    lv_obj_add_event_cb(scr_home, [](lv_event_t *e) {
+        (void)e;
+        meck_home_tile_ring_clear();
+    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+    lv_obj_add_event_cb(g_tileview, [](lv_event_t *e) {
+        (void)e;
+        meck_home_tile_ring_clear();
+    }, LV_EVENT_SCROLL_BEGIN, NULL);
+#endif
+
     create_page_home(t_home);
     create_page_recent(t_recent);
     create_page_radio(t_radio);
@@ -18408,6 +18724,21 @@ static void meck_ui_build_screens() {
     voice_inbox_load();
     create_radio_picker_screen();
     create_channel_picker_screen();
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // Keyboard row-selection ring: reset the stored container/index (this
+    // function reruns on an orientation rebuild, when the old containers no
+    // longer exist) and clear the ring whenever either screen unloads.
+    g_row_ring_cont = NULL;
+    g_row_ring_idx  = -1;
+    lv_obj_add_event_cb(scr_settings, [](lv_event_t *e) {
+        (void)e;
+        meck_row_ring_clear();
+    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+    lv_obj_add_event_cb(scr_channel_picker, [](lv_event_t *e) {
+        (void)e;
+        meck_row_ring_clear();
+    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+#endif
     create_messages_screen();
     create_retry_modal();
     create_path_modal();
