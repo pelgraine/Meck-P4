@@ -91,6 +91,13 @@ struct P4ChannelsHeader {
 //   v2 = channel_notif expanded to [41], wifi/ble/position fields added
 #define MECK_PREFS_VERSION  2
 
+// Canned messages: five pre-written channel/room messages, edited in
+// Settings -> Canned Messages and sent from the compose screens via the
+// keyboard microphone key. Dimensions match the watch implementation:
+// 133 chars + NUL, the per-channel message cap.
+#define CANNED_MSG_SLOTS 5
+#define CANNED_MSG_LEN   134
+
 // Minimal NodePrefs for P4 (matches fields needed for radio operation)
 struct P4NodePrefs {
     float freq;
@@ -198,6 +205,12 @@ struct P4NodePrefs {
     // short reads, so existing NVS blobs come up as 0 -> default 25%.
     uint8_t kb_backlight_pct;        // 0=default (25), else 5..100
 
+    // Canned messages: five slots, empty string = unused. Appending here is
+    // safe -- loadPrefs memsets to zero and tolerates short reads, so
+    // existing NVS blobs come up with all slots empty. Each slot is
+    // NUL-terminated defensively on load.
+    char canned_msgs[CANNED_MSG_SLOTS][CANNED_MSG_LEN];
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -239,6 +252,7 @@ struct P4NodePrefs {
         memset(kbd_addr, 0, sizeof(kbd_addr));   // no keyboard paired yet
         antenna = 0;            // Internal (RF1) by default
         kb_backlight_pct = 25;  // 25% duty (~398 mA measured, backlight on)
+        memset(canned_msgs, 0, sizeof(canned_msgs));  // all slots empty
     }
 };
 
@@ -530,6 +544,11 @@ public:
                     ESP_LOGI(TAG, "loadPrefs: from NVS (name=%s, freq=%.3f, sf=%d)",
                              prefs.node_name, prefs.freq, prefs.sf);
                 }
+                // Force NUL termination on each canned message slot in case
+                // of garbage (same guard as the watch DataStore).
+                for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
+                    prefs.canned_msgs[i][CANNED_MSG_LEN - 1] = '\0';
+                }
                 return true;
             }
         }
@@ -553,6 +572,11 @@ public:
                         memcpy(prefix_buf, &prefs, copy_len);
                         prefs.setDefaults();
                         memcpy(&prefs, prefix_buf, copy_len);
+                    }
+                    // Force NUL termination on each canned message slot in
+                    // case of garbage (same guard as the NVS path above).
+                    for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
+                        prefs.canned_msgs[i][CANNED_MSG_LEN - 1] = '\0';
                     }
                     // Save to NVS with current version
                     savePrefs(prefs);

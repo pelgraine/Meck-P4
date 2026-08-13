@@ -547,6 +547,15 @@ static int g_last_noise_floor_displayed = INT_MIN;
 // Settings screen
 static lv_obj_t *scr_settings      = NULL;
 static lv_obj_t *obj_settings_scroll = NULL;   // rows container (keyboard row cycling)
+// Canned messages: five reusable channel/room messages, edited in a Settings
+// sub-screen and sent from the compose screens via the keyboard mic key.
+static lv_obj_t *scr_settings_canned = NULL;
+static lv_obj_t *btn_canned_slot[CANNED_MSG_SLOTS] = {};
+static lv_obj_t *lbl_canned_slot[CANNED_MSG_SLOTS] = {};
+static lv_obj_t *obj_canned_edit_panel = NULL;
+static lv_obj_t *ta_canned_edit        = NULL;
+static lv_obj_t *kb_canned_edit        = NULL;
+static int       g_canned_edit_slot    = -1;
 static lv_obj_t *lbl_set_name      = NULL;
 static lv_obj_t *lbl_set_freq      = NULL;
 static lv_obj_t *lbl_set_bw        = NULL;
@@ -4271,6 +4280,98 @@ static void on_region_edit_kb_event(lv_event_t *e) {
 }
 
 // ============================================================================
+// Canned Messages settings sub-screen handlers
+// ============================================================================
+
+// Refresh the five slot rows from prefs: a preview of the message, or a
+// grey "(empty)" for unused slots.
+static void canned_update_slot_labels(void) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
+        if (!lbl_canned_slot[i]) continue;
+        const char* msg = prefs->canned_msgs[i];
+        if (msg[0]) {
+            char buf[40];
+            snprintf(buf, sizeof(buf), "%.32s%s", msg,
+                     (strlen(msg) > 32) ? "..." : "");
+            lv_label_set_text(lbl_canned_slot[i], buf);
+            lv_obj_set_style_text_color(lbl_canned_slot[i], lv_color_white(), 0);
+        } else {
+            lv_label_set_text(lbl_canned_slot[i], "(empty)");
+            lv_obj_set_style_text_color(lbl_canned_slot[i],
+                lv_palette_main(LV_PALETTE_GREY), 0);
+        }
+    }
+}
+
+static void on_settings_canned_tap(lv_event_t *e) {
+    (void)e;
+    if (!scr_settings_canned) return;
+    canned_update_slot_labels();
+    lv_screen_load(scr_settings_canned);
+}
+
+// Tap a slot row: open the editor pre-filled with that slot's text. Saving
+// an empty text clears the slot, same as the watch.
+static void on_canned_slot_tap(lv_event_t *e) {
+    lv_obj_t *target = (lv_obj_t *)lv_event_get_target(e);
+    int slot = -1;
+    for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
+        if (btn_canned_slot[i] == target) { slot = i; break; }
+    }
+    if (slot < 0) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh || !obj_canned_edit_panel || !ta_canned_edit) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    g_canned_edit_slot = slot;
+    lv_textarea_set_text(ta_canned_edit, prefs->canned_msgs[slot]);
+    lv_obj_remove_flag(obj_canned_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    if (kb_canned_edit) lv_keyboard_set_textarea(kb_canned_edit, ta_canned_edit);
+    meck_panel_edit_opened(ta_canned_edit, kb_canned_edit);
+}
+
+static void on_canned_edit_save(lv_event_t *e) {
+    (void)e;
+    Meck* mesh = meck_get_instance();
+    if (!ta_canned_edit || !mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    if ((g_canned_edit_slot < 0) || (g_canned_edit_slot >= CANNED_MSG_SLOTS)) return;
+    const char* text = lv_textarea_get_text(ta_canned_edit);
+    if (text && text[0]) {
+        strncpy(prefs->canned_msgs[g_canned_edit_slot], text, CANNED_MSG_LEN - 1);
+        prefs->canned_msgs[g_canned_edit_slot][CANNED_MSG_LEN - 1] = '\0';
+    } else {
+        memset(prefs->canned_msgs[g_canned_edit_slot], 0, CANNED_MSG_LEN);
+    }
+    mesh->getDataStore()->savePrefs(*prefs);
+    printf("Settings: canned slot %d = '%s'\n", g_canned_edit_slot,
+           prefs->canned_msgs[g_canned_edit_slot][0]
+               ? prefs->canned_msgs[g_canned_edit_slot] : "(empty)");
+    canned_update_slot_labels();
+    meck_panel_edit_closed(ta_canned_edit);
+    lv_obj_add_flag(obj_canned_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    g_canned_edit_slot = -1;
+}
+
+static void on_canned_edit_cancel(lv_event_t *e) {
+    (void)e;
+    meck_panel_edit_closed(ta_canned_edit);
+    if (obj_canned_edit_panel) lv_obj_add_flag(obj_canned_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    g_canned_edit_slot = -1;
+}
+
+static void on_canned_edit_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)       on_canned_edit_save(NULL);
+    else if (code == LV_EVENT_CANCEL) on_canned_edit_cancel(NULL);
+}
+
+// ============================================================================
 // Position settings sub-screen handlers
 // ============================================================================
 
@@ -5432,11 +5533,11 @@ static void on_room_kb_event(lv_event_t *e) {
     }
 }
 
-static void on_room_send_clicked(lv_event_t *e) {
-    if (!ta_room_compose) return;
+// Send `text` to the active room server: the mesh send plus the local echo,
+// persistence and bubble rebuild. Split out of on_room_send_clicked so the
+// canned-messages overlay can send through the identical path.
+static void meck_room_send_text(const char *text) {
     if (g_active_room_contact_idx < 0) return;
-
-    const char *text = lv_textarea_get_text(ta_room_compose);
     if (!text || !text[0]) return;
 
     // Send via the existing DM bridge — the wire format is the same
@@ -5487,7 +5588,15 @@ static void on_room_send_clicked(lv_event_t *e) {
             rebuild_room_bubbles(g_active_room_contact_idx);
         }
     }
+}
 
+static void on_room_send_clicked(lv_event_t *e) {
+    (void)e;
+    if (!ta_room_compose) return;
+    if (g_active_room_contact_idx < 0) return;
+    const char *text = lv_textarea_get_text(ta_room_compose);
+    if (!text || !text[0]) return;
+    meck_room_send_text(text);
     lv_textarea_set_text(ta_room_compose, "");
     if (kb_room_compose) lv_obj_add_flag(kb_room_compose, LV_OBJ_FLAG_HIDDEN);
 }
@@ -9455,6 +9564,19 @@ static void create_settings_screen() {
                         LV_EVENT_GESTURE, NULL);
     y += 65;
 
+    // Canned Messages navigation row -- opens the Canned Messages sub-screen
+    // (five editable slots, sent from compose via the keyboard mic key).
+    // Chevron in the value slot, same folder convention as Contacts below.
+    lv_obj_t *canned_value_lbl = NULL;
+    create_settings_row(scroll, "Canned Messages",
+        &canned_value_lbl, on_settings_canned_tap, y);
+    if (canned_value_lbl) {
+        lv_label_set_text(canned_value_lbl, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(canned_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
     // Contacts navigation row → opens the Contacts sub-screen with auto-add
     // controls. Uses a chevron in the value slot so it reads as a folder
     // entry rather than a cycle/toggle.
@@ -10449,6 +10571,102 @@ static void refresh_channel_picker() {
     lv_obj_set_style_text_color(add_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
     meck_set_font(add_lbl, &meck_montserrat_22, 0);
     lv_obj_center(add_lbl);
+}
+
+// ============================================================================
+// Canned Messages settings sub-screen (Settings > Canned Messages)
+// ============================================================================
+
+static void create_settings_canned_screen() {
+    scr_settings_canned = lv_obj_create(NULL);
+    lock_screen_scroll(scr_settings_canned);
+    lv_obj_set_style_bg_color(scr_settings_canned, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_settings_canned, 12, &meck_montserrat_24, 30);
+
+    // Back button
+    lv_obj_t *btn_back = lv_button_create(scr_settings_canned);
+    lv_obj_set_size(btn_back, 80, 50);
+    lv_obj_set_pos(btn_back, 10, 25);
+    lv_obj_set_style_bg_opa(btn_back, 0, 0);
+    lv_obj_t *back_lbl = lv_label_create(btn_back);
+    lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(back_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(back_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(back_lbl);
+    lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
+        (void)e;
+        if (scr_settings) lv_screen_load(scr_settings);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_settings_canned);
+    lv_label_set_text(title, "Canned Messages");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    lv_obj_t *hint = lv_label_create(scr_settings_canned);
+    lv_label_set_text(hint, "Tap a slot to edit. Save empty text to clear.");
+    lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(hint, &meck_montserrat_14, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 20, 90);
+
+    for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
+        char name[12];
+        snprintf(name, sizeof(name), "Slot %d", i + 1);
+        btn_canned_slot[i] = create_settings_row(scr_settings_canned, name,
+            &lbl_canned_slot[i], on_canned_slot_tap, 120 + i * 65);
+    }
+    canned_update_slot_labels();
+
+    // ---- Slot editor overlay (mirrors the region edit panel) ----
+    obj_canned_edit_panel = lv_obj_create(scr_settings_canned);
+    lv_obj_set_size(obj_canned_edit_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_canned_edit_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_canned_edit_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_canned_edit_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_canned_edit_panel, 0, 0);
+    lv_obj_add_flag(obj_canned_edit_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_canned_edit_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_canned_edit_panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *edit_title = lv_label_create(obj_canned_edit_panel);
+    lv_label_set_text(edit_title, "Canned Message");
+    lv_obj_set_style_text_color(edit_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(edit_title, &meck_montserrat_22, 0);
+    lv_obj_align(edit_title, LV_ALIGN_TOP_MID, 0, 50);
+
+    ta_canned_edit = lv_textarea_create(obj_canned_edit_panel);
+    lv_obj_set_size(ta_canned_edit, SCREEN_WIDTH - 40, 110);
+    lv_obj_align(ta_canned_edit, LV_ALIGN_TOP_MID, 0, 95);
+    lv_textarea_set_max_length(ta_canned_edit, CANNED_MSG_LEN - 1);
+    lv_obj_set_style_bg_color(ta_canned_edit, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_text_color(ta_canned_edit, lv_color_white(), 0);
+    meck_set_font(ta_canned_edit, &meck_montserrat_18, 0);
+    lv_obj_set_style_border_color(ta_canned_edit, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_border_color(ta_canned_edit, lv_color_white(),     LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta_canned_edit, 2,                     LV_PART_CURSOR);
+    lv_obj_set_style_border_side(ta_canned_edit,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta_canned_edit,   LV_OPA_COVER,          LV_PART_CURSOR);
+
+    lv_obj_t *btn_canned_confirm = lv_button_create(obj_canned_edit_panel);
+    lv_obj_set_size(btn_canned_confirm, SCREEN_WIDTH - 40, 50);
+    lv_obj_align(btn_canned_confirm, LV_ALIGN_TOP_MID, 0, 220);
+    lv_obj_set_style_bg_color(btn_canned_confirm, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_canned_confirm, 8, 0);
+    lv_obj_t *canned_confirm_lbl = lv_label_create(btn_canned_confirm);
+    lv_label_set_text(canned_confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(canned_confirm_lbl, lv_color_black(), 0);
+    meck_set_font(canned_confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(canned_confirm_lbl);
+    lv_obj_add_event_cb(btn_canned_confirm, on_canned_edit_save, LV_EVENT_CLICKED, NULL);
+
+    kb_canned_edit = lv_keyboard_create(obj_canned_edit_panel);
+    meck_style_keyboard(kb_canned_edit);
+    lv_keyboard_set_textarea(kb_canned_edit, ta_canned_edit);
+    lv_obj_add_event_cb(kb_canned_edit, on_canned_edit_kb_event, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(kb_canned_edit, on_canned_edit_kb_event, LV_EVENT_CANCEL, NULL);
+    lv_obj_add_event_cb(kb_canned_edit, on_kb_long_press,
+                        LV_EVENT_LONG_PRESSED, NULL);
 }
 
 // ============================================================================
@@ -18349,6 +18567,197 @@ static bool meck_row_ring_enter(void) {
     return true;
 }
 
+// ============================================================================
+// Canned messages compose overlay (K270 microphone key)
+//
+// The mic key (kKeyRecord in MeckP4Keyboard, forwarded as 0x92) toggles a
+// full-screen overlay listing the non-empty canned slots. Tapping a row
+// sends it immediately through the same path as the compose Send button --
+// meck_request_send_text for the channel view, meck_room_send_text for a
+// room server -- and closes the overlay. With every slot empty, the key
+// shows a short "No canned messages" toast instead, matching the watch.
+// One panel on lv_layer_top serves both compose screens.
+// ============================================================================
+
+static constexpr uint32_t MECK_KEY_MIC = 0x92;  // MeckP4Keyboard kKeyRecord
+
+static lv_obj_t   *obj_canned_send_panel = NULL;
+static lv_obj_t   *obj_canned_send_list  = NULL;
+static bool        g_canned_send_room    = false;
+static lv_obj_t   *lbl_canned_toast      = NULL;
+static lv_timer_t *g_canned_toast_timer  = NULL;
+
+static void canned_toast_hide_cb(lv_timer_t *t) {
+    (void)t;
+    if (lbl_canned_toast) lv_obj_add_flag(lbl_canned_toast, LV_OBJ_FLAG_HIDDEN);
+    if (g_canned_toast_timer) {
+        lv_timer_delete(g_canned_toast_timer);
+        g_canned_toast_timer = NULL;
+    }
+}
+
+static void meck_canned_toast(const char *msg) {
+    if (!lbl_canned_toast) return;
+    lv_label_set_text(lbl_canned_toast, msg);
+    lv_obj_remove_flag(lbl_canned_toast, LV_OBJ_FLAG_HIDDEN);
+    if (g_canned_toast_timer) lv_timer_delete(g_canned_toast_timer);
+    g_canned_toast_timer = lv_timer_create(canned_toast_hide_cb, 1200, NULL);
+}
+
+static void meck_canned_send_hide(void) {
+    if (obj_canned_send_panel) {
+        lv_obj_add_flag(obj_canned_send_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void on_canned_send_cancel(lv_event_t *e) {
+    (void)e;
+    meck_canned_send_hide();
+}
+
+static void on_canned_send_row_tap(lv_event_t *e) {
+    const intptr_t slot = (intptr_t)lv_event_get_user_data(e);
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    if ((slot < 0) || (slot >= CANNED_MSG_SLOTS)) return;
+    const char *msg = prefs->canned_msgs[slot];
+    if (msg[0]) {
+        if (g_canned_send_room) {
+            meck_room_send_text(msg);
+        } else {
+            meck_request_send_text(g_active_channel, msg);
+        }
+    }
+    meck_canned_send_hide();
+}
+
+static void meck_canned_send_toggle(void) {
+    lv_obj_t *scr = lv_screen_active();
+    const bool on_channel = (scr == scr_messages) && !g_in_dm_mode;
+    const bool on_room    = (scr == scr_room_messages);
+    if (!on_channel && !on_room) return;
+
+    if (obj_canned_send_panel &&
+        !lv_obj_has_flag(obj_canned_send_panel, LV_OBJ_FLAG_HIDDEN)) {
+        meck_canned_send_hide();
+        return;
+    }
+
+    Meck* mesh = meck_get_instance();
+    if (!mesh || !obj_canned_send_panel || !obj_canned_send_list) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+
+    // Rebuild the row list from the current non-empty slots on every open,
+    // so edits in Settings are reflected without any cross-wiring.
+    lv_obj_clean(obj_canned_send_list);
+    int rows = 0;
+    for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
+        const char *msg = prefs->canned_msgs[i];
+        if (!msg[0]) continue;
+        lv_obj_t *row = lv_button_create(obj_canned_send_list);
+        lv_obj_set_size(row, SCREEN_WIDTH - 80, 70);
+        lv_obj_set_pos(row, 0, rows * 80);
+        lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(row, 10, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(50, 50, 60), 0);
+        lv_obj_add_event_cb(row, on_canned_send_row_tap, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)i);
+        lv_obj_t *lbl = lv_label_create(row);
+        char buf[40];
+        snprintf(buf, sizeof(buf), "%.32s%s", msg,
+                 (strlen(msg) > 32) ? "..." : "");
+        lv_label_set_text(lbl, buf);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_18, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
+        rows++;
+    }
+    if (rows == 0) {
+        meck_canned_toast("No canned messages");
+        return;
+    }
+    g_canned_send_room = on_room;
+    lv_obj_remove_flag(obj_canned_send_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Build the overlay and toast on the top layer. Called from
+// meck_ui_build_screens; deletes any previous instance first so an
+// orientation rebuild does not stack panels on lv_layer_top.
+static void meck_canned_send_panel_create(void) {
+    if (obj_canned_send_panel) {
+        lv_obj_delete(obj_canned_send_panel);
+        obj_canned_send_panel = NULL;
+        obj_canned_send_list  = NULL;
+    }
+    if (lbl_canned_toast) {
+        lv_obj_delete(lbl_canned_toast);
+        lbl_canned_toast = NULL;
+    }
+    if (g_canned_toast_timer) {
+        lv_timer_delete(g_canned_toast_timer);
+        g_canned_toast_timer = NULL;
+    }
+
+    obj_canned_send_panel = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(obj_canned_send_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_canned_send_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_canned_send_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_canned_send_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_canned_send_panel, 0, 0);
+    lv_obj_add_flag(obj_canned_send_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_canned_send_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_canned_send_panel, LV_SCROLLBAR_MODE_OFF);
+
+    // Cancel button. Left chevron, so the Esc back-replay finds and clicks
+    // it via meck_kbd_press_back (top layer is searched first).
+    lv_obj_t *btn_cancel = lv_button_create(obj_canned_send_panel);
+    lv_obj_set_size(btn_cancel, 80, 50);
+    lv_obj_set_pos(btn_cancel, 10, 25);
+    lv_obj_set_style_bg_opa(btn_cancel, 0, 0);
+    lv_obj_t *cancel_lbl = lv_label_create(btn_cancel);
+    lv_label_set_text(cancel_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(cancel_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(cancel_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(cancel_lbl);
+    lv_obj_add_event_cb(btn_cancel, on_canned_send_cancel, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(obj_canned_send_panel);
+    lv_label_set_text(title, "Canned");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    lv_obj_t *hint = lv_label_create(obj_canned_send_panel);
+    lv_label_set_text(hint, "Tap a message to send it");
+    lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(hint, &meck_montserrat_14, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 20, 90);
+
+    obj_canned_send_list = lv_obj_create(obj_canned_send_panel);
+    lv_obj_set_size(obj_canned_send_list, SCREEN_WIDTH - 60, SCREEN_HEIGHT - 140);
+    lv_obj_set_pos(obj_canned_send_list, 30, 120);
+    lv_obj_set_style_bg_opa(obj_canned_send_list, 0, 0);
+    lv_obj_set_style_border_width(obj_canned_send_list, 0, 0);
+    lv_obj_set_style_pad_all(obj_canned_send_list, 0, 0);
+    lv_obj_set_scroll_dir(obj_canned_send_list, LV_DIR_VER);
+
+    // Toast label ("No canned messages"), hidden until used.
+    lbl_canned_toast = lv_label_create(lv_layer_top());
+    lv_label_set_text(lbl_canned_toast, "");
+    lv_obj_set_style_bg_color(lbl_canned_toast, lv_color_make(30, 30, 40), 0);
+    lv_obj_set_style_bg_opa(lbl_canned_toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(lbl_canned_toast, 14, 0);
+    lv_obj_set_style_radius(lbl_canned_toast, 10, 0);
+    lv_obj_set_style_text_color(lbl_canned_toast, lv_color_white(), 0);
+    meck_set_font(lbl_canned_toast, &meck_montserrat_18, 0);
+    lv_obj_align(lbl_canned_toast, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(lbl_canned_toast, LV_OBJ_FLAG_HIDDEN);
+}
+
 // Find the focused textarea anywhere beneath `root`, or NULL. Walking the tree
 // rather than consulting a fixed list of composer objects means every screen
 // carrying a text field is handled -- settings, channel add, region and
@@ -18476,6 +18885,21 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
     uint32_t key = g_p4kbd.read_key();
     if (key == 0) return;
 
+    // A keypress is user activity. The auto-off timer reads LVGL's display
+    // inactivity clock, which only touch resets (this poll drives widgets
+    // directly, outside any indev), so without this a minute of
+    // keyboard-only use blanks the screen mid-typing.
+    lv_display_trigger_activity(NULL);
+
+    // K270 microphone/record key: toggle the canned-messages overlay on the
+    // channel and room compose screens. Handled before the textarea routing
+    // so it stays reachable while the composer is focused mid-typing.
+    // Ignored on every other screen.
+    if (key == MECK_KEY_MIC) {
+        meck_canned_send_toggle();
+        return;
+    }
+
     // The textarea this key belongs to: whatever is focused on the active
     // screen. Generic by design, so screens built elsewhere are covered too.
     lv_obj_t *ta = meck_find_focused_textarea(lv_screen_active());
@@ -18531,6 +18955,23 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
                     return;
                 }
                 break;
+            // Letter shortcuts, matching the Meck T-Deck key map for the
+            // apps this build carries: M messages (channel picker),
+            // C contacts, S settings, E reader, N notes, F discover,
+            // G maps, R trace, P audio, B web. Same actions the home tiles
+            // invoke; lowercase only (a shifted letter is deliberate).
+            // Leaving home fires the screen-unload hook, which clears any
+            // tile-selection ring.
+            case 'm': goto_channel_picker(NULL);     return;
+            case 'c': goto_contacts(NULL);           return;
+            case 's': goto_settings(NULL);           return;
+            case 'e': meck_reader_ui_show_browser(); return;
+            case 'n': meck_notes_ui_show_browser();  return;
+            case 'f': goto_discover(NULL);           return;
+            case 'g': meck_map_ui_show();            return;
+            case 'r': goto_trace(NULL);              return;
+            case 'p': meck_audio_ui_show_browser();  return;
+            case 'b': cb_open_web(NULL);             return;
             default:
                 break;
         }
@@ -18717,6 +19158,7 @@ static void meck_ui_build_screens() {
     create_settings_channels_screen();
     create_channel_detail_screen();
     create_settings_position_screen();
+    create_settings_canned_screen();
     create_not_implemented_screen();
     create_voice_landing_screen();
     create_voice_inbox_screen();
@@ -18751,6 +19193,20 @@ static void meck_ui_build_screens() {
     create_admin_login_screen();
     create_admin_home_screen();
     create_room_messages_screen();
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // Canned-messages send overlay (microphone key). One panel on the top
+    // layer serves both compose screens; hidden whenever either screen
+    // unloads so it cannot linger over an unrelated screen.
+    meck_canned_send_panel_create();
+    lv_obj_add_event_cb(scr_messages, [](lv_event_t *e) {
+        (void)e;
+        meck_canned_send_hide();
+    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+    lv_obj_add_event_cb(scr_room_messages, [](lv_event_t *e) {
+        (void)e;
+        meck_canned_send_hide();
+    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+#endif
     meck_audio_ui_init();
     meck_reader_ui_init();
     meck_notes_ui_init();
@@ -18768,7 +19224,8 @@ static void meck_ui_teardown_screens() {
     lv_obj_t** screens[] = {
         &scr_home, &scr_settings, &scr_debug_logs, &scr_not_implemented,
         &scr_settings_wifi, &scr_settings_channels, &scr_channel_detail,
-        &scr_settings_position, &scr_voice_landing, &scr_voice_inbox, &scr_voice,
+        &scr_settings_position, &scr_settings_canned,
+        &scr_voice_landing, &scr_voice_inbox, &scr_voice,
         &scr_radio_picker, &scr_channel_picker, &scr_dm_inbox, &scr_messages,
         &scr_contacts, &scr_contact_detail, &scr_trace, &scr_path_editor,
         &scr_settings_contacts, &scr_discover, &scr_admin_login, &scr_admin_home,

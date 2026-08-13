@@ -210,9 +210,13 @@ private:
             case kKeyWin:   // LilyGo key: toggle the keyboard backlight
                 set_backlight(!_backlight);
                 return 0;
+            case kKeyRecord:
+                // Microphone/record key: forwarded to the UI, which uses it
+                // to toggle the canned-messages overlay on the compose
+                // screens. Previously swallowed like the other specials.
+                return kKeyRecord;
             case kKeyAlt:
             case kKeyCtrl:
-            case kKeyRecord:
             case kKeyF11:
                 return 0;
             default:
