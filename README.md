@@ -19,6 +19,7 @@ with a `meshcore` ESP-IDF component added on top.
   - [First-Time Flash (Merged Firmware)](#first-time-flash-merged-firmware)
   - [Building from Source](#building-from-source)
 - [Home Screen](#home-screen)
+- [Timezones](#timezones)
 - [Touch Navigation](#touch-navigation)
 - [Screen-Off Power Saving](#screen-off-power-saving)
 - [Screen Orientation](#screen-orientation)
@@ -28,9 +29,11 @@ with a `meshcore` ESP-IDF component added on top.
   - [Batteries](#batteries)
   - [Keyboard backlight](#keyboard-backlight)
   - [Typing](#typing)
+  - [Navigating without touching the screen](#navigating-without-touching-the-screen)
   - [The onboard radios](#the-onboard-radios)
-- [Physical Keyboard (CardKB)](#physical-keyboard-cardkb)
+- [CardKB](#cardkb)
 - [Channel Messages](#channel-messages)
+- [Canned Messages](#canned-messages)
 - [Channel Picker](#channel-picker)
 - [Contacts](#contacts)
 - [Direct Messages](#direct-messages)
@@ -172,13 +175,13 @@ This generates `release/meck-p4-0.1.bin` along with a SHA-256 checksum.
 
 ## Home Screen
 
-The home screen is a horizontal nine-tile layout. Swipe left or right to
-navigate between tiles. The Home tile (tile 0) shows node name, unread
+The home screen is a horizontal eight-page layout. Swipe left or right to
+navigate between pages. The Home page (page 0) shows node name, unread
 message count, battery percentage and clock in the top-right corner, and
 a ten-tile navigation grid (2 columns x 5 rows) linking to Messages,
 Contacts, Settings, Reader, Notes, Discover, Trace, Maps, Audio, and Web.
 
-|Tile           |Purpose                                                                                            |
+|Page           |Purpose                                                                                            |
 |---------------|---------------------------------------------------------------------------------------------------|
 |0 Home         |Node name, unread message count, clock + battery, ten-tile navigation grid                         |
 |1 Recent Heard |Live list of nodes whose adverts have been received                                                |
@@ -186,9 +189,48 @@ Contacts, Settings, Reader, Notes, Discover, Trace, Maps, Audio, and Web.
 |3 Advert       |Long-press to send a manual advert                                                                 |
 |4 GPS          |Fix status, satellites, position, altitude, sentence rate. Long-press the tile to toggle GPS on/off|
 |5 Battery      |Voltage, charge percent, current, chip temperature, remaining mAh                                  |
-|6 Voice        |Placeholder for voice over LoRa (not yet enabled)                                                  |
-|7 Camera       |Placeholder for picture over LoRa (not yet enabled)                                                |
-|8 Shutdown     |Long-press to power down                                                                           |
+|6 Timezones    |World clock: Home plus two configurable zones. See [Timezones](#timezones)                         |
+|7 Shutdown     |Long-press to power down                                                                           |
+
+Paging wraps at both ends: swiping backwards from the Home page brings up
+the Timezones page, and swiping forwards from Shutdown returns to the
+Home page. The keyboard arrow keys follow the same cycle.
+
+-----
+
+## Timezones
+
+The Timezones home page is a three-row world clock, ported from Meck
+Watch. Swipe to it like any other home page -- it sits between Battery and
+Shutdown, or one backwards swipe from the Home page thanks to the
+wraparound.
+
+Each row shows:
+
+- the zone label and its UTC offset -- **Home** (your device's UTC offset,
+  the same one set in Settings), **Zone 1**, and **Zone 2**
+- the current local time in that zone
+- a yellow **+1D** or **-1D** marker when that zone is on a different
+  calendar day to Home
+- a triplet of city codes for the offset (e.g. `PER/BEI/HKG` for UTC+8),
+  chosen to avoid daylight-saving cities where a well-known non-DST city
+  exists, so the labels stay correct year-round
+
+**Changing a zone:** tap a row to open its offset picker. The big UTC
+readout and the city line update live as you tap **-** and **+**
+(offsets run UTC-12 to UTC+14); **Confirm** saves, and the back chevron
+cancels. Editing the **Home** row changes the device's own UTC offset --
+exactly the same setting as Settings > UTC Offset, kept in sync both
+ways. Zone 1 and Zone 2 persist across reboots.
+
+The rows appear once the device knows the time; until then the page shows
+**Clock not set**. The page follows the same clock as the status bar, so
+if the bar shows a time, the Timezones page shows the zones.
+
+With the K270 keyboard, the page is fully drivable without touch: Up/Down
+cycle a selection ring through the three rows, Enter opens the ringed
+row's picker, and inside the picker Up/Down adjust the offset, Enter
+confirms, and Esc cancels.
 
 -----
 
@@ -201,7 +243,7 @@ needed.
 |Gesture       |Description                                                                                                   |
 |--------------|--------------------------------------------------------------------------------------------------------------|
 |**Tap**       |Touch and release quickly. Opens tiles, selects items, advances pages.                                        |
-|**Swipe**     |Touch, drag, release. Direction determines action (scroll, page turn, switch tile/filter).                    |
+|**Swipe**     |Touch, drag, release. Direction determines action (scroll, page turn, switch tile/filter). Home paging wraps at both ends.|
 |**Long press**|Touch and hold. Context-dependent: send advert, toggle GPS, delete contacts, retry failed messages, view incoming message path, power off.|
 
 -----
@@ -209,6 +251,10 @@ needed.
 ## Screen-Off Power Saving
 
 The Auto Off timer (Settings > Auto Off, tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes) puts the device into a low-power screen-off state after the set period of inactivity. When the timer fires, the MIPI-DSI display bus is torn down and CPU usage drops from ~94% to ~57%. The radio stays active and continues receiving messages in the background.
+
+On keyboard (K270) builds, every keypress counts as activity and resets
+the idle timer, so the screen never blanks mid-typing or while you are
+navigating by keyboard.
 
 > **To wake the device, press the P4 boot button on the side of the T-Display P4.** Touch wake is not yet supported. The P4 boot button is the third button from the top on the right edge, between the C6 Reset and P4 Reset buttons (labelled “BOOT” under the “P4” heading on the case). If the screen stays black after a period of inactivity, this is normal – press the boot button to bring it back.
 
@@ -433,15 +479,15 @@ Beyond plain characters:
 |Key|Action|
 |---|---|
 |**Enter**|Commits the field — the same action as the on-screen keyboard's OK button, so each screen's existing save/send handler runs|
-|**Esc**|Cancels the field, as the on-screen keyboard's close button does|
+|**Esc**|Cancels the field, as the on-screen keyboard's close button does. With no field focused, Esc is the universal Back key — see [Navigating without touching the screen](#navigating-without-touching-the-screen)|
 |**Backspace**|Deletes the character before the cursor|
-|**Left / Right**|Move the cursor within the field|
-|**Left / Right** (home screen, nothing focused)|Page the home tileview left or right, the same movement a swipe produces|
+|**Left / Right**|Move the cursor within the field. With no field focused, they navigate — see the navigation section below|
+|**Mic / Record key**|Toggles the canned-messages overlay on the channel and room message screens — see [Canned Messages](#canned-messages)|
 |**Shift**|One-shot upper case for the next letter|
 |**Caps**|Caps Lock toggle. Shift and Caps together cancel, as on a normal keyboard|
 |**Fn**|One-shot symbol layer for the next key|
 |**LilyGo key**|Toggles the keyboard backlight (see above)|
-|**Alt, Ctrl, Record, F1-F11**|Produce nothing in Meck|
+|**Alt, Ctrl, F1-F11**|Produce nothing in Meck|
 
 **Type-to-compose.** On the channel and room message screens, pressing any
 printable key when nothing is focused opens the composer and starts typing into
@@ -454,6 +500,38 @@ positions in LilyGo's vendor key map carry no printable symbol — Fn with Z, X,
 or V among them — and those combinations produce nothing. One deliberate Meck
 change: **Fn+H types a comma**, because the vendor map carried no comma anywhere
 and duplicated the apostrophe instead.
+
+### Navigating without touching the screen
+
+With no text field focused, the keyboard drives the whole UI:
+
+**Esc is Back, everywhere.** On any screen, Esc presses that screen's Back
+(or an open overlay's Cancel) button, running exactly the handler a tap
+would. On the home screen it does nothing (there is nowhere back to go).
+
+**Up/Down scroll or select.** On most screens they page the main list up
+and down, the same movement a vertical swipe produces. On the Settings
+screen, the channel picker, and the Canned Messages sub-screen they
+instead move a thin white selection ring row by row, scrolling just enough
+to keep the ringed row in view, and **Enter** activates the ringed row --
+tapping it without touching the screen. The ring only appears once you
+use the keys, and disappears when you leave the screen or touch it.
+
+**Left/Right** cycle the contact filter on the Contacts screen, and page
+the home screens (wrapping at the ends, like swipes).
+
+**On the home screen:**
+
+|Key|Action|
+|---|---|
+|**Left / Right**|Page through the home screens, wrapping at both ends|
+|**Up / Down** (Home page)|Cycle a selection ring around the navigation tiles|
+|**Up / Down** (Timezones page)|Cycle the ring through the three zone rows|
+|**Enter**|Open the ringed tile or zone row. On the Advert page, send an advert; on the GPS page, toggle GPS power (the same actions as the touch long-press)|
+|**M / C / S / E / N / F / G / R / P / B**|Open Messages, Contacts, Settings, Reader, Notes, Discover (F), Maps (G), Trace (R), Audio (P), or Web (B) directly — the same key map as the Meck T-Deck builds|
+
+The letter shortcuts are lowercase; a shifted letter is treated as a
+deliberate uppercase character and does nothing on the home screen.
 
 ### The onboard radios
 
@@ -470,7 +548,7 @@ that is the only radio it uses.
 
 -----
 
-## Physical Keyboard (CardKB)
+## CardKB
 
 Meck-P4 has optional support for the **M5Stack CardKB**, a small I2C QWERTY keyboard, as an alternative to the on-screen keyboard for typing messages. Support is gated behind the `MECK_CARDKB` build flag, so it is a build-from-source option rather than a touch-only default.
 
@@ -482,7 +560,7 @@ When a CardKB is present and a message composer (channel or DM/room) is open:
 - **Enter** sends the message (the same action as the on-screen keyboard's OK button) and **Esc** cancels.
 - **Backspace** deletes the character before the cursor, and **Left / Right** move the cursor within the field.
 
-CardKB input is currently wired to the message composers only. Whole-UI navigation with the arrow keys (moving focus between buttons and across screens) is not yet implemented.
+CardKB input is currently wired to the message composers only. Whole-UI navigation with the arrow keys is not implemented for the CardKB — the K270 keyboard build has it (see [Navigating without touching the screen](#navigating-without-touching-the-screen)).
 
 -----
 
@@ -510,6 +588,46 @@ so messages survive reboots when an SD card is present.
   - **✕ Failed** – 18 seconds elapsed with no repeater echo. The message was transmitted but no repeater confirmed receipt. This typically means no repeater is in range, or the channel’s radio parameters don’t match the repeater’s.
 
 **Long-press outgoing messages:** long-press any outgoing message to see which repeaters acknowledged it. If the message failed, a **Retry Send** option re-queues it with a fresh timestamp. The recipient may see a duplicate if the original arrives late via a slow path.
+
+-----
+
+## Canned Messages
+
+Canned messages are up to five pre-written messages you can fire off with
+a couple of presses instead of typing -- ported from Meck Watch. They work
+in both channel views and room server views.
+
+### Setting them up
+
+Go to **Settings > Canned Messages**. You get five slots, each showing a
+preview of its message or **(empty)**. Tap a slot to edit it: the editor
+opens pre-filled with the current text (up to 133 characters, the normal
+message cap). **Confirm** saves; saving with the text cleared empties the
+slot; **Cancel** (or Esc on the keyboard) discards the edit. The slots
+persist across reboots and firmware updates.
+
+### Sending one
+
+*Requires the K270 keyboard build -- the trigger is a keyboard key.*
+
+From a channel or room server message view, press the **microphone key**
+(the record key on the K270). An overlay lists your non-empty slots.
+**Tap a message and it sends immediately** -- no confirmation step, straight
+through the same send path as the Send button, including the delivery
+status and repeater-echo tracking. The overlay then closes.
+
+If every slot is empty, the mic key shows a brief **"No canned messages"**
+toast instead -- go and fill a slot in Settings.
+
+To close the overlay without sending: press the mic key again, press
+**Esc**, or tap the back chevron.
+
+**Keyboard-only operation:** while the overlay is open, Up/Down move the
+selection ring through the messages and Enter sends the ringed one, so a
+canned reply is mic key, arrow, Enter -- three presses, no touch.
+
+The mic key does nothing outside the channel and room message screens, and
+nothing in a DM view.
 
 -----
 
@@ -561,7 +679,10 @@ to prevent accidental loss).
 
 **Auto-add policies** can be configured in **Settings → Contacts**:
 
-- **Auto All** — every advert heard adds a contact
+- **Auto All** — every advert heard adds a contact. Selecting it also
+  switches all four per-type toggles on, so it always adds everything
+  even if the toggles were previously off (this also applies when a
+  companion app switches the device into auto mode)
 - **Custom** — per-type toggles (chat, repeater, room, sensor) decide which
   advert types to auto-add
 - **Manual Only** — disables all auto-add
@@ -1058,6 +1179,8 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**UTC Offset**      |Tap to adjust (-12 to +14)                                                                                                                                                                                                      |
 |**Font Size**       |Tap to cycle: Classic / Larger / Extra Large. Rescales every label live, without a reboot or screen rebuild. Also sizes the reader's body text and the Notes markdown view.|
 |**Home Color**      |Tap to cycle: Plain / Multi                                                                                                                                                                                                     |
+|**Canned Messages >>**|Opens the Canned Messages sub-screen — five editable message slots sent from the compose screens via the keyboard mic key. See [Canned Messages](#canned-messages).|
+|**Antenna**         |Tap to toggle: Internal / External. Selects the SKY13453 LoRa antenna port and applies live.                                                                                                                                    |
 |**Position >>**     |Opens the Position sub-screen (latitude, longitude, share position mode, copy position). See [Position Adverts and Share Position](#position-adverts-and-share-position).|
 |**Contacts >>**     |Opens the Contacts sub-screen (auto-add policies, type toggles)                                                                                                                                                                 |
 |**Channels >>**     |Opens the Channels sub-screen (per-channel region scope, notification preferences, notification tones, add/delete channels)                                                                                                     |
@@ -1183,6 +1306,9 @@ The clock is automatically synced from any of these sources:
 The plausibility window is generous (rejects advert timestamps before
 2025-01-01 or after 2032-01-01) so legitimate adverts always pass while
 obviously broken peers don’t poison the clock.
+
+The [Timezones](#timezones) home page reads the same clock as the status
+bar, so the two always agree on whether the time is known.
 
 -----
 
@@ -1356,7 +1482,7 @@ no particular timeframes attached.
 - [x] **Notes app** — create, edit, read, rename, and delete plain-text notes under `/sdcard/notes`, reusing the reader's paging and resume bookmark. See [Notes](#notes).
 - [x] **Web reader** — reader-mode browser over the ESP32-C6 (plain HTTP and HTTPS, on-screen browser, GET form fill, bookmarks, history). Ships as a work in progress; the IRC client is not yet ported. See [Web Reader](#web-reader).
 - [x] **Cyrillic keyboard** — ЙЦУКЕН layout added to the KB Layout cycle (Russian / Bulgarian).
-- [x] **M5Stack CardKB support** — optional physical I2C keyboard for the message composers, gated behind the `MECK_CARDKB` build flag. See [Physical Keyboard (CardKB)](#physical-keyboard-cardkb).
+- [x] **M5Stack CardKB support** — optional physical I2C keyboard for the message composers, gated behind the `MECK_CARDKB` build flag. See [CardKB](#cardkb).
 - [x] **Screen orientation** — Portrait / Landscape toggle in Settings with a live rebuild. See [Screen Orientation](#screen-orientation).
 
 **Pending:**
