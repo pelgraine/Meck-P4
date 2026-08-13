@@ -437,8 +437,25 @@ static lv_obj_t *g_tileview        = NULL;
 // PAGE count, not MECK_HOME_TILE_COUNT: a second same-named define here
 // silently redefined the button-grid macro above to 7, capping button
 // registration so Trace, Audio and Web were all styled as index 7 (red).
-#define MECK_HOME_PAGE_COUNT 7
+#define MECK_HOME_PAGE_COUNT 8
 static lv_obj_t *g_home_tiles[MECK_HOME_PAGE_COUNT] = { NULL };
+
+// Timezones home page (world clock, ported from the watch): three rows --
+// Home (device UTC offset) and two saved zones. Tap a row to open its
+// offset picker.
+static lv_obj_t   *btn_clock_row[3]        = {};
+static lv_obj_t   *lbl_clock_row_hdr[3]    = {};
+static lv_obj_t   *lbl_clock_row_time[3]   = {};
+static lv_obj_t   *lbl_clock_row_day[3]    = {};
+static lv_obj_t   *lbl_clock_row_cities[3] = {};
+static lv_obj_t   *lbl_clocks_notset       = NULL;
+static lv_obj_t   *obj_clock_pick_panel    = NULL;
+static lv_obj_t   *lbl_clock_pick_title    = NULL;
+static lv_obj_t   *lbl_clock_pick_offset   = NULL;
+static lv_obj_t   *lbl_clock_pick_cities   = NULL;
+static int         g_clock_pick_row        = -1;
+static int8_t      g_clock_pick_val        = 0;
+static lv_timer_t *g_clocks_timer          = NULL;
 
 // Web reader browser screen (Stage 3)
 static lv_obj_t   *scr_web          = NULL;
@@ -550,6 +567,7 @@ static lv_obj_t *obj_settings_scroll = NULL;   // rows container (keyboard row c
 // Canned messages: five reusable channel/room messages, edited in a Settings
 // sub-screen and sent from the compose screens via the keyboard mic key.
 static lv_obj_t *scr_settings_canned = NULL;
+static lv_obj_t *obj_canned_rows     = NULL;   // slot rows container (keyboard row cycling)
 static lv_obj_t *btn_canned_slot[CANNED_MSG_SLOTS] = {};
 static lv_obj_t *lbl_canned_slot[CANNED_MSG_SLOTS] = {};
 static lv_obj_t *obj_canned_edit_panel = NULL;
@@ -5848,6 +5866,50 @@ static void on_kbd_batt_cap_tap(lv_event_t *e) {
 // each tile builder. The battery field is space-padded to 4 chars in the
 // timer callback so its bounding box never grows; the clock sits at a
 // fixed offset to its left so neither moves as digits change.
+// The tileview page currently showing, or -1 if it cannot be determined.
+// LVGL only records the active tile on a programmatic set_tile or at the
+// end of a touch swipe (tileview_event_cb, LV_EVENT_SCROLL_END), so from
+// boot until the first swipe lv_tileview_get_tile_act() returns NULL and
+// the lookup finds nothing. Derive the page from the scroll position in
+// that case -- the same nearest-tile arithmetic LVGL's own scroll-end
+// handler uses -- so it is right from a fresh boot. Common code (not
+// keyboard-gated): the touch wrap gesture below uses it on every build.
+static int meck_home_page_index(void) {
+    if (!g_tileview) return -1;
+    lv_obj_t *act = lv_tileview_get_tile_act(g_tileview);
+    for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
+        if (g_home_tiles[i] && g_home_tiles[i] == act) return i;
+    }
+    const int32_t w = lv_obj_get_content_width(g_tileview);
+    if (w <= 0) return -1;
+    int idx = (int)((lv_obj_get_scroll_x(g_tileview) + (w / 2)) / w);
+    if (idx < 0) idx = 0;
+    if (idx >= MECK_HOME_PAGE_COUNT) idx = MECK_HOME_PAGE_COUNT - 1;
+    return idx;
+}
+
+// Wraparound paging for the home tileview. The first tile only allows
+// LV_DIR_RIGHT and the last only LV_DIR_LEFT, so the swipe that would go
+// past either end produces no scroll -- it arrives as a plain gesture.
+// Catch it and jump: backwards from the first page lands on Timezones
+// (the last content page, skipping Hibernate), forwards from Hibernate
+// returns to the first page. Mid-run swipes are unaffected: the page
+// check only matches at the ends, and tile_act still reports the old
+// page while a normal swipe's scroll animation is in flight.
+static void on_home_wrap_gesture(lv_event_t *e) {
+    if (lv_event_get_code(e) != LV_EVENT_GESTURE) return;
+    if (!g_tileview) return;
+    lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
+    const int page = meck_home_page_index();
+    if (page < 0) return;
+    if ((d == LV_DIR_RIGHT) && (page == 0)) {
+        lv_tileview_set_tile_by_index(g_tileview,
+            (uint32_t)(MECK_HOME_PAGE_COUNT - 2), 0, LV_ANIM_ON);
+    } else if ((d == LV_DIR_LEFT) && (page == MECK_HOME_PAGE_COUNT - 1)) {
+        lv_tileview_set_tile_by_index(g_tileview, 0, 0, LV_ANIM_ON);
+    }
+}
+
 static void home_attach_clock_battery(lv_obj_t *page, int tile_idx) {
     if (tile_idx < 0 || tile_idx >= MECK_HOME_PAGE_COUNT) return;
 
@@ -6282,6 +6344,327 @@ static void create_page_battery(lv_obj_t *page) {
 // Tile 6: Hibernate
 // ============================================================================
 
+// ============================================================================
+// Timezones home page (world clock) -- ported from the watch
+//
+// Row 0 = Home (the device utc_offset_hours), rows 1/2 = the two saved
+// zones (prefs clock_slot_a/b). Each row shows the zone label and offset,
+// the local HH:MM, a +/-1D day marker when the zone sits on a different
+// calendar day to Home, and a triplet of city codes for the offset. The
+// city table is copied from the watch: three cities per offset over
+// -12..+14, chosen to avoid DST where a well-known non-DST city exists so
+// the label stays correct year-round. Tapping a row opens an offset picker
+// with +/- buttons; Confirm persists (Home edits the device offset, same
+// as the watch).
+// ============================================================================
+
+static const char* clock_row_label(int r) {
+    return (r == 1) ? "Zone 1" : (r == 2) ? "Zone 2" : "Home";
+}
+
+static const char* clock_cities(int8_t off) {
+    static const char* const CITIES[27] = {
+        "BIT/HWL",      /* -12 */  "PPG/NIU/MDY",  /* -11 */  "HNL/PPT/RAR",  /* -10 */
+        "ANC/JNU",      /*  -9 */  "LAX/VAN/SEA",  /*  -8 */  "PHX/HMO/MZT",  /*  -7 */
+        "MEX/REG/GUA",  /*  -6 */  "BOG/LIM/PTY",  /*  -5 */  "CCS/LPB/SDQ",  /*  -4 */
+        "BUE/SAO/MVD",  /*  -3 */  "FEN/SGS",      /*  -2 */  "RAI/PDL",      /*  -1 */
+        "REY/ACC/DKR",  /*   0 */  "LOS/ALG/TUN",  /*  +1 */  "JNB/KRT/HRE",  /*  +2 */
+        "NBO/MOW/ADD",  /*  +3 */  "DXB/BAK/TBS",  /*  +4 */  "KHI/TAS/SVX",  /*  +5 */
+        "DAC/ALA/OMS",  /*  +6 */  "BKK/JKT/HAN",  /*  +7 */  "PER/BEI/HKG",  /*  +8 */
+        "TYO/SEL/YKS",  /*  +9 */  "BNE/POM/VLA",  /* +10 */  "NOU/HIR/VLI",  /* +11 */
+        "SUV/TRW/MAJ",  /* +12 */  "TBU/APW",      /* +13 */  "CXI"           /* +14 */
+    };
+    int i = (int)off + 12;
+    if (i < 0 || i > 26) return "";
+    return CITIES[i];
+}
+
+static int8_t clock_row_offset(int r) {
+    Meck* mesh = meck_get_instance();
+    P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : NULL;
+    if (!prefs) return 0;
+    if (r == 1) return prefs->clock_slot_a;
+    if (r == 2) return prefs->clock_slot_b;
+    return prefs->utc_offset_hours;
+}
+
+// Refresh the three rows from the current time. Same clock-validity test
+// as the watch page; before the clock is set, the rows hide behind a
+// "Clock not set" line.
+static void clocks_page_refresh(void) {
+    // Same time source and validity threshold as the home header clock:
+    // the mesh's RTC (g_rtc), not meck_clock_get_utc(), whose SoftRtcClock
+    // backing returns 0 until explicitly set and reads "not set" even
+    // while the header is showing the time.
+    uint32_t now = 0;
+    Meck* mesh = meck_get_instance();
+    if (mesh) {
+        mesh::RTCClock* rtc = mesh->getRTCClock();
+        if (rtc) now = rtc->getCurrentTime();
+    }
+    const bool valid = (now >= 1750000000U);
+    if (lbl_clocks_notset) {
+        if (valid) lv_obj_add_flag(lbl_clocks_notset, LV_OBJ_FLAG_HIDDEN);
+        else       lv_obj_remove_flag(lbl_clocks_notset, LV_OBJ_FLAG_HIDDEN);
+    }
+    int32_t home_local = (int32_t)now +
+        ((int32_t)clock_row_offset(0) * 3600);
+    for (int r = 0; r < 3; r++) {
+        if (!btn_clock_row[r]) continue;
+        if (!valid) { lv_obj_add_flag(btn_clock_row[r], LV_OBJ_FLAG_HIDDEN); continue; }
+        lv_obj_remove_flag(btn_clock_row[r], LV_OBJ_FLAG_HIDDEN);
+
+        const int8_t off  = clock_row_offset(r);
+        int32_t local = (int32_t)now + ((int32_t)off * 3600);
+        int hrs  = (local / 3600) % 24;  if (hrs < 0)  hrs += 24;
+        int mins = (local / 60) % 60;    if (mins < 0) mins += 60;
+
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%s  UTC%+d", clock_row_label(r), off);
+        if (lbl_clock_row_hdr[r]) lv_label_set_text(lbl_clock_row_hdr[r], buf);
+
+        snprintf(buf, sizeof(buf), "%02d:%02d", hrs, mins);
+        if (lbl_clock_row_time[r]) lv_label_set_text(lbl_clock_row_time[r], buf);
+
+        // Day marker relative to Home, e.g. a -5 zone reading yesterday.
+        const int dayDiff = (int)((local / 86400) - (home_local / 86400));
+        if (lbl_clock_row_day[r]) {
+            if (dayDiff != 0) {
+                snprintf(buf, sizeof(buf), "%+dD", dayDiff);
+                lv_label_set_text(lbl_clock_row_day[r], buf);
+            } else {
+                lv_label_set_text(lbl_clock_row_day[r], "");
+            }
+        }
+        if (lbl_clock_row_cities[r]) {
+            lv_label_set_text(lbl_clock_row_cities[r], clock_cities(off));
+        }
+    }
+}
+
+// Once a second, but only while the Clocks page is actually showing --
+// the same visibility gate the battery tile refresh uses.
+static void clocks_timer_cb(lv_timer_t *t) {
+    (void)t;
+    if (!g_tileview) return;
+    if (lv_screen_active() != scr_home) return;
+    if (meck_screen_is_off()) return;
+    if (!btn_clock_row[0]) return;
+    if (lv_obj_get_parent(btn_clock_row[0]) != lv_tileview_get_tile_act(g_tileview)) return;
+    clocks_page_refresh();
+}
+
+// ---- Offset picker ----
+
+static void clock_pick_update(void) {
+    char buf[16];
+    if (lbl_clock_pick_title) {
+        lv_label_set_text(lbl_clock_pick_title, clock_row_label(g_clock_pick_row));
+    }
+    if (lbl_clock_pick_offset) {
+        snprintf(buf, sizeof(buf), "UTC%+d", (int)g_clock_pick_val);
+        lv_label_set_text(lbl_clock_pick_offset, buf);
+    }
+    if (lbl_clock_pick_cities) {
+        lv_label_set_text(lbl_clock_pick_cities, clock_cities(g_clock_pick_val));
+    }
+}
+
+static void on_clock_row_tap(lv_event_t *e) {
+    const intptr_t row = (intptr_t)lv_event_get_user_data(e);
+    if ((row < 0) || (row > 2)) return;
+    if (!obj_clock_pick_panel) return;
+    g_clock_pick_row = (int)row;
+    g_clock_pick_val = clock_row_offset((int)row);
+    clock_pick_update();
+    lv_obj_remove_flag(obj_clock_pick_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void clock_pick_step(int delta) {
+    int v = (int)g_clock_pick_val + delta;
+    if (v < -12) v = -12;
+    if (v > 14)  v = 14;
+    g_clock_pick_val = (int8_t)v;
+    clock_pick_update();
+}
+
+static void on_clock_pick_adjust(lv_event_t *e) {
+    clock_pick_step((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void on_clock_pick_cancel(lv_event_t *e) {
+    (void)e;
+    if (obj_clock_pick_panel) lv_obj_add_flag(obj_clock_pick_panel, LV_OBJ_FLAG_HIDDEN);
+    g_clock_pick_row = -1;
+}
+
+static void on_clock_pick_save(lv_event_t *e) {
+    (void)e;
+    Meck* mesh = meck_get_instance();
+    P4NodePrefs* prefs = mesh ? mesh->getNodePrefs() : NULL;
+    if (!prefs || (g_clock_pick_row < 0)) { on_clock_pick_cancel(NULL); return; }
+    if (g_clock_pick_row == 1)      prefs->clock_slot_a = g_clock_pick_val;
+    else if (g_clock_pick_row == 2) prefs->clock_slot_b = g_clock_pick_val;
+    else                            prefs->utc_offset_hours = g_clock_pick_val;
+    mesh->getDataStore()->savePrefs(*prefs);
+    printf("Timezones: %s = UTC%+d\n", clock_row_label(g_clock_pick_row),
+           (int)g_clock_pick_val);
+    if (g_clock_pick_row == 0) settings_update_labels();  // Home = device offset
+    clocks_page_refresh();
+    on_clock_pick_cancel(NULL);
+}
+
+static void create_page_clocks(lv_obj_t *page) {
+    lv_obj_t *title = lv_label_create(page);
+    lv_label_set_text(title, "Timezones");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_28, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, NOTCH_SAFE_X, NOTCH_SAFE_Y);
+
+    lbl_clocks_notset = lv_label_create(page);
+    lv_label_set_text(lbl_clocks_notset, "Clock not set");
+    lv_obj_set_style_text_color(lbl_clocks_notset, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(lbl_clocks_notset, &meck_montserrat_22, 0);
+    lv_obj_align(lbl_clocks_notset, LV_ALIGN_TOP_MID, 0, 130);
+    lv_obj_add_flag(lbl_clocks_notset, LV_OBJ_FLAG_HIDDEN);
+
+    // Three rows, spaced to fit both orientations.
+    const int row_top = 110;
+    const int row_h   = (SCREEN_HEIGHT - row_top - 30) / 3;
+    for (int r = 0; r < 3; r++) {
+        lv_obj_t *row = lv_button_create(page);
+        lv_obj_set_size(row, SCREEN_WIDTH - 40, row_h - 12);
+        lv_obj_set_pos(row, 20, row_top + r * row_h);
+        lv_obj_set_style_bg_color(row, lv_color_make(20, 20, 28), 0);
+        lv_obj_set_style_radius(row, 12, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(50, 50, 60), 0);
+        lv_obj_add_event_cb(row, on_clock_row_tap, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)r);
+        btn_clock_row[r] = row;
+
+        lbl_clock_row_hdr[r] = lv_label_create(row);
+        lv_label_set_text(lbl_clock_row_hdr[r], "");
+        lv_obj_set_style_text_color(lbl_clock_row_hdr[r],
+            lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(lbl_clock_row_hdr[r], &meck_montserrat_16, 0);
+        lv_obj_align(lbl_clock_row_hdr[r], LV_ALIGN_TOP_LEFT, 8, 6);
+
+        lbl_clock_row_time[r] = lv_label_create(row);
+        lv_label_set_text(lbl_clock_row_time[r], "--:--");
+        lv_obj_set_style_text_color(lbl_clock_row_time[r], lv_color_white(), 0);
+        meck_set_font(lbl_clock_row_time[r], &meck_montserrat_32, 0);
+        lv_obj_align(lbl_clock_row_time[r], LV_ALIGN_LEFT_MID, 8, 10);
+
+        lbl_clock_row_day[r] = lv_label_create(row);
+        lv_label_set_text(lbl_clock_row_day[r], "");
+        lv_obj_set_style_text_color(lbl_clock_row_day[r],
+            lv_palette_main(LV_PALETTE_YELLOW), 0);
+        meck_set_font(lbl_clock_row_day[r], &meck_montserrat_16, 0);
+        lv_obj_align(lbl_clock_row_day[r], LV_ALIGN_LEFT_MID, 145, 10);
+
+        lbl_clock_row_cities[r] = lv_label_create(row);
+        lv_label_set_text(lbl_clock_row_cities[r], "");
+        lv_obj_set_style_text_color(lbl_clock_row_cities[r],
+            lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(lbl_clock_row_cities[r], &meck_montserrat_16, 0);
+        lv_obj_align(lbl_clock_row_cities[r], LV_ALIGN_RIGHT_MID, -8, 10);
+    }
+
+    // ---- Offset picker overlay (child of the home screen, above the
+    // tileview) ----
+    obj_clock_pick_panel = lv_obj_create(scr_home);
+    lv_obj_set_size(obj_clock_pick_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_clock_pick_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_clock_pick_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_clock_pick_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(obj_clock_pick_panel, 0, 0);
+    lv_obj_add_flag(obj_clock_pick_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_clock_pick_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_clock_pick_panel, LV_SCROLLBAR_MODE_OFF);
+
+    // Cancel button (left chevron, so the Esc back-replay finds it)
+    lv_obj_t *btn_cancel = lv_button_create(obj_clock_pick_panel);
+    lv_obj_set_size(btn_cancel, 80, 50);
+    lv_obj_set_pos(btn_cancel, 10, 25);
+    lv_obj_set_style_bg_opa(btn_cancel, 0, 0);
+    lv_obj_t *cancel_lbl = lv_label_create(btn_cancel);
+    lv_label_set_text(cancel_lbl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_color(cancel_lbl, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(cancel_lbl, &meck_montserrat_24, 0);
+    lv_obj_center(cancel_lbl);
+    lv_obj_add_event_cb(btn_cancel, on_clock_pick_cancel, LV_EVENT_CLICKED, NULL);
+
+    lbl_clock_pick_title = lv_label_create(obj_clock_pick_panel);
+    lv_label_set_text(lbl_clock_pick_title, "");
+    lv_obj_set_style_text_color(lbl_clock_pick_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(lbl_clock_pick_title, &meck_montserrat_24, 0);
+    lv_obj_align(lbl_clock_pick_title, LV_ALIGN_TOP_MID, 0, 60);
+
+    lbl_clock_pick_offset = lv_label_create(obj_clock_pick_panel);
+    lv_label_set_text(lbl_clock_pick_offset, "");
+    lv_obj_set_style_text_color(lbl_clock_pick_offset, lv_color_white(), 0);
+    meck_set_font(lbl_clock_pick_offset, &meck_montserrat_32, 0);
+    lv_obj_align(lbl_clock_pick_offset, LV_ALIGN_TOP_MID, 0, 105);
+
+    lbl_clock_pick_cities = lv_label_create(obj_clock_pick_panel);
+    lv_label_set_text(lbl_clock_pick_cities, "");
+    lv_obj_set_style_text_color(lbl_clock_pick_cities, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(lbl_clock_pick_cities, &meck_montserrat_18, 0);
+    lv_obj_align(lbl_clock_pick_cities, LV_ALIGN_TOP_MID, 0, 160);
+
+    lv_obj_t *btn_minus = lv_button_create(obj_clock_pick_panel);
+    lv_obj_set_size(btn_minus, (SCREEN_WIDTH - 60) / 2, 70);
+    lv_obj_set_pos(btn_minus, 20, 210);
+    lv_obj_set_style_bg_color(btn_minus, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(btn_minus, 12, 0);
+    lv_obj_t *minus_lbl = lv_label_create(btn_minus);
+    // Plain ASCII, not LV_SYMBOL_MINUS: the custom Montserrat fonts embed
+    // only a subset of the Font Awesome symbols and 0xF068 (minus) is not
+    // among them, so the symbol renders as a missing-glyph box. ASCII "+"
+    // on the other button matches.
+    lv_label_set_text(minus_lbl, "-");
+    lv_obj_set_style_text_color(minus_lbl, lv_color_white(), 0);
+    meck_set_font(minus_lbl, &meck_montserrat_28, 0);
+    lv_obj_center(minus_lbl);
+    lv_obj_add_event_cb(btn_minus, on_clock_pick_adjust, LV_EVENT_CLICKED,
+                        (void*)(intptr_t)-1);
+
+    lv_obj_t *btn_plus = lv_button_create(obj_clock_pick_panel);
+    lv_obj_set_size(btn_plus, (SCREEN_WIDTH - 60) / 2, 70);
+    lv_obj_set_pos(btn_plus, 40 + (SCREEN_WIDTH - 60) / 2, 210);
+    lv_obj_set_style_bg_color(btn_plus, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(btn_plus, 12, 0);
+    lv_obj_t *plus_lbl = lv_label_create(btn_plus);
+    lv_label_set_text(plus_lbl, "+");
+    lv_obj_set_style_text_color(plus_lbl, lv_color_white(), 0);
+    meck_set_font(plus_lbl, &meck_montserrat_28, 0);
+    lv_obj_center(plus_lbl);
+    lv_obj_add_event_cb(btn_plus, on_clock_pick_adjust, LV_EVENT_CLICKED,
+                        (void*)(intptr_t)+1);
+
+    lv_obj_t *btn_confirm = lv_button_create(obj_clock_pick_panel);
+    lv_obj_set_size(btn_confirm, SCREEN_WIDTH - 40, 60);
+    lv_obj_set_pos(btn_confirm, 20, 295);
+    lv_obj_set_style_bg_color(btn_confirm, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_radius(btn_confirm, 8, 0);
+    lv_obj_t *confirm_lbl = lv_label_create(btn_confirm);
+    lv_label_set_text(confirm_lbl, "Confirm");
+    lv_obj_set_style_text_color(confirm_lbl, lv_color_black(), 0);
+    meck_set_font(confirm_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(confirm_lbl);
+    lv_obj_add_event_cb(btn_confirm, on_clock_pick_save, LV_EVENT_CLICKED, NULL);
+
+    // Once-a-second refresh, gated on the page being visible. Recreated
+    // with the page on an orientation rebuild; delete a previous timer
+    // first so rebuilds do not stack them.
+    if (g_clocks_timer) { lv_timer_delete(g_clocks_timer); g_clocks_timer = NULL; }
+    g_clocks_timer = lv_timer_create(clocks_timer_cb, 1000, NULL);
+    clocks_page_refresh();
+
+    home_attach_clock_battery(page, 6);
+}
+
 static void create_page_shutdown(lv_obj_t *page) {
     lv_obj_t *icon = lv_label_create(page);
     lv_label_set_text(icon, LV_SYMBOL_POWER);
@@ -6296,7 +6679,7 @@ static void create_page_shutdown(lv_obj_t *page) {
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 30);
 
-    home_attach_clock_battery(page, 6);
+    home_attach_clock_battery(page, 7);
 }
 
 // ============================================================================
@@ -10610,11 +10993,23 @@ static void create_settings_canned_screen() {
     meck_set_font(hint, &meck_montserrat_14, 0);
     lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 20, 90);
 
+    // Slot rows live in their own container (not directly on the screen)
+    // so the keyboard row ring cycles exactly these five rows and never
+    // the back button.
+    lv_obj_t *rows = lv_obj_create(scr_settings_canned);
+    lv_obj_set_size(rows, SCREEN_WIDTH, CANNED_MSG_SLOTS * 65 + 10);
+    lv_obj_set_pos(rows, 0, 115);
+    lv_obj_set_style_bg_opa(rows, 0, 0);
+    lv_obj_set_style_border_width(rows, 0, 0);
+    lv_obj_set_style_pad_all(rows, 0, 0);
+    lv_obj_clear_flag(rows, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(rows, LV_SCROLLBAR_MODE_OFF);
+    obj_canned_rows = rows;
     for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
         char name[12];
         snprintf(name, sizeof(name), "Slot %d", i + 1);
-        btn_canned_slot[i] = create_settings_row(scr_settings_canned, name,
-            &lbl_canned_slot[i], on_canned_slot_tap, 120 + i * 65);
+        btn_canned_slot[i] = create_settings_row(rows, name,
+            &lbl_canned_slot[i], on_canned_slot_tap, 5 + i * 65);
     }
     canned_update_slot_labels();
 
@@ -10633,24 +11028,32 @@ static void create_settings_canned_screen() {
     lv_label_set_text(edit_title, "Canned Message");
     lv_obj_set_style_text_color(edit_title, lv_palette_main(LV_PALETTE_GREEN), 0);
     meck_set_font(edit_title, &meck_montserrat_22, 0);
-    lv_obj_align(edit_title, LV_ALIGN_TOP_MID, 0, 50);
+    lv_obj_align(edit_title, LV_ALIGN_TOP_MID, 0, 40);
 
     ta_canned_edit = lv_textarea_create(obj_canned_edit_panel);
-    lv_obj_set_size(ta_canned_edit, SCREEN_WIDTH - 40, 110);
-    lv_obj_align(ta_canned_edit, LV_ALIGN_TOP_MID, 0, 95);
+    lv_obj_set_size(ta_canned_edit, SCREEN_WIDTH - 40, 80);
+    lv_obj_align(ta_canned_edit, LV_ALIGN_TOP_MID, 0, 80);
     lv_textarea_set_max_length(ta_canned_edit, CANNED_MSG_LEN - 1);
     lv_obj_set_style_bg_color(ta_canned_edit, lv_color_make(30, 30, 40), 0);
     lv_obj_set_style_text_color(ta_canned_edit, lv_color_white(), 0);
     meck_set_font(ta_canned_edit, &meck_montserrat_18, 0);
     lv_obj_set_style_border_color(ta_canned_edit, lv_palette_main(LV_PALETTE_CYAN), 0);
-    lv_obj_set_style_border_color(ta_canned_edit, lv_color_white(),     LV_PART_CURSOR);
-    lv_obj_set_style_border_width(ta_canned_edit, 2,                     LV_PART_CURSOR);
-    lv_obj_set_style_border_side(ta_canned_edit,  LV_BORDER_SIDE_LEFT,   LV_PART_CURSOR);
-    lv_obj_set_style_border_opa(ta_canned_edit,   LV_OPA_COVER,          LV_PART_CURSOR);
+    // Cursor styles at LV_PART_CURSOR | LV_STATE_FOCUSED, same as the Notes
+    // editor: the theme registers its own cursor style at that selector
+    // (painted in theme text colour), which always beats a style set at
+    // plain LV_PART_CURSOR, leaving the cursor invisible.
+    lv_obj_set_style_border_color(ta_canned_edit, lv_color_white(),
+                                  LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(ta_canned_edit, 2,
+                                  LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_side(ta_canned_edit,  LV_BORDER_SIDE_LEFT,
+                                  LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_opa(ta_canned_edit,   LV_OPA_COVER,
+                                  LV_PART_CURSOR | LV_STATE_FOCUSED);
 
     lv_obj_t *btn_canned_confirm = lv_button_create(obj_canned_edit_panel);
-    lv_obj_set_size(btn_canned_confirm, SCREEN_WIDTH - 40, 50);
-    lv_obj_align(btn_canned_confirm, LV_ALIGN_TOP_MID, 0, 220);
+    lv_obj_set_size(btn_canned_confirm, SCREEN_WIDTH - 40, 44);
+    lv_obj_align(btn_canned_confirm, LV_ALIGN_TOP_MID, 0, 168);
     lv_obj_set_style_bg_color(btn_canned_confirm, lv_palette_main(LV_PALETTE_CYAN), 0);
     lv_obj_set_style_radius(btn_canned_confirm, 8, 0);
     lv_obj_t *canned_confirm_lbl = lv_label_create(btn_canned_confirm);
@@ -10659,6 +11062,22 @@ static void create_settings_canned_screen() {
     meck_set_font(canned_confirm_lbl, &meck_montserrat_22, 0);
     lv_obj_center(canned_confirm_lbl);
     lv_obj_add_event_cb(btn_canned_confirm, on_canned_edit_save, LV_EVENT_CLICKED, NULL);
+
+    // Touch Cancel under Confirm, mirroring what the keyboard's Esc does.
+    // Layout is tightened (title 40, textarea 80x80, buttons 44 tall) so
+    // both buttons clear the on-screen keyboard in landscape, where the
+    // keyboard top sits at ~55% of the 540 px height.
+    lv_obj_t *btn_canned_cancel = lv_button_create(obj_canned_edit_panel);
+    lv_obj_set_size(btn_canned_cancel, SCREEN_WIDTH - 40, 44);
+    lv_obj_align(btn_canned_cancel, LV_ALIGN_TOP_MID, 0, 220);
+    lv_obj_set_style_bg_color(btn_canned_cancel, lv_color_make(40, 40, 48), 0);
+    lv_obj_set_style_radius(btn_canned_cancel, 8, 0);
+    lv_obj_t *canned_cancel_lbl = lv_label_create(btn_canned_cancel);
+    lv_label_set_text(canned_cancel_lbl, "Cancel");
+    lv_obj_set_style_text_color(canned_cancel_lbl, lv_color_white(), 0);
+    meck_set_font(canned_cancel_lbl, &meck_montserrat_22, 0);
+    lv_obj_center(canned_cancel_lbl);
+    lv_obj_add_event_cb(btn_canned_cancel, on_canned_edit_cancel, LV_EVENT_CLICKED, NULL);
 
     kb_canned_edit = lv_keyboard_create(obj_canned_edit_panel);
     meck_style_keyboard(kb_canned_edit);
@@ -18406,35 +18825,16 @@ static void meck_cardkb_init(void) {
 static MeckP4Keyboard  g_p4kbd;
 static lv_timer_t     *g_p4kbd_timer = NULL;
 
-// The tileview page currently showing, or -1 if it cannot be determined.
-// LVGL only records the active tile on a programmatic set_tile or at the
-// end of a touch swipe (tileview_event_cb, LV_EVENT_SCROLL_END), so from
-// boot until the first swipe lv_tileview_get_tile_act() returns NULL and
-// the lookup finds nothing. Derive the page from the scroll position in
-// that case -- the same nearest-tile arithmetic LVGL's own scroll-end
-// handler uses -- so the arrows work from a fresh boot.
-static int meck_home_page_index(void) {
-    if (!g_tileview) return -1;
-    lv_obj_t *act = lv_tileview_get_tile_act(g_tileview);
-    for (int i = 0; i < MECK_HOME_PAGE_COUNT; i++) {
-        if (g_home_tiles[i] && g_home_tiles[i] == act) return i;
-    }
-    const int32_t w = lv_obj_get_content_width(g_tileview);
-    if (w <= 0) return -1;
-    int idx = (int)((lv_obj_get_scroll_x(g_tileview) + (w / 2)) / w);
-    if (idx < 0) idx = 0;
-    if (idx >= MECK_HOME_PAGE_COUNT) idx = MECK_HOME_PAGE_COUNT - 1;
-    return idx;
-}
-
-// Step the home tileview one page left or right, matching what a swipe does.
-// Does not wrap: the first tile only allows LV_DIR_RIGHT and the last only
-// LV_DIR_LEFT, so stopping at the ends mirrors the gesture behaviour.
+// Step the home tileview one page left or right, matching what a swipe
+// does, and wrapping at the ends like the touch wrap gesture: backwards
+// from the first page lands on Timezones (the last content page, skipping
+// Hibernate), forwards from Hibernate returns to the first page.
 static void meck_home_page_step(int delta) {
     const int idx = meck_home_page_index();
     if (idx < 0) return;
-    const int next = idx + delta;
-    if ((next < 0) || (next >= MECK_HOME_PAGE_COUNT)) return;
+    int next = idx + delta;
+    if (next < 0)                          next = MECK_HOME_PAGE_COUNT - 2;
+    else if (next >= MECK_HOME_PAGE_COUNT) next = 0;
     if (!g_home_tiles[next]) return;
     lv_tileview_set_tile_by_index(g_tileview, (uint32_t)next, 0, LV_ANIM_ON);
 }
@@ -18515,8 +18915,9 @@ static lv_obj_t *meck_row_ring_button_at(lv_obj_t *cont, int idx) {
 // keep the generic page scroll.
 static lv_obj_t *meck_row_ring_container(void) {
     lv_obj_t *scr = lv_screen_active();
-    if (scr == scr_settings)       return obj_settings_scroll;
-    if (scr == scr_channel_picker) return obj_ch_picker_scroll;
+    if (scr == scr_settings)        return obj_settings_scroll;
+    if (scr == scr_channel_picker)  return obj_ch_picker_scroll;
+    if (scr == scr_settings_canned) return obj_canned_rows;
     return NULL;
 }
 
@@ -18605,6 +19006,11 @@ static void meck_canned_toast(const char *msg) {
 }
 
 static void meck_canned_send_hide(void) {
+    // Drop the keyboard row ring if it is on the overlay's rows -- they are
+    // rebuilt on the next open, so a stale index must not survive the hide.
+    if (obj_canned_send_list && (g_row_ring_cont == obj_canned_send_list)) {
+        meck_row_ring_clear();
+    }
     if (obj_canned_send_panel) {
         lv_obj_add_flag(obj_canned_send_panel, LV_OBJ_FLAG_HIDDEN);
     }
@@ -18651,7 +19057,11 @@ static void meck_canned_send_toggle(void) {
     if (!prefs) return;
 
     // Rebuild the row list from the current non-empty slots on every open,
-    // so edits in Settings are reflected without any cross-wiring.
+    // so edits in Settings are reflected without any cross-wiring. Clear a
+    // stale ring first: the rows about to be cleaned are the ring's target.
+    if (obj_canned_send_list && (g_row_ring_cont == obj_canned_send_list)) {
+        meck_row_ring_clear();
+    }
     lv_obj_clean(obj_canned_send_list);
     int rows = 0;
     for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
@@ -18900,6 +19310,37 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
         return;
     }
 
+    // While the canned-messages overlay is open it is modal to the
+    // keyboard: Up/Down cycle the selection ring through its rows, Enter
+    // sends the ringed message, Esc closes. Everything else is swallowed
+    // so stray keys cannot reach the composer beneath it.
+    if (obj_canned_send_panel &&
+        !lv_obj_has_flag(obj_canned_send_panel, LV_OBJ_FLAG_HIDDEN)) {
+        switch (key) {
+            case LV_KEY_UP:    meck_row_ring_step(obj_canned_send_list, -1); break;
+            case LV_KEY_DOWN:  meck_row_ring_step(obj_canned_send_list, +1); break;
+            case LV_KEY_ENTER: meck_row_ring_enter();                        break;
+            case LV_KEY_ESC:   meck_canned_send_hide();                      break;
+            default:           break;
+        }
+        return;
+    }
+
+    // Timezones offset picker: modal to the keyboard while open. Up/Down
+    // adjust the offset (Up = increase, the T-Deck W/S convention), Enter
+    // confirms and saves, Esc cancels; other keys are swallowed.
+    if (obj_clock_pick_panel &&
+        !lv_obj_has_flag(obj_clock_pick_panel, LV_OBJ_FLAG_HIDDEN)) {
+        switch (key) {
+            case LV_KEY_UP:    clock_pick_step(+1);        break;
+            case LV_KEY_DOWN:  clock_pick_step(-1);        break;
+            case LV_KEY_ENTER: on_clock_pick_save(NULL);   break;
+            case LV_KEY_ESC:   on_clock_pick_cancel(NULL); break;
+            default:           break;
+        }
+        return;
+    }
+
     // The textarea this key belongs to: whatever is focused on the active
     // screen. Generic by design, so screens built elsewhere are covered too.
     lv_obj_t *ta = meck_find_focused_textarea(lv_screen_active());
@@ -18936,15 +19377,30 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
             case LV_KEY_LEFT:
             case LV_KEY_RIGHT:
                 meck_home_tile_ring_clear();
+                // A row ring on the Timezones page dies with the page too.
+                if (g_row_ring_cont && (g_row_ring_cont == g_home_tiles[6])) {
+                    meck_row_ring_clear();
+                }
                 meck_home_page_step((key == LV_KEY_RIGHT) ? 1 : -1);
                 return;
             case LV_KEY_UP:
-            case LV_KEY_DOWN:
-                if (meck_home_page_index() == 0) {
+            case LV_KEY_DOWN: {
+                const int page = meck_home_page_index();
+                if (page == 0) {
                     meck_home_tile_ring_step((key == LV_KEY_DOWN) ? +1 : -1);
                     return;
                 }
+                // Timezones page: cycle the three zone rows, same ring as
+                // the settings lists. Skipped while the clock is unset and
+                // the rows are hidden behind "Clock not set".
+                if ((page == 6) && g_home_tiles[6] && btn_clock_row[0] &&
+                    !lv_obj_has_flag(btn_clock_row[0], LV_OBJ_FLAG_HIDDEN)) {
+                    meck_row_ring_step(g_home_tiles[6],
+                                       (key == LV_KEY_DOWN) ? +1 : -1);
+                    return;
+                }
                 break;
+            }
             case LV_KEY_ENTER:
                 if ((g_home_tile_sel >= 0) &&
                     (g_home_tile_sel < tile_button_count) &&
@@ -18953,6 +19409,25 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
                     meck_home_tile_ring_clear();
                     lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
                     return;
+                }
+                // Timezones page with a row ringed: open that row's picker.
+                if (g_row_ring_cont && (g_row_ring_cont == g_home_tiles[6])) {
+                    meck_row_ring_enter();
+                    return;
+                }
+                // On the Advert and GPS pages, Enter replays the page's
+                // long-press action (send advert / toggle GPS power) by
+                // sending LV_EVENT_LONG_PRESSED to the tile, so the same
+                // registered handler runs as for the touch gesture. Page
+                // indices match the g_home_tiles registration: 3 = advert,
+                // 4 = gps.
+                {
+                    const int page = meck_home_page_index();
+                    if (((page == 3) || (page == 4)) && g_home_tiles[page]) {
+                        lv_obj_send_event(g_home_tiles[page],
+                                          LV_EVENT_LONG_PRESSED, NULL);
+                        return;
+                    }
                 }
                 break;
             // Letter shortcuts, matching the Meck T-Deck key map for the
@@ -19114,7 +19589,8 @@ static void meck_ui_build_screens() {
     lv_obj_t *t_advert   = lv_tileview_add_tile(g_tileview, 3, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
     lv_obj_t *t_gps      = lv_tileview_add_tile(g_tileview, 4, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
     lv_obj_t *t_battery  = lv_tileview_add_tile(g_tileview, 5, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
-    lv_obj_t *t_shutdown = lv_tileview_add_tile(g_tileview, 6, 0, LV_DIR_LEFT);
+    lv_obj_t *t_clocks   = lv_tileview_add_tile(g_tileview, 6, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
+    lv_obj_t *t_shutdown = lv_tileview_add_tile(g_tileview, 7, 0, LV_DIR_LEFT);
 
     g_home_tiles[0] = t_home;
     g_home_tiles[1] = t_recent;
@@ -19122,7 +19598,10 @@ static void meck_ui_build_screens() {
     g_home_tiles[3] = t_advert;
     g_home_tiles[4] = t_gps;
     g_home_tiles[5] = t_battery;
-    g_home_tiles[6] = t_shutdown;
+    g_home_tiles[6] = t_clocks;
+    g_home_tiles[7] = t_shutdown;
+    lv_obj_add_event_cb(g_tileview, on_home_wrap_gesture,
+                        LV_EVENT_GESTURE, NULL);
 
 #if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
     // Keyboard tile-selection ring: clear it whenever the home screen is
@@ -19132,10 +19611,16 @@ static void meck_ui_build_screens() {
     lv_obj_add_event_cb(scr_home, [](lv_event_t *e) {
         (void)e;
         meck_home_tile_ring_clear();
+        if (g_row_ring_cont && (g_row_ring_cont == g_home_tiles[6])) {
+            meck_row_ring_clear();
+        }
     }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
     lv_obj_add_event_cb(g_tileview, [](lv_event_t *e) {
         (void)e;
         meck_home_tile_ring_clear();
+        if (g_row_ring_cont && (g_row_ring_cont == g_home_tiles[6])) {
+            meck_row_ring_clear();
+        }
     }, LV_EVENT_SCROLL_BEGIN, NULL);
 #endif
 
@@ -19145,6 +19630,7 @@ static void meck_ui_build_screens() {
     create_page_advert(t_advert);
     create_page_gps(t_gps);
     create_page_battery(t_battery);
+    create_page_clocks(t_clocks);
     create_page_shutdown(t_shutdown);
 
     create_settings_screen();
@@ -19177,6 +19663,10 @@ static void meck_ui_build_screens() {
         meck_row_ring_clear();
     }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
     lv_obj_add_event_cb(scr_channel_picker, [](lv_event_t *e) {
+        (void)e;
+        meck_row_ring_clear();
+    }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+    lv_obj_add_event_cb(scr_settings_canned, [](lv_event_t *e) {
         (void)e;
         meck_row_ring_clear();
     }, LV_EVENT_SCREEN_UNLOAD_START, NULL);

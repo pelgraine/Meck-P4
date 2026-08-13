@@ -211,6 +211,13 @@ struct P4NodePrefs {
     // NUL-terminated defensively on load.
     char canned_msgs[CANNED_MSG_SLOTS][CANNED_MSG_LEN];
 
+    // World clock (Clocks home page): UTC offsets for the two extra zones,
+    // ported from the watch. Appending here is safe -- loadPrefs memsets to
+    // zero and tolerates short reads, so existing NVS blobs come up as
+    // UTC+0 for both, the same default the watch uses.
+    int8_t clock_slot_a;             // Zone 1 UTC offset, default 0
+    int8_t clock_slot_b;             // Zone 2 UTC offset, default 0
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -253,6 +260,8 @@ struct P4NodePrefs {
         antenna = 0;            // Internal (RF1) by default
         kb_backlight_pct = 25;  // 25% duty (~398 mA measured, backlight on)
         memset(canned_msgs, 0, sizeof(canned_msgs));  // all slots empty
+        clock_slot_a = 0;       // Zone 1 UTC+0
+        clock_slot_b = 0;       // Zone 2 UTC+0
     }
 };
 
