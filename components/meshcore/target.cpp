@@ -59,14 +59,12 @@ bool meck_radio_attach() {
                      LORA_SF_DEFAULT, LORA_CR_DEFAULT);
     radio_set_tx_power(LORA_TX_POWER_DEFAULT);
 
-    // Re-enter RX mode with MeshCore-friendly IRQ mask
+    // Re-enter RX mode with MeshCore-friendly IRQ mask (RX_DONE plus the
+    // receive-progress bits isReceiving() relies on -- see
+    // P4SX1262Radio::armRxIrqMask).
     SX1262->clear_buffer();
     SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::RX);
-    SX1262->set_irq_pin_mode(
-        Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE,
-        Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::DISABLE,
-        Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::DISABLE
-    );
+    radio_driver.armRxIrqMask();
     SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
 
     radio_driver.begin();

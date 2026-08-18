@@ -1031,10 +1031,10 @@ struct BubbleRetryCtx {
     uint8_t  path_len;          // encoded path_len from message
     uint8_t  msg_path_hash_size;
     uint8_t  msg_path_hash_count;
-    uint8_t  msg_path_hashes[16];
+    uint8_t  msg_path_hashes[48];   // up to 16 hops x 3 bytes (matches P4ChannelMessage)
     uint8_t  echo_hash_size;
     uint8_t  echo_hash_count;
-    uint8_t  echo_hashes[16];
+    uint8_t  echo_hashes[24];       // up to 8 sources x 3 bytes (matches P4ChannelMessage)
     uint8_t  heard_count;
     char     sender[64];        // parsed sender name (received channel msgs
                                 // only; empty for sent and DM). Used to
@@ -1045,6 +1045,7 @@ struct BubbleRetryCtx {
 // overlay both channel and DM views (DM reuses scr_messages, see note
 // near scr_messages declaration).
 static lv_obj_t *obj_retry_panel  = NULL;
+static lv_obj_t *obj_retry_card       = NULL;  // the card inside obj_retry_panel (its buttons take the keyboard ring)
 static lv_obj_t *lbl_retry_prompt = NULL;
 
 // Populated by on_bubble_long_pressed when eligibility passes, read by
@@ -1056,8 +1057,10 @@ static char g_retry_pending_body[200] = "";
 
 // Path info popup — shown on long-press of any bubble
 static lv_obj_t *obj_path_panel     = NULL;
+static lv_obj_t *obj_path_card      = NULL;  // the card inside obj_path_panel (resized to fit at show time)
+static lv_obj_t *obj_path_text_scroll = NULL;  // scrollable region holding lbl_path_info
 static lv_obj_t *lbl_path_info      = NULL;
-static char g_path_copy_text[256]   = "";  // text to paste on "Copy Path"
+static char g_path_copy_text[1024]  = "";  // text to paste on "Copy Path" (16 hops of named repeaters fit)
 
 // Reply button on the path popup — shown only when a received channel
 // bubble is long-pressed. Prefills the composer with "@sender ".
@@ -1481,6 +1484,13 @@ static void create_admin_setting_placeholder_screen();
 static void admin_settings_rebuild_list();
 static void on_admin_setting_row_tap(lv_event_t *e);
 static void on_admin_setting_back(lv_event_t *e);
+// Table-driven admin command list (categories / commands / overlays)
+static void admin_cmdlist_open(int cat);
+static void create_admin_cmdlist_screen();
+static void acmd_reset_state();
+static void acmd_on_send_result(bool success, uint32_t est_timeout_ms);
+static bool acmd_on_reply(const char *response);   // true if it consumed the reply
+static void acmd_check_timeout();
 static void create_admin_fw_info_screen();
 static void admin_fw_info_request();
 static void admin_fw_info_parse_and_render(const char* response);
@@ -1540,6 +1550,13 @@ static void on_retry_modal_send(lv_event_t *e);
 static void on_retry_modal_cancel(lv_event_t *e);
 static void create_retry_modal();
 static void create_path_modal();
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+// Keyboard row ring (defined with the K270 navigation code below): the path
+// and retry overlays clear a ring parked on their buttons when they close,
+// whichever way they were dismissed.
+static void meck_row_ring_clear_if_on(lv_obj_t *cont);
+static void meck_row_ring_clear(void);
+#endif
 static void on_settings_brightness_slider_event(lv_event_t *e);
 #if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
 static void on_settings_kb_backlight_slider_event(lv_event_t *e);
@@ -7429,15 +7446,17 @@ static void strip_emojis(const char *src, char *dest, int dest_len) {
 
 // Look up a path hash against the contact list. Returns the contact name
 // (emoji-stripped) or a hex string if no match is found.
-// hex_out is always filled with the 2-4 char hex prefix.
+// hex_out is always filled with the 2-6 char hex prefix (hash_size bytes).
 static const char* lookup_hash_name(const uint8_t *hash, uint8_t hash_size,
                                      char *name_out, int name_out_len,
                                      char *hex_out, int hex_out_len) {
     // Always format the hex prefix
     if (hash_size == 1)
         snprintf(hex_out, hex_out_len, "%02X", hash[0]);
-    else
+    else if (hash_size == 2)
         snprintf(hex_out, hex_out_len, "%02X%02X", hash[0], hash[1]);
+    else
+        snprintf(hex_out, hex_out_len, "%02X%02X%02X", hash[0], hash[1], hash[2]);
 
     Meck *mesh = meck_get_instance();
     if (mesh) {
@@ -7454,7 +7473,7 @@ static const char* lookup_hash_name(const uint8_t *hash, uint8_t hash_size,
 // Build a human-readable path description from a BubbleRetryCtx.
 // Writes into g_path_copy_text for the "Copy Path" button.
 static void build_path_info_text(const BubbleRetryCtx *ctx) {
-    char buf[256];
+    char buf[1024];
     int pos = 0;
 
     if (ctx->is_outgoing) {
@@ -7499,7 +7518,7 @@ static void build_path_info_text(const BubbleRetryCtx *ctx) {
         } else {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "Route (%d hop%s):\n",
                             hops, hops == 1 ? "" : "s");
-            for (int i = 0; i < hops && i < 8; i++) {
+            for (int i = 0; i < hops && i < 16; i++) {
                 char name[48], hex[8];
                 const char *n = lookup_hash_name(
                     &ctx->msg_path_hashes[i * ctx->msg_path_hash_size],
@@ -7521,6 +7540,9 @@ static void build_path_info_text(const BubbleRetryCtx *ctx) {
 }
 
 static void on_path_modal_close(lv_event_t *e) {
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_path_card);
+#endif
     if (obj_path_panel) lv_obj_add_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -7528,6 +7550,9 @@ static void on_path_modal_copy(lv_event_t *e) {
     if (ta_compose && g_path_copy_text[0] != '\0') {
         lv_textarea_set_text(ta_compose, g_path_copy_text);
     }
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_path_card);
+#endif
     if (obj_path_panel) lv_obj_add_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -7540,7 +7565,34 @@ static void on_path_modal_reply(lv_event_t *e) {
         snprintf(prefill, sizeof(prefill), "@[%s] ", g_reply_pending_sender);
         lv_textarea_set_text(ta_compose, prefill);
     }
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_path_card);
+#endif
     if (obj_path_panel) lv_obj_add_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Size the path card to its text. The text region between the title and
+// the button stack grows to fit the route (card no smaller than the
+// original 360px), up to SCREEN_HEIGHT - 40; a route longer than that
+// scrolls inside the region. Called by on_bubble_long_pressed once the
+// label text and the Reply button's visibility are settled.
+static void path_modal_fit_to_content(bool reply_visible) {
+    if (!obj_path_card || !obj_path_text_scroll || !lbl_path_info) return;
+    lv_obj_update_layout(lbl_path_info);
+    int text_h = lv_obj_get_height(lbl_path_info);
+    // 16px card padding top+bottom, 35px title band, 12px gap above the
+    // buttons, then the button stack: 55 Close, +65 Copy Path, +65 Reply
+    // (the LV_ALIGN_BOTTOM_MID offsets used in create_path_modal).
+    int btn_block = reply_visible ? 185 : 120;
+    int fixed     = 32 + 35 + 12 + btn_block;
+    int card_h    = fixed + text_h;
+    int card_max  = SCREEN_HEIGHT - 40;
+    if (card_h < 360)      card_h = 360;
+    if (card_h > card_max) card_h = card_max;
+    lv_obj_set_height(obj_path_card, card_h);
+    lv_obj_center(obj_path_card);
+    lv_obj_set_height(obj_path_text_scroll, card_h - fixed);
+    lv_obj_scroll_to_y(obj_path_text_scroll, 0, LV_ANIM_OFF);
 }
 
 // LV_EVENT_LONG_PRESSED handler — attached to every bubble (sent and
@@ -7589,10 +7641,15 @@ static void on_bubble_long_pressed(lv_event_t *e) {
     if (obj_path_panel) {
         lv_obj_clear_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(obj_path_panel);
+        path_modal_fit_to_content(btn_path_reply &&
+                                  !lv_obj_has_flag(btn_path_reply, LV_OBJ_FLAG_HIDDEN));
     }
 }
 
 static void on_retry_modal_cancel(lv_event_t *e) {
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_retry_card);
+#endif
     if (obj_retry_panel) lv_obj_add_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
     g_retry_pending_idx = -1;
     g_retry_pending_body[0] = '\0';
@@ -7600,6 +7657,9 @@ static void on_retry_modal_cancel(lv_event_t *e) {
 
 static void on_retry_modal_send(lv_event_t *e) {
     if (g_retry_pending_idx < 0 || g_retry_pending_body[0] == '\0') {
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+        meck_row_ring_clear_if_on(obj_retry_card);
+#endif
         if (obj_retry_panel) lv_obj_add_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -7609,6 +7669,9 @@ static void on_retry_modal_send(lv_event_t *e) {
         meck_request_send_text((uint8_t)g_retry_pending_idx,
                                g_retry_pending_body);
     }
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_retry_card);
+#endif
     if (obj_retry_panel) lv_obj_add_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN);
     g_retry_pending_idx = -1;
     g_retry_pending_body[0] = '\0';
@@ -7634,6 +7697,7 @@ static void create_retry_modal() {
     int card_w = SCREEN_WIDTH - 80;
     int card_h = 280;
     lv_obj_t *card = lv_obj_create(obj_retry_panel);
+    obj_retry_card = card;
     lv_obj_set_size(card, card_w, card_h);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_make(25, 25, 35), 0);
@@ -7694,8 +7758,9 @@ static void create_path_modal() {
     lv_obj_set_scrollbar_mode(obj_path_panel, LV_SCROLLBAR_MODE_OFF);
 
     int card_w = SCREEN_WIDTH - 80;
-    int card_h = 360;
+    int card_h = 360;   // minimum; path_modal_fit_to_content grows it at show time
     lv_obj_t *card = lv_obj_create(obj_path_panel);
+    obj_path_card = card;
     lv_obj_set_size(card, card_w, card_h);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_make(25, 25, 35), 0);
@@ -7711,13 +7776,25 @@ static void create_path_modal() {
     meck_set_font(title, &meck_montserrat_22, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    lbl_path_info = lv_label_create(card);
+    // Scrollable text region between the title band and the button stack.
+    // Transparent, no border/padding (same treatment as the bubble rows);
+    // its height is set at show time by path_modal_fit_to_content.
+    obj_path_text_scroll = lv_obj_create(card);
+    lv_obj_set_size(obj_path_text_scroll, card_w - 32, card_h - 32 - 35 - 12 - 120);
+    lv_obj_align(obj_path_text_scroll, LV_ALIGN_TOP_LEFT, 0, 35);
+    lv_obj_set_style_bg_opa(obj_path_text_scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(obj_path_text_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_path_text_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_path_text_scroll, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(obj_path_text_scroll, LV_SCROLLBAR_MODE_AUTO);
+
+    lbl_path_info = lv_label_create(obj_path_text_scroll);
     lv_label_set_text(lbl_path_info, "");
     lv_obj_set_style_text_color(lbl_path_info, lv_color_white(), 0);
     meck_set_font(lbl_path_info, &meck_montserrat_16, 0);
     lv_label_set_long_mode(lbl_path_info, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(lbl_path_info, card_w - 32);
-    lv_obj_align(lbl_path_info, LV_ALIGN_TOP_LEFT, 0, 35);
+    lv_obj_set_width(lbl_path_info, card_w - 32 - 12);   // leave room for the scrollbar
+    lv_obj_align(lbl_path_info, LV_ALIGN_TOP_LEFT, 0, 0);
 
     // Reply button — hidden unless a received channel bubble is long-pressed
     // (shown/positioned above Copy Path when visible).
@@ -14541,6 +14618,9 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         }
     }
 
+    // Table-driven admin command timeout (scr_admin_cmdlist).
+    acmd_check_timeout();
+
     // Firmware Info timeout: if a "ver" request has been in flight for
     // longer than MECK_ADMIN_FW_TIMEOUT_MS without a dispatch, surface
     // a red timeout message and re-enable the Refresh button.
@@ -16105,6 +16185,7 @@ static void on_admin_home_back(lv_event_t *e) {
     g_admin_cmd_in_flight         = false;
     g_admin_fw_in_flight          = false;
     g_admin_neighbours_in_flight  = false;
+    acmd_reset_state();
     if (scr_contact_detail) lv_screen_load(scr_contact_detail);
 }
 
@@ -16375,6 +16456,7 @@ static void meck_admin_send_result_dispatch(meck_admin_req_type_t type,
     }
 
     if (type == MECK_ADMIN_REQ_CLI) {
+        acmd_on_send_result(success, est_timeout_ms);
         if (!success && g_admin_send_advert_in_flight) {
             g_admin_send_advert_in_flight = false;
             if (lbl_admin_send_advert_status) {
@@ -16545,6 +16627,7 @@ static void meck_admin_login_dispatch(bool success, uint8_t is_admin,
         lv_obj_clear_state(btn_admin_send_advert, LV_STATE_DISABLED);
     }
 
+    acmd_reset_state();
     // Reset Cmd Line scrollback + input on fresh login. A different
     // repeater is a different context; old responses shouldn't carry
     // over.
@@ -16644,6 +16727,11 @@ static void meck_admin_cli_dispatch(const char* response, int contact_idx) {
            contact_idx,
            response ? response : "",
            (response && strlen(response) > 80) ? "..." : "");
+
+    if (acmd_on_reply(response)) {
+        // Table-driven admin command flow (scr_admin_cmdlist) took it.
+        return;
+    }
 
     if (g_admin_send_advert_in_flight) {
         // Send Advert flow — populate the result on the dedicated
@@ -17677,6 +17765,801 @@ static void create_admin_cmd_screen() {
     lv_obj_set_flex_flow(obj_admin_cmd_scroll, LV_FLEX_FLOW_COLUMN);
 }
 
+// ============================================================================
+// Repeater admin: table-driven command categories (ported from the Meck
+// Watch RepeaterAdminScreen). The admin Settings list shows one row per
+// category; tapping it opens scr_admin_cmdlist with that category's
+// commands. A command row either sends straight away, prompts for a
+// parameter (ACMD_PARAM, the P4 edit-overlay pattern), offers an on/off
+// picker (ACMD_BOOL), or asks for confirmation first (ACMD_CONFIRM). The
+// reply -- including any error the repeater sends back for a feature it
+// does not have (no GPS, no sensors, no logging, ...) -- is shown verbatim
+// on a response panel, red when it reads as an error; a missing reply is
+// reported as a timeout, or as "no reply expected" for ACMD_EXPECT_TO
+// commands such as reboot.
+//
+// Command strings are the upstream MeshCore v1.17.1 CommonCLI keys
+// (discover.neighbors is the repeater's own). Local-serial-only commands
+// (log, stats-*, erase) are deliberately absent: the repeater ignores them
+// over the mesh.
+// ============================================================================
+
+#define ACMD_PARAM             0x01  // prompt for a parameter, appended to cmd
+#define ACMD_CONFIRM           0x02  // yes/no confirmation before sending
+#define ACMD_EXPECT_TO         0x04  // no reply expected (reboot / OTA / poweroff)
+#define ACMD_BOOL              0x10  // on/off picker, appended to cmd
+#define ACMD_NATIVE_NEIGHBOURS 0x20  // opens the native Neighbours screen
+#define ACMD_NATIVE_FWINFO     0x40  // opens the native Firmware Info screen
+
+struct AdminCmdDef {
+    const char* label;   // row label
+    const char* cmd;     // CLI command; a prefix ending in a space for PARAM / BOOL
+    const char* hint;    // parameter prompt (PARAM), else NULL
+    uint8_t     flags;
+};
+
+struct AdminCatDef {
+    const char*        label;
+    const AdminCmdDef* cmds;
+    int                count;
+    bool               admin_only;   // hidden from guest sessions
+};
+
+#define ACMD_COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
+#define ACMD_DEFAULT_TIMEOUT_MS 15000  // until the mesh's own estimate arrives
+
+static const AdminCmdDef ACMD_CLOCK[] = {
+    { "Clock Sync",             "clock sync",        NULL,              0 },
+    { "Get Clock",              "clock",             NULL,              0 },
+    { "Set Time",               "time ",             "Epoch seconds:",  ACMD_PARAM },
+    { "Send Advert",            "advert",            NULL,              0 },
+    { "Send Zero-hop Advert",   "advert.zerohop",    NULL,              0 },
+};
+static const AdminCmdDef ACMD_NEIGHBOURS[] = {
+    { "View Neighbours",        "",                    NULL,                 ACMD_NATIVE_NEIGHBOURS },
+    { "Discover Neighbours",    "discover.neighbors",  NULL,                 0 },
+    { "Remove Neighbour",       "neighbor.remove ",    "Pubkey hex prefix:", ACMD_PARAM },
+};
+static const AdminCmdDef ACMD_GET_CONFIG[] = {
+    { "Name",                   "get name",                  NULL, 0 },
+    { "TX Power",               "get tx",                    NULL, 0 },
+    { "Airtime Factor",         "get af",                    NULL, 0 },
+    { "Repeat",                 "get repeat",                NULL, 0 },
+    { "Radio",                  "get radio",                 NULL, 0 },
+    { "Frequency",              "get freq",                  NULL, 0 },
+    { "RX Boosted Gain",        "get radio.rxgain",          NULL, 0 },
+    { "Hardware CAD",           "get cad",                   NULL, 0 },
+    { "FEM RX Gain",            "get radio.fem.rxgain",      NULL, 0 },
+    { "FEM TX Gain",            "get radio.fem.txgain",      NULL, 0 },
+    { "Extra SFs (LR2021)",     "get extra.sf",              NULL, 0 },
+    { "Flood Max",              "get flood.max",             NULL, 0 },
+    { "Flood Max Unscoped",     "get flood.max.unscoped",    NULL, 0 },
+    { "Flood Max Advert",       "get flood.max.advert",      NULL, 0 },
+    { "RX Delay",               "get rxdelay",               NULL, 0 },
+    { "TX Delay",               "get txdelay",               NULL, 0 },
+    { "Direct TX Delay",        "get direct.txdelay",        NULL, 0 },
+    { "Interference Threshold", "get int.thresh",            NULL, 0 },
+    { "AGC Reset Interval",     "get agc.reset.interval",    NULL, 0 },
+    { "Multi Acks",             "get multi.acks",            NULL, 0 },
+    { "Path Hash Mode",         "get path.hash.mode",        NULL, 0 },
+    { "Loop Detect",            "get loop.detect",           NULL, 0 },
+    { "Duty Cycle",             "get dutycycle",             NULL, 0 },
+    { "Advert Interval",        "get advert.interval",       NULL, 0 },
+    { "Flood Advert Interval",  "get flood.advert.interval", NULL, 0 },
+    { "Latitude",               "get lat",                   NULL, 0 },
+    { "Longitude",              "get lon",                   NULL, 0 },
+    { "Owner Info",             "get owner.info",            NULL, 0 },
+    { "Guest Password",         "get guest.password",        NULL, 0 },
+    { "Allow Read-Only",        "get allow.read.only",       NULL, 0 },
+    { "ADC Multiplier",         "get adc.multiplier",        NULL, 0 },
+    { "Public Key",             "get public.key",            NULL, 0 },
+    { "Role",                   "get role",                  NULL, 0 },
+    { "Bootloader Version",     "get bootloader.ver",        NULL, 0 },
+};
+static const AdminCmdDef ACMD_SET_CONFIG[] = {
+    { "Name",                   "set name ",                  "Name:",                        ACMD_PARAM },
+    { "TX Power",               "set tx ",                    "TX power (dBm):",              ACMD_PARAM },
+    { "Airtime Factor",         "set af ",                    "Airtime factor:",              ACMD_PARAM },
+    { "Repeat",                 "set repeat ",                NULL,                           ACMD_BOOL },
+    { "Radio",                  "set radio ",                 "freq,bw,sf,cr:",               ACMD_PARAM },
+    { "Temp Radio",             "tempradio ",                 "freq,bw,sf,cr,mins:",          ACMD_PARAM },
+    { "Frequency",              "set freq ",                  "Frequency (MHz):",             ACMD_PARAM },
+    { "RX Boosted Gain",        "set radio.rxgain ",          NULL,                           ACMD_BOOL },
+    { "Hardware CAD",           "set cad ",                   NULL,                           ACMD_BOOL },
+    { "FEM RX Gain",            "set radio.fem.rxgain ",      NULL,                           ACMD_BOOL },
+    { "FEM TX Gain",            "set radio.fem.txgain ",      NULL,                           ACMD_BOOL },
+    { "Extra SFs (LR2021)",     "set extra.sf ",              "Up to 3 SFs, e.g. 8,9:",       ACMD_PARAM },
+    { "Flood Max",              "set flood.max ",             "Max hops (0-64):",             ACMD_PARAM },
+    { "Flood Max Unscoped",     "set flood.max.unscoped ",    "Max hops (64=off):",           ACMD_PARAM },
+    { "Flood Max Advert",       "set flood.max.advert ",      "Max hops (def 8):",            ACMD_PARAM },
+    { "RX Delay",               "set rxdelay ",               "Base (0=off):",                ACMD_PARAM },
+    { "TX Delay",               "set txdelay ",               "Factor:",                      ACMD_PARAM },
+    { "Direct TX Delay",        "set direct.txdelay ",        "Factor:",                      ACMD_PARAM },
+    { "Interference Threshold", "set int.thresh ",            "dB (0=off, def 14):",          ACMD_PARAM },
+    { "AGC Reset Interval",     "set agc.reset.interval ",    "Seconds (0=off):",             ACMD_PARAM },
+    { "Multi Acks",             "set multi.acks ",            "0 or 1:",                      ACMD_PARAM },
+    { "Path Hash Mode",         "set path.hash.mode ",        "0=1 byte, 1=2 bytes, 2=3:",    ACMD_PARAM },
+    { "Loop Detect",            "set loop.detect ",           "off/minimal/moderate/strict:", ACMD_PARAM },
+    { "Duty Cycle",             "set dutycycle ",             "Percent (1-100):",             ACMD_PARAM },
+    { "Advert Interval",        "set advert.interval ",       "Minutes (0=off):",             ACMD_PARAM },
+    { "Flood Advert Interval",  "set flood.advert.interval ", "Hours (0=off, 3-48):",         ACMD_PARAM },
+    { "Latitude",               "set lat ",                   "Latitude:",                    ACMD_PARAM },
+    { "Longitude",              "set lon ",                   "Longitude:",                   ACMD_PARAM },
+    { "Owner Info",             "set owner.info ",            "Owner info:",                  ACMD_PARAM },
+    { "Guest Password",         "set guest.password ",        "Password:",                    ACMD_PARAM },
+    { "Allow Read-Only",        "set allow.read.only ",       NULL,                           ACMD_BOOL },
+    { "ADC Multiplier",         "set adc.multiplier ",        "Factor (0=default):",          ACMD_PARAM },
+    { "Change Admin Password",  "password ",                  "New password:",                ACMD_PARAM | ACMD_CONFIRM },
+    { "Set Private Key",        "set prv.key ",               "Private key (hex):",           ACMD_PARAM | ACMD_CONFIRM },
+};
+static const AdminCmdDef ACMD_BRIDGE[] = {
+    { "Bridge Type",            "get bridge.type",     NULL,                0 },
+    { "Get Bridge Enabled",     "get bridge.enabled",  NULL,                0 },
+    { "Set Bridge Enabled",     "set bridge.enabled ", NULL,                ACMD_BOOL },
+    { "Get Bridge Delay",       "get bridge.delay",    NULL,                0 },
+    { "Set Bridge Delay",       "set bridge.delay ",   "Delay:",            ACMD_PARAM },
+    { "Get Bridge Source",      "get bridge.source",   NULL,                0 },
+    { "Set Bridge Source",      "set bridge.source ",  "Source:",           ACMD_PARAM },
+    { "Get Bridge Baud",        "get bridge.baud",     NULL,                0 },
+    { "Set Bridge Baud",        "set bridge.baud ",    "Baud:",             ACMD_PARAM },
+    { "Get Bridge Channel",     "get bridge.channel",  NULL,                0 },
+    { "Set Bridge Channel",     "set bridge.channel ", "Channel:",          ACMD_PARAM },
+    { "Get Bridge Secret",      "get bridge.secret",   NULL,                0 },
+    { "Set Bridge Secret",      "set bridge.secret ",  "Secret:",           ACMD_PARAM },
+};
+static const AdminCmdDef ACMD_GPS[] = {
+    { "GPS Status",             "gps",                 NULL,                0 },
+    { "GPS On",                 "gps on",              NULL,                0 },
+    { "GPS Off",                "gps off",             NULL,                0 },
+    { "GPS Time Sync",          "gps sync",            NULL,                0 },
+    { "Save Fix as Location",   "gps setloc",          NULL,                0 },
+    { "Get Advert Location",    "gps advert",          NULL,                0 },
+    { "Set Advert Location",    "gps advert ",         "none/prefs/share:", ACMD_PARAM },
+};
+static const AdminCmdDef ACMD_SENSORS[] = {
+    { "List Sensors",           "sensor list",         NULL,                0 },
+    { "Get Sensor Value",       "sensor get ",         "Sensor name:",      ACMD_PARAM },
+    { "Set Sensor Value",       "sensor set ",         "name value:",       ACMD_PARAM },
+};
+static const AdminCmdDef ACMD_REGIONS[] = {
+    { "List Regions",           "region",              NULL,                0 },
+    { "Define Regions",         "region def ",         "Region definition:", ACMD_PARAM },
+    { "Load Regions",           "region load",         NULL,                0 },
+    { "Save Regions",           "region save",         NULL,                ACMD_CONFIRM },
+    { "Get Region",             "region get ",         "Region name:",      ACMD_PARAM },
+    { "Allow Flood for Region", "region allowf ",      "Region name:",      ACMD_PARAM },
+    { "Deny Flood for Region",  "region denyf ",       "Region name:",      ACMD_PARAM },
+};
+static const AdminCmdDef ACMD_POWER[] = {
+    { "Powersaving Status",     "powersaving",         NULL,                0 },
+    { "Powersaving On",         "powersaving on",      NULL,                0 },
+    { "Powersaving Off",        "powersaving off",     NULL,                0 },
+    { "Power Mgmt Support",     "get pwrmgt.support",  NULL,                0 },
+    { "Power Source",           "get pwrmgt.source",   NULL,                0 },
+    { "Boot Reason",            "get pwrmgt.bootreason", NULL,              0 },
+    { "Boot Voltage",           "get pwrmgt.bootmv",   NULL,                0 },
+};
+static const AdminCmdDef ACMD_LOGS[] = {
+    { "Log Start",              "log start",           NULL,                0 },
+    { "Log Stop",               "log stop",            NULL,                0 },
+    { "Log Erase",              "log erase",           NULL,                ACMD_CONFIRM },
+    { "Clear Stats",            "clear stats",         NULL,                ACMD_CONFIRM },
+};
+static const AdminCmdDef ACMD_SYSTEM[] = {
+    { "Reboot",                 "reboot",              NULL,                ACMD_CONFIRM | ACMD_EXPECT_TO },
+    { "Clock Sync + Reboot",    "clkreboot",           NULL,                ACMD_CONFIRM | ACMD_EXPECT_TO },
+    { "Start OTA",              "start ota",           NULL,                ACMD_CONFIRM | ACMD_EXPECT_TO },
+    { "Power Off",              "poweroff",            NULL,                ACMD_CONFIRM | ACMD_EXPECT_TO },
+};
+static const AdminCmdDef ACMD_INFO[] = {
+    { "Firmware Info",          "",                    NULL,                ACMD_NATIVE_FWINFO },
+    { "Board",                  "board",               NULL,                0 },
+};
+
+static const AdminCatDef ACMD_CATEGORIES[] = {
+    { "Clock & Adverts",        ACMD_CLOCK,       ACMD_COUNT(ACMD_CLOCK),       true  },
+    { "Neighbours",             ACMD_NEIGHBOURS,  ACMD_COUNT(ACMD_NEIGHBOURS),  false },  // guest-visible
+    { "Get Config",             ACMD_GET_CONFIG,  ACMD_COUNT(ACMD_GET_CONFIG),  true  },
+    { "Set Config",             ACMD_SET_CONFIG,  ACMD_COUNT(ACMD_SET_CONFIG),  true  },
+    { "Bridge",                 ACMD_BRIDGE,      ACMD_COUNT(ACMD_BRIDGE),      true  },
+    { "GPS",                    ACMD_GPS,         ACMD_COUNT(ACMD_GPS),         true  },
+    { "Sensors",                ACMD_SENSORS,     ACMD_COUNT(ACMD_SENSORS),     true  },
+    { "Regions",                ACMD_REGIONS,     ACMD_COUNT(ACMD_REGIONS),     true  },
+    { "Powersaving & Power",    ACMD_POWER,       ACMD_COUNT(ACMD_POWER),       true  },
+    { "Logs & Stats",           ACMD_LOGS,        ACMD_COUNT(ACMD_LOGS),        true  },
+    { "Reboot & Power Off",     ACMD_SYSTEM,      ACMD_COUNT(ACMD_SYSTEM),      true  },
+    { "Firmware & Device Info", ACMD_INFO,        ACMD_COUNT(ACMD_INFO),        false },  // guest-visible
+};
+#define ACMD_CAT_COUNT ACMD_COUNT(ACMD_CATEGORIES)
+
+// ---- Command list screen + overlays ----
+static lv_obj_t *scr_admin_cmdlist        = NULL;
+static lv_obj_t *lbl_admin_cmdlist_title  = NULL;
+static lv_obj_t *obj_admin_cmdlist_scroll = NULL;
+static int       g_acmd_cat               = -1;
+
+static lv_obj_t *obj_acmd_param_panel = NULL, *obj_acmd_param_card = NULL;
+static lv_obj_t *lbl_acmd_param_title = NULL, *lbl_acmd_param_hint = NULL;
+static lv_obj_t *ta_acmd_param = NULL, *kb_acmd_param = NULL;
+
+static lv_obj_t *obj_acmd_bool_panel = NULL, *obj_acmd_bool_card = NULL;
+static lv_obj_t *lbl_acmd_bool_title = NULL;
+
+static lv_obj_t *obj_acmd_confirm_panel = NULL, *obj_acmd_confirm_card = NULL;
+static lv_obj_t *lbl_acmd_confirm_prompt = NULL;
+
+static lv_obj_t *obj_acmd_resp_panel = NULL, *obj_acmd_resp_card = NULL;
+static lv_obj_t *lbl_acmd_resp_title = NULL, *lbl_acmd_resp_status = NULL;
+static lv_obj_t *obj_acmd_resp_scroll = NULL, *lbl_acmd_resp_text = NULL;
+
+// The command a param / bool / confirm overlay is collecting for, and the
+// fully assembled text once it reaches the confirm step or the wire.
+static const AdminCmdDef *g_acmd_pending     = NULL;
+static char               g_acmd_pending_cmd[ADMIN_CMD_MAX_LEN + 1] = "";
+// In-flight request (one at a time, like the Cmd Line).
+static const AdminCmdDef *g_acmd_inflight_def = NULL;
+static bool               g_acmd_in_flight    = false;
+static unsigned long      g_acmd_sent_ms      = 0;
+static uint32_t           g_acmd_timeout_ms   = 0;
+
+static void acmd_reset_state();
+static void on_acmd_param_ok(lv_event_t *e);
+static void on_acmd_param_cancel(lv_event_t *e);
+static void on_acmd_bool_on(lv_event_t *e);
+static void on_acmd_bool_off(lv_event_t *e);
+static void on_acmd_bool_cancel(lv_event_t *e);
+static void on_acmd_confirm_yes(lv_event_t *e);
+static void on_acmd_confirm_no(lv_event_t *e);
+static void on_acmd_resp_close(lv_event_t *e);
+
+static inline bool acmd_visible(lv_obj_t *p) {
+    return p && !lv_obj_has_flag(p, LV_OBJ_FLAG_HIDDEN);
+}
+static inline void acmd_hide(lv_obj_t *p) {
+    if (p) lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
+}
+static inline void acmd_show(lv_obj_t *p) {
+    if (p) { lv_obj_clear_flag(p, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(p); }
+}
+
+// Case-insensitive helpers (ASCII only) for the reply-is-error heuristic.
+static char acmd_lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+static bool acmd_istarts(const char *s, const char *pfx) {
+    while (*pfx) {
+        if (acmd_lower(*s) != acmd_lower(*pfx)) return false;
+        s++; pfx++;
+    }
+    return true;
+}
+static bool acmd_icontains(const char *s, const char *needle) {
+    for (; *s; s++) if (acmd_istarts(s, needle)) return true;
+    return false;
+}
+
+// Does this reply read as an error? Upstream CommonCLI's error forms are
+// "Error: ...", "ERROR: ...", "Err - ...", "??: <key>", "unknown config:",
+// "Unknown command", "Invalid ...", "... not found", "... not supported",
+// "unsupported", "... failed"; a feature the repeater lacks (GPS, sensors,
+// logging, power management, FEM) answers with one of these.
+static bool acmd_reply_is_error(const char *r) {
+    if (!r) return true;
+    while (*r == ' ') r++;
+    if (!*r) return true;
+    static const char *const heads[] = { "err", "error", "??", "unknown", "invalid", "fail", "unauth" };
+    for (size_t i = 0; i < sizeof(heads) / sizeof(heads[0]); i++) {
+        if (acmd_istarts(r, heads[i])) return true;
+    }
+    static const char *const anywhere[] = { "not found", "not supported", "unsupported", "failed",
+                                            "no options", "cannot", "unknown", "invalid" };
+    for (size_t i = 0; i < sizeof(anywhere) / sizeof(anywhere[0]); i++) {
+        if (acmd_icontains(r, anywhere[i])) return true;
+    }
+    return false;
+}
+
+// Fill and show the response panel. status is the one-line verdict under
+// the command; text is the repeater's reply (or our own diagnostic).
+static void acmd_show_response(const char *cmd, const char *status, lv_color_t status_color,
+                               const char *text, bool is_error) {
+    if (lbl_acmd_resp_title)  lv_label_set_text(lbl_acmd_resp_title, cmd ? cmd : "");
+    if (lbl_acmd_resp_status) {
+        lv_label_set_text(lbl_acmd_resp_status, status ? status : "");
+        lv_obj_set_style_text_color(lbl_acmd_resp_status, status_color, 0);
+    }
+    if (lbl_acmd_resp_text) {
+        lv_label_set_text(lbl_acmd_resp_text, text ? text : "");
+        lv_obj_set_style_text_color(lbl_acmd_resp_text,
+            is_error ? lv_palette_lighten(LV_PALETTE_RED, 2) : lv_color_white(), 0);
+    }
+    if (obj_acmd_resp_scroll) lv_obj_scroll_to_y(obj_acmd_resp_scroll, 0, LV_ANIM_OFF);
+    acmd_show(obj_acmd_resp_panel);
+}
+
+// Put a fully assembled command on the wire. One request at a time: the
+// Cmd Line, Send Advert and Firmware Info flows share the single pending
+// CLI slot in meck_app.cpp, so a second send would overwrite the first.
+static void acmd_send_now(const char *cmd, const AdminCmdDef *def) {
+    if (!cmd || !cmd[0]) return;
+    if (g_admin_login_contact_idx < 0) {
+        acmd_show_response(cmd, "Not logged in.", lv_palette_main(LV_PALETTE_RED), "", true);
+        return;
+    }
+    if (g_acmd_in_flight || g_admin_cmd_in_flight || g_admin_send_advert_in_flight ||
+        g_admin_fw_in_flight) {
+        acmd_show_response(cmd, "Another request is in flight. Try again in a moment.",
+                           lv_palette_main(LV_PALETTE_RED), "", true);
+        return;
+    }
+    strncpy(g_acmd_pending_cmd, cmd, sizeof(g_acmd_pending_cmd) - 1);
+    g_acmd_pending_cmd[sizeof(g_acmd_pending_cmd) - 1] = '\0';
+    g_acmd_inflight_def = def;
+    g_acmd_in_flight    = true;
+    g_acmd_sent_ms      = (unsigned long)esp_log_timestamp();
+    g_acmd_timeout_ms   = ACMD_DEFAULT_TIMEOUT_MS;
+    printf("Admin cmd: sending \"%s\" to contact[%d]\n", g_acmd_pending_cmd, g_admin_login_contact_idx);
+    acmd_show_response(g_acmd_pending_cmd, "Waiting for reply...", lv_palette_main(LV_PALETTE_YELLOW), "", false);
+    meck_request_admin_cli(g_admin_login_contact_idx, g_acmd_pending_cmd);
+}
+
+// Send-result hook (from meck_admin_send_result_dispatch): a failed send
+// is reported at once; a dispatched one adopts the mesh's timeout estimate
+// (+5 s, as the login flow does).
+static void acmd_on_send_result(bool success, uint32_t est_timeout_ms) {
+    if (!g_acmd_in_flight) return;
+    if (!success) {
+        g_acmd_in_flight = false;
+        acmd_show_response(g_acmd_pending_cmd, "Send failed. Check the path and try again.",
+                           lv_palette_main(LV_PALETTE_RED), "", true);
+        return;
+    }
+    if (est_timeout_ms > 0) g_acmd_timeout_ms = est_timeout_ms + 5000;
+}
+
+// Reply hook (from meck_admin_cli_dispatch). Returns false when no
+// table-driven command is in flight, so the other flows get the reply.
+// The repeater's text is shown verbatim; the verdict line says whether it
+// reads as an error.
+static bool acmd_on_reply(const char *response) {
+    if (!g_acmd_in_flight) return false;
+    g_acmd_in_flight = false;
+    const char *r = response ? response : "";
+    bool err = acmd_reply_is_error(r);
+    acmd_show_response(g_acmd_pending_cmd,
+                       err ? "Repeater returned an error:" : "Reply:",
+                       err ? lv_palette_main(LV_PALETTE_RED) : lv_palette_main(LV_PALETTE_GREEN),
+                       r[0] ? r : "(empty reply)", err);
+    return true;
+}
+
+// Timeout hook (from ui_update_timer_cb).
+static void acmd_check_timeout() {
+    if (!g_acmd_in_flight) return;
+    unsigned long now = (unsigned long)esp_log_timestamp();
+    if ((now - g_acmd_sent_ms) <= g_acmd_timeout_ms) return;
+    g_acmd_in_flight = false;
+    if (g_acmd_inflight_def && (g_acmd_inflight_def->flags & ACMD_EXPECT_TO)) {
+        acmd_show_response(g_acmd_pending_cmd, "Command sent. No reply expected.",
+                           lv_palette_main(LV_PALETTE_GREEN), "", false);
+    } else {
+        acmd_show_response(g_acmd_pending_cmd, "Timed out. No reply from repeater.",
+                           lv_palette_main(LV_PALETTE_RED), "", true);
+    }
+}
+
+// Confirm step, or straight to the wire.
+static void acmd_commit(const char *cmd, const AdminCmdDef *def) {
+    if (def && (def->flags & ACMD_CONFIRM)) {
+        strncpy(g_acmd_pending_cmd, cmd, sizeof(g_acmd_pending_cmd) - 1);
+        g_acmd_pending_cmd[sizeof(g_acmd_pending_cmd) - 1] = '\0';
+        g_acmd_pending = def;
+        if (lbl_acmd_confirm_prompt) {
+            char prompt[ADMIN_CMD_MAX_LEN + 48];
+            snprintf(prompt, sizeof(prompt), "Send to repeater?\n\n%s", g_acmd_pending_cmd);
+            lv_label_set_text(lbl_acmd_confirm_prompt, prompt);
+        }
+        acmd_show(obj_acmd_confirm_panel);
+        return;
+    }
+    acmd_send_now(cmd, def);
+}
+
+// ---- parameter overlay ----
+static void acmd_param_show(const AdminCmdDef *def) {
+    g_acmd_pending = def;
+    if (lbl_acmd_param_title) lv_label_set_text(lbl_acmd_param_title, def->label);
+    if (lbl_acmd_param_hint)  lv_label_set_text(lbl_acmd_param_hint, def->hint ? def->hint : "Value:");
+    if (ta_acmd_param) {
+        lv_textarea_set_text(ta_acmd_param, "");
+        int room = ADMIN_CMD_MAX_LEN - (int)strlen(def->cmd);
+        lv_textarea_set_max_length(ta_acmd_param, room > 0 ? room : 1);
+    }
+    acmd_show(obj_acmd_param_panel);
+    // Focus the field so K270 typing can start at once (state + event, as
+    // type-to-compose does; the on-screen keyboard shows unless a hardware
+    // keyboard is present).
+    if (ta_acmd_param) {
+        lv_obj_add_state(ta_acmd_param, LV_STATE_FOCUSED);
+        lv_obj_send_event(ta_acmd_param, LV_EVENT_FOCUSED, NULL);
+    }
+}
+static void on_acmd_param_focused(lv_event_t *e) {
+    if (!kb_acmd_param || !ta_acmd_param) return;
+    lv_keyboard_set_textarea(kb_acmd_param, ta_acmd_param);
+    if (meck_hw_keyboard_active()) return;
+    lv_obj_remove_flag(kb_acmd_param, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(kb_acmd_param);
+}
+static void on_acmd_param_defocused(lv_event_t *e) {
+    if (kb_acmd_param) lv_obj_add_flag(kb_acmd_param, LV_OBJ_FLAG_HIDDEN);
+}
+static void on_acmd_param_ok(lv_event_t *e) {
+    if (!g_acmd_pending || !ta_acmd_param) return;
+    const char *text = lv_textarea_get_text(ta_acmd_param);
+    if (!text || !text[0]) return;                 // nothing typed: stay open
+    char cmd[ADMIN_CMD_MAX_LEN + 1];
+    snprintf(cmd, sizeof(cmd), "%s%s", g_acmd_pending->cmd, text);
+    const AdminCmdDef *def = g_acmd_pending;
+    lv_obj_clear_state(ta_acmd_param, LV_STATE_FOCUSED);
+    lv_obj_send_event(ta_acmd_param, LV_EVENT_DEFOCUSED, NULL);
+    acmd_hide(obj_acmd_param_panel);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_acmd_param_card);
+#endif
+    acmd_commit(cmd, def);
+}
+static void on_acmd_param_cancel(lv_event_t *e) {
+    if (ta_acmd_param) {
+        lv_obj_clear_state(ta_acmd_param, LV_STATE_FOCUSED);
+        lv_obj_send_event(ta_acmd_param, LV_EVENT_DEFOCUSED, NULL);
+    }
+    acmd_hide(obj_acmd_param_panel);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_acmd_param_card);
+#endif
+    g_acmd_pending = NULL;
+}
+static void on_acmd_param_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)       on_acmd_param_ok(e);
+    else if (code == LV_EVENT_CANCEL) on_acmd_param_cancel(e);
+}
+
+// ---- on/off overlay ----
+static void acmd_bool_show(const AdminCmdDef *def) {
+    g_acmd_pending = def;
+    if (lbl_acmd_bool_title) lv_label_set_text(lbl_acmd_bool_title, def->label);
+    acmd_show(obj_acmd_bool_panel);
+}
+static void acmd_bool_pick(const char *val) {
+    if (!g_acmd_pending) return;
+    char cmd[ADMIN_CMD_MAX_LEN + 1];
+    snprintf(cmd, sizeof(cmd), "%s%s", g_acmd_pending->cmd, val);
+    const AdminCmdDef *def = g_acmd_pending;
+    acmd_hide(obj_acmd_bool_panel);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_acmd_bool_card);
+#endif
+    acmd_commit(cmd, def);
+}
+static void on_acmd_bool_on(lv_event_t *e)  { acmd_bool_pick("on"); }
+static void on_acmd_bool_off(lv_event_t *e) { acmd_bool_pick("off"); }
+static void on_acmd_bool_cancel(lv_event_t *e) {
+    acmd_hide(obj_acmd_bool_panel);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_acmd_bool_card);
+#endif
+    g_acmd_pending = NULL;
+}
+
+// ---- confirm overlay ----
+static void on_acmd_confirm_yes(lv_event_t *e) {
+    const AdminCmdDef *def = g_acmd_pending;
+    acmd_hide(obj_acmd_confirm_panel);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_acmd_confirm_card);
+#endif
+    g_acmd_pending = NULL;
+    acmd_send_now(g_acmd_pending_cmd, def);
+}
+static void on_acmd_confirm_no(lv_event_t *e) {
+    acmd_hide(obj_acmd_confirm_panel);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_acmd_confirm_card);
+#endif
+    g_acmd_pending = NULL;
+}
+
+// ---- response panel ----
+// Closing early abandons the request: a late reply is dropped rather than
+// held against the next command.
+static void on_acmd_resp_close(lv_event_t *e) {
+    acmd_hide(obj_acmd_resp_panel);
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_acmd_resp_card);
+#endif
+    g_acmd_in_flight = false;
+}
+
+// Hide every overlay and forget any pending / in-flight command. Called on
+// login and logout, and when leaving the command list.
+static void acmd_reset_state() {
+    acmd_hide(obj_acmd_param_panel);
+    acmd_hide(obj_acmd_bool_panel);
+    acmd_hide(obj_acmd_confirm_panel);
+    acmd_hide(obj_acmd_resp_panel);
+    if (kb_acmd_param) lv_obj_add_flag(kb_acmd_param, LV_OBJ_FLAG_HIDDEN);
+    g_acmd_pending      = NULL;
+    g_acmd_inflight_def = NULL;
+    g_acmd_in_flight    = false;
+}
+
+// ---- rows ----
+static void acmd_run_def(const AdminCmdDef *def) {
+    if (!def) return;
+    if (def->flags & ACMD_NATIVE_NEIGHBOURS) {
+        if (scr_admin_neighbours) {
+            lv_screen_load(scr_admin_neighbours);
+            admin_neighbours_request_first_page();
+        }
+        return;
+    }
+    if (def->flags & ACMD_NATIVE_FWINFO) {
+        if (scr_admin_fw_info) {
+            lv_screen_load(scr_admin_fw_info);
+            admin_fw_info_request();
+        }
+        return;
+    }
+    if (def->flags & ACMD_PARAM) { acmd_param_show(def); return; }
+    if (def->flags & ACMD_BOOL)  { acmd_bool_show(def);  return; }
+    acmd_commit(def->cmd, def);
+}
+
+static void on_admin_cmdlist_row_tap(lv_event_t *e) {
+    acmd_run_def((const AdminCmdDef*)lv_event_get_user_data(e));
+}
+
+static void on_admin_cmdlist_back(lv_event_t *e) {
+    acmd_reset_state();
+    if (scr_admin_settings) lv_screen_load(scr_admin_settings);
+}
+
+// Rebuild the command rows for category cat and load the screen. Same row
+// styling as the admin Settings list.
+static void admin_cmdlist_open(int cat) {
+    if (cat < 0 || cat >= ACMD_CAT_COUNT) return;
+    if (!scr_admin_cmdlist || !obj_admin_cmdlist_scroll) return;
+    g_acmd_cat = cat;
+    const AdminCatDef &c = ACMD_CATEGORIES[cat];
+    if (lbl_admin_cmdlist_title) lv_label_set_text(lbl_admin_cmdlist_title, c.label);
+    lv_obj_clean(obj_admin_cmdlist_scroll);
+    int y = 5;
+    for (int i = 0; i < c.count; i++) {
+        const AdminCmdDef *def = &c.cmds[i];
+        lv_obj_t* btn = lv_button_create(obj_admin_cmdlist_scroll);
+        lv_obj_set_size(btn, SCREEN_WIDTH - 40, 70);
+        lv_obj_set_pos(btn, 10, y);
+        lv_obj_set_style_bg_color(btn, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
+        lv_obj_add_event_cb(btn, on_admin_cmdlist_row_tap, LV_EVENT_CLICKED, (void*)def);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, def->label);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_22, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
+
+        // Right-hand cue: what tapping will do.
+        const char *cue = (def->flags & (ACMD_NATIVE_NEIGHBOURS | ACMD_NATIVE_FWINFO)) ? LV_SYMBOL_RIGHT
+                        : (def->flags & ACMD_PARAM)   ? "..."
+                        : (def->flags & ACMD_BOOL)    ? "on/off"
+                        : (def->flags & ACMD_CONFIRM) ? "confirm"
+                        :                                "send";
+        lv_obj_t* arrow = lv_label_create(btn);
+        lv_label_set_text(arrow, cue);
+        lv_obj_set_style_text_color(arrow, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(arrow, &meck_montserrat_18, 0);
+        lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -10, 0);
+
+        y += 80;
+    }
+    lv_obj_scroll_to_y(obj_admin_cmdlist_scroll, 0, LV_ANIM_OFF);
+    lv_screen_load(scr_admin_cmdlist);
+}
+
+// Shared card builder for the four overlays: full-screen dark panel, centred
+// card. Returns the card; *panel_out gets the panel.
+static lv_obj_t* acmd_make_overlay(lv_obj_t *parent, lv_obj_t **panel_out, int card_h, lv_align_t align, int y_ofs) {
+    lv_obj_t *panel = lv_obj_create(parent);
+    lv_obj_set_size(panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(panel, 0, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t *card = lv_obj_create(panel);
+    lv_obj_set_size(card, SCREEN_WIDTH - 60, card_h);
+    lv_obj_align(card, align, 0, y_ofs);
+    lv_obj_set_style_bg_color(card, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_palette_main(LV_PALETTE_INDIGO), 0);
+    lv_obj_set_style_pad_all(card, 16, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    *panel_out = panel;
+    return card;
+}
+
+static lv_obj_t* acmd_make_button(lv_obj_t *card, const char *text, lv_color_t bg, lv_align_t align,
+                                  int x_ofs, int y_ofs, int w, lv_event_cb_t cb) {
+    lv_obj_t *btn = lv_button_create(card);
+    lv_obj_set_size(btn, w, 55);
+    lv_obj_align(btn, align, x_ofs, y_ofs);
+    lv_obj_set_style_bg_color(btn, bg, 0);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    meck_set_font(lbl, &meck_montserrat_18, 0);
+    lv_obj_center(lbl);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    return btn;
+}
+
+static lv_obj_t* acmd_make_title(lv_obj_t *card, const char *text) {
+    lv_obj_t *t = lv_label_create(card);
+    lv_label_set_text(t, text);
+    lv_obj_set_style_text_color(t, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(t, &meck_montserrat_22, 0);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 0, 0);
+    return t;
+}
+
+// The command list screen (slot 18) and its overlays. Back returns to the
+// admin Settings (category) list.
+static void create_admin_cmdlist_screen() {
+    scr_admin_cmdlist = lv_obj_create(NULL);
+    lock_screen_scroll(scr_admin_cmdlist);
+    lv_obj_set_style_bg_color(scr_admin_cmdlist, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_admin_cmdlist, 18, &meck_montserrat_22, 30);
+
+    lv_obj_t* btn_back = lv_button_create(scr_admin_cmdlist);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t* bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, on_admin_cmdlist_back, LV_EVENT_CLICKED, NULL);
+
+    lbl_admin_cmdlist_title = lv_label_create(scr_admin_cmdlist);
+    lv_label_set_text(lbl_admin_cmdlist_title, "");
+    lv_obj_set_style_text_color(lbl_admin_cmdlist_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(lbl_admin_cmdlist_title, &meck_montserrat_24, 0);
+    lv_obj_align(lbl_admin_cmdlist_title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    obj_admin_cmdlist_scroll = lv_obj_create(scr_admin_cmdlist);
+    lv_obj_set_size(obj_admin_cmdlist_scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 110);
+    lv_obj_set_pos(obj_admin_cmdlist_scroll, 0, 100);
+    lv_obj_set_style_bg_color(obj_admin_cmdlist_scroll, lv_color_black(), 0);
+    lv_obj_set_style_border_width(obj_admin_cmdlist_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_admin_cmdlist_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_admin_cmdlist_scroll, LV_DIR_VER);
+
+    const int card_w = SCREEN_WIDTH - 60;
+    const int inner  = card_w - 32;
+
+    // ---- Parameter prompt: near the top so the on-screen keyboard fits below. ----
+    obj_acmd_param_card = acmd_make_overlay(scr_admin_cmdlist, &obj_acmd_param_panel, 330, LV_ALIGN_TOP_MID, 110);
+    lbl_acmd_param_title = acmd_make_title(obj_acmd_param_card, "");
+    lbl_acmd_param_hint = lv_label_create(obj_acmd_param_card);
+    lv_label_set_text(lbl_acmd_param_hint, "");
+    lv_obj_set_style_text_color(lbl_acmd_param_hint, lv_color_make(180, 180, 180), 0);
+    meck_set_font(lbl_acmd_param_hint, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_acmd_param_hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_acmd_param_hint, inner);
+    lv_obj_align(lbl_acmd_param_hint, LV_ALIGN_TOP_LEFT, 0, 40);
+    ta_acmd_param = lv_textarea_create(obj_acmd_param_card);
+    lv_obj_set_size(ta_acmd_param, inner, 70);
+    lv_obj_align(ta_acmd_param, LV_ALIGN_TOP_LEFT, 0, 90);
+    lv_textarea_set_one_line(ta_acmd_param, true);
+    lv_textarea_set_max_length(ta_acmd_param, ADMIN_CMD_MAX_LEN);
+    meck_set_font(ta_acmd_param, &meck_montserrat_18, 0);
+    lv_obj_add_event_cb(ta_acmd_param, on_acmd_param_focused,   LV_EVENT_FOCUSED,   NULL);
+    lv_obj_add_event_cb(ta_acmd_param, on_acmd_param_defocused, LV_EVENT_DEFOCUSED, NULL);
+    acmd_make_button(obj_acmd_param_card, "OK",     lv_palette_darken(LV_PALETTE_INDIGO, 1), LV_ALIGN_BOTTOM_LEFT,  0, 0, (inner - 12) / 2, on_acmd_param_ok);
+    acmd_make_button(obj_acmd_param_card, "Cancel", lv_color_make(60, 60, 70),               LV_ALIGN_BOTTOM_RIGHT, 0, 0, (inner - 12) / 2, on_acmd_param_cancel);
+    // Keyboard lives on the panel (below the card), hidden until the field focuses.
+    kb_acmd_param = lv_keyboard_create(obj_acmd_param_panel);
+    lv_obj_set_size(kb_acmd_param, SCREEN_WIDTH, MECK_KB_HEIGHT);
+    lv_obj_align(kb_acmd_param, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(kb_acmd_param, LV_OBJ_FLAG_HIDDEN);
+    meck_style_keyboard(kb_acmd_param);
+    lv_obj_add_event_cb(kb_acmd_param, on_acmd_param_kb_event, LV_EVENT_ALL, NULL);
+
+    // ---- On/off picker ----
+    obj_acmd_bool_card = acmd_make_overlay(scr_admin_cmdlist, &obj_acmd_bool_panel, 320, LV_ALIGN_CENTER, 0);
+    lbl_acmd_bool_title = acmd_make_title(obj_acmd_bool_card, "");
+    acmd_make_button(obj_acmd_bool_card, "On",     lv_palette_darken(LV_PALETTE_TEAL, 1),   LV_ALIGN_BOTTOM_MID, 0, -130, inner, on_acmd_bool_on);
+    acmd_make_button(obj_acmd_bool_card, "Off",    lv_palette_darken(LV_PALETTE_INDIGO, 1), LV_ALIGN_BOTTOM_MID, 0, -65,  inner, on_acmd_bool_off);
+    acmd_make_button(obj_acmd_bool_card, "Cancel", lv_color_make(60, 60, 70),               LV_ALIGN_BOTTOM_MID, 0, 0,    inner, on_acmd_bool_cancel);
+
+    // ---- Confirm ----
+    obj_acmd_confirm_card = acmd_make_overlay(scr_admin_cmdlist, &obj_acmd_confirm_panel, 330, LV_ALIGN_CENTER, 0);
+    acmd_make_title(obj_acmd_confirm_card, "Confirm");
+    lbl_acmd_confirm_prompt = lv_label_create(obj_acmd_confirm_card);
+    lv_label_set_text(lbl_acmd_confirm_prompt, "");
+    lv_obj_set_style_text_color(lbl_acmd_confirm_prompt, lv_color_white(), 0);
+    meck_set_font(lbl_acmd_confirm_prompt, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_acmd_confirm_prompt, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_acmd_confirm_prompt, inner);
+    lv_obj_align(lbl_acmd_confirm_prompt, LV_ALIGN_TOP_LEFT, 0, 40);
+    acmd_make_button(obj_acmd_confirm_card, "Yes, send", lv_palette_darken(LV_PALETTE_RED, 1), LV_ALIGN_BOTTOM_MID, 0, -65, inner, on_acmd_confirm_yes);
+    acmd_make_button(obj_acmd_confirm_card, "No",        lv_color_make(60, 60, 70),            LV_ALIGN_BOTTOM_MID, 0, 0,   inner, on_acmd_confirm_no);
+
+    // ---- Response ----
+    const int resp_h = SCREEN_HEIGHT - 160;
+    obj_acmd_resp_card = acmd_make_overlay(scr_admin_cmdlist, &obj_acmd_resp_panel, resp_h, LV_ALIGN_CENTER, 0);
+    lbl_acmd_resp_title = acmd_make_title(obj_acmd_resp_card, "");
+    lv_label_set_long_mode(lbl_acmd_resp_title, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_acmd_resp_title, inner);
+    lbl_acmd_resp_status = lv_label_create(obj_acmd_resp_card);
+    lv_label_set_text(lbl_acmd_resp_status, "");
+    meck_set_font(lbl_acmd_resp_status, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_acmd_resp_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_acmd_resp_status, inner);
+    lv_obj_align(lbl_acmd_resp_status, LV_ALIGN_TOP_LEFT, 0, 62);
+    // Scrollable reply region between the status line and the Close button
+    // (transparent, no border/padding -- as the path overlay's text region).
+    obj_acmd_resp_scroll = lv_obj_create(obj_acmd_resp_card);
+    lv_obj_set_size(obj_acmd_resp_scroll, inner, resp_h - 32 - 110 - 12 - 55 - 12);
+    lv_obj_align(obj_acmd_resp_scroll, LV_ALIGN_TOP_LEFT, 0, 110);
+    lv_obj_set_style_bg_opa(obj_acmd_resp_scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(obj_acmd_resp_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_acmd_resp_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_acmd_resp_scroll, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(obj_acmd_resp_scroll, LV_SCROLLBAR_MODE_AUTO);
+    lbl_acmd_resp_text = lv_label_create(obj_acmd_resp_scroll);
+    lv_label_set_text(lbl_acmd_resp_text, "");
+    lv_obj_set_style_text_color(lbl_acmd_resp_text, lv_color_white(), 0);
+    meck_set_font(lbl_acmd_resp_text, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_acmd_resp_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_acmd_resp_text, inner - 12);
+    lv_obj_align(lbl_acmd_resp_text, LV_ALIGN_TOP_LEFT, 0, 0);
+    acmd_make_button(obj_acmd_resp_card, "Close", lv_color_make(60, 60, 70), LV_ALIGN_BOTTOM_MID, 0, 0, inner, on_acmd_resp_close);
+}
+
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+// Keyboard support for the overlays: the card whose buttons should take the
+// ring while an overlay is up on the command list screen (topmost first),
+// and Esc's dismiss for it. The parameter prompt is included for the case
+// where its field is not focused; while it is focused the poll's textarea
+// path owns the keys.
+static lv_obj_t *acmd_visible_modal_card(void) {
+    if (lv_screen_active() != scr_admin_cmdlist) return NULL;
+    if (acmd_visible(obj_acmd_confirm_panel)) return obj_acmd_confirm_card;
+    if (acmd_visible(obj_acmd_bool_panel))    return obj_acmd_bool_card;
+    if (acmd_visible(obj_acmd_param_panel))   return obj_acmd_param_card;
+    if (acmd_visible(obj_acmd_resp_panel))    return obj_acmd_resp_card;
+    return NULL;
+}
+static void acmd_modal_escape(void) {
+    if (acmd_visible(obj_acmd_confirm_panel)) { on_acmd_confirm_no(NULL);   return; }
+    if (acmd_visible(obj_acmd_bool_panel))    { on_acmd_bool_cancel(NULL);  return; }
+    if (acmd_visible(obj_acmd_param_panel))   { on_acmd_param_cancel(NULL); return; }
+    if (acmd_visible(obj_acmd_resp_panel))    { on_acmd_resp_close(NULL);   return; }
+}
+#endif
+
+
 // Settings menu list — piece 5. Subpage with a scroll container of
 // rows. Rows are rebuilt on every entry so guest vs admin visibility
 // is honoured after a re-login. Each row taps into a shared
@@ -17757,49 +18640,10 @@ static void on_admin_setting_back(lv_event_t *e) {
 // Per-row tap handler. user_data is a static const char* setting
 // name. Updates the placeholder screen's title + body and loads it.
 static void on_admin_setting_row_tap(lv_event_t *e) {
-    const char* name = (const char*)lv_event_get_user_data(e);
-    if (!name) return;
-
-    printf("Admin Settings: '%s' tapped\n", name);
-
-    // Firmware Info has its own dedicated subpage. Auto-send "ver" on
-    // entry so the user doesn't have to tap Refresh to see the values.
-    if (strcmp(name, "Firmware Info") == 0) {
-        if (scr_admin_fw_info) {
-            lv_screen_load(scr_admin_fw_info);
-            admin_fw_info_request();
-        }
-        return;
-    }
-
-    // Neighbours uses the binary REQ_TYPE_GET_NEIGHBOURS path to
-    // retrieve the repeater's full neighbour list (paginated), rather
-    // than the text CLI 'neighbors' command which is hard-capped at
-    // ~8 entries by the repeater's reply buffer. Guest-visible.
-    if (strcmp(name, "Neighbours") == 0) {
-        if (scr_admin_neighbours) {
-            lv_screen_load(scr_admin_neighbours);
-            admin_neighbours_request_first_page();
-        }
-        return;
-    }
-
-    if (lbl_admin_setting_placeholder_title) {
-        lv_label_set_text(lbl_admin_setting_placeholder_title, name);
-    }
-    if (lbl_admin_setting_placeholder_body) {
-        char body[160];
-        snprintf(body, sizeof(body),
-                 "%s\n\n"
-                 "This setting is part of the admin menu, but the\n"
-                 "control screen for it isn't built yet. It'll be\n"
-                 "added in a future piece.",
-                 name);
-        lv_label_set_text(lbl_admin_setting_placeholder_body, body);
-    }
-    if (scr_admin_setting_placeholder) {
-        lv_screen_load(scr_admin_setting_placeholder);
-    }
+    // user_data is the category index into ACMD_CATEGORIES.
+    int cat = (int)(intptr_t)lv_event_get_user_data(e);
+    printf("Admin Settings: category %d tapped\n", cat);
+    admin_cmdlist_open(cat);
 }
 
 // ---- Firmware Info subpage ----
@@ -18411,27 +19255,11 @@ static void admin_settings_rebuild_list() {
     // Clear existing rows.
     lv_obj_clean(obj_admin_settings_list);
 
-    // (label, admin_only) pairs.
-    struct SettingRow {
-        const char* name;
-        bool admin_only;
-    };
-    static const SettingRow ROWS[] = {
-        { "Neighbours",          false },  // guest-visible
-        { "Sync Clock",          true  },
-        { "Firmware Info",       false },  // guest-visible
-        { "Manage Regions",      true  },
-        { "Position",            true  },
-        { "Repeat Settings",     true  },
-        { "Access Control",      true  },
-        { "Admin Password",      true  },
-        { "Guest Password",      true  },
-        { "Change Identity Key", true  },
-    };
-
+    // One row per command category (ACMD_CATEGORIES); guest sessions see
+    // only the categories not marked admin_only.
     int y = 5;
-    for (size_t i = 0; i < sizeof(ROWS) / sizeof(ROWS[0]); i++) {
-        if (ROWS[i].admin_only && !g_admin_session_is_admin) continue;
+    for (int i = 0; i < ACMD_CAT_COUNT; i++) {
+        if (ACMD_CATEGORIES[i].admin_only && !g_admin_session_is_admin) continue;
 
         lv_obj_t* btn = lv_button_create(obj_admin_settings_list);
         lv_obj_set_size(btn, SCREEN_WIDTH - 40, 70);
@@ -18440,13 +19268,13 @@ static void admin_settings_rebuild_list() {
         lv_obj_set_style_radius(btn, 10, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_make(50, 50, 60), 0);
-        // user_data is the static string literal, used by the tap
-        // handler to look up which row was pressed.
+        // user_data is the category index, used by the tap handler to
+        // open that category's command list.
         lv_obj_add_event_cb(btn, on_admin_setting_row_tap,
-                            LV_EVENT_CLICKED, (void*)ROWS[i].name);
+                            LV_EVENT_CLICKED, (void*)(intptr_t)i);
 
         lv_obj_t* lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, ROWS[i].name);
+        lv_label_set_text(lbl, ACMD_CATEGORIES[i].label);
         lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
         meck_set_font(lbl, &meck_montserrat_22, 0);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
@@ -18531,6 +19359,21 @@ static void create_admin_home_screen() {
     create_admin_setting_placeholder_screen();
     create_admin_fw_info_screen();
     create_admin_neighbours_screen();
+    create_admin_cmdlist_screen();
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // Keyboard row ring on the admin Settings (category) list and the
+    // command list, cleared when either screen unloads.
+    {
+        lv_obj_t *admin_ring_screens[] = { scr_admin_settings, scr_admin_cmdlist };
+        for (size_t i = 0; i < sizeof(admin_ring_screens) / sizeof(admin_ring_screens[0]); i++) {
+            if (!admin_ring_screens[i]) continue;
+            lv_obj_add_event_cb(admin_ring_screens[i], [](lv_event_t *e) {
+                (void)e;
+                meck_row_ring_clear();
+            }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+        }
+    }
+#endif
 }
 
 // ============================================================================
@@ -18984,6 +19827,8 @@ static lv_obj_t *meck_row_ring_container(void) {
     if (scr == scr_channel_detail)    return scr_channel_detail;
     if (scr == scr_settings_position) return scr_settings_position;
     if (scr == scr_debug_logs)        return scr_debug_logs;
+    if (scr == scr_admin_settings)    return obj_admin_settings_list;
+    if (scr == scr_admin_cmdlist)     return obj_admin_cmdlist_scroll;
 #if MECK_BLE_KEYBOARD_ENABLED
     if (scr == scr_settings_keyboard) return scr_settings_keyboard;
 #endif
@@ -19034,6 +19879,114 @@ static bool meck_row_ring_enter(void) {
     lv_obj_t *btn = meck_row_ring_button_at(g_row_ring_cont, g_row_ring_idx);
     if (!btn) return false;
     lv_obj_send_event(btn, LV_EVENT_CLICKED, NULL);
+    return true;
+}
+
+// Clear the row ring only if it is currently on cont. Used by the message
+// overlays (path / retry) when they close, so a ring parked on their
+// buttons does not survive to the next open.
+static void meck_row_ring_clear_if_on(lv_obj_t *cont) {
+    if (cont && (g_row_ring_cont == cont)) meck_row_ring_clear();
+}
+
+// Keyboard bubble ring on the messages screen (the channel and DM views
+// both draw into obj_msg_scroll). Up/Down move the same white ring bubble
+// by bubble, with the composer as the last stop. Enter on a bubble replays
+// its LV_EVENT_LONG_PRESSED -- the path overlay, or the retry modal for a
+// failed send, exactly what a touch long-press does; Enter on the composer
+// focuses it as a tap would.
+//
+// State is an index, re-resolved on every use, because the bubble rebuilds
+// run lv_obj_clean(obj_msg_scroll) whenever a message arrives. Positions
+// 0..n-1 are the bubble rows in scroll order (oldest first); position n is
+// ta_compose. A first Up press lands on the newest bubble and a first Down
+// on the composer, since the view sits at the bottom of the list.
+static int g_msg_ring_idx = -1;
+
+// Bubble rows are the plain-object children of obj_msg_scroll, each holding
+// one bubble as its first child; the "No messages yet." label is not one.
+static bool meck_msg_ring_is_row(lv_obj_t *child) {
+    return lv_obj_check_type(child, &lv_obj_class) &&
+           (lv_obj_get_child_count(child) > 0);
+}
+
+static int meck_msg_ring_count(void) {
+    if (!obj_msg_scroll) return 0;
+    int n = 0;
+    const uint32_t c = lv_obj_get_child_count(obj_msg_scroll);
+    for (uint32_t i = 0; i < c; i++) {
+        if (meck_msg_ring_is_row(lv_obj_get_child(obj_msg_scroll, i))) n++;
+    }
+    return n;
+}
+
+// The bubble at ring position idx (0..n-1), or ta_compose at position n
+// when the composer exists and is visible; NULL otherwise.
+static lv_obj_t *meck_msg_ring_target_at(int idx) {
+    if (!obj_msg_scroll || (idx < 0)) return NULL;
+    int n = 0;
+    const uint32_t c = lv_obj_get_child_count(obj_msg_scroll);
+    for (uint32_t i = 0; i < c; i++) {
+        lv_obj_t *row = lv_obj_get_child(obj_msg_scroll, i);
+        if (!meck_msg_ring_is_row(row)) continue;
+        if (n == idx) return lv_obj_get_child(row, 0);
+        n++;
+    }
+    if ((idx == n) && ta_compose && !lv_obj_has_flag(ta_compose, LV_OBJ_FLAG_HIDDEN)) {
+        return ta_compose;
+    }
+    return NULL;
+}
+
+static void meck_msg_ring_clear(void) {
+    if (g_msg_ring_idx >= 0) {
+        lv_obj_t *old = meck_msg_ring_target_at(g_msg_ring_idx);
+        if (old) lv_obj_set_style_outline_width(old, 0, 0);
+    }
+    g_msg_ring_idx = -1;
+}
+
+static void meck_msg_ring_step(int delta) {
+    const int  n           = meck_msg_ring_count();
+    const bool has_compose = ta_compose && !lv_obj_has_flag(ta_compose, LV_OBJ_FLAG_HIDDEN);
+    const int  total       = n + (has_compose ? 1 : 0);
+    if (total <= 0) return;
+    int next;
+    if (g_msg_ring_idx < 0) {
+        // First press: Up lands on the newest bubble, Down on the composer
+        // (or the newest bubble when there is no composer to land on).
+        next = (delta < 0) ? (n - 1) : (has_compose ? n : (n - 1));
+        if (next < 0) next = 0;
+    } else {
+        next = ((g_msg_ring_idx + delta) % total + total) % total;
+        lv_obj_t *old = meck_msg_ring_target_at(g_msg_ring_idx);
+        if (old) lv_obj_set_style_outline_width(old, 0, 0);
+    }
+    lv_obj_t *tgt = meck_msg_ring_target_at(next);
+    if (!tgt) { g_msg_ring_idx = -1; return; }
+    lv_obj_set_style_outline_width(tgt, 3, 0);
+    lv_obj_set_style_outline_color(tgt, lv_color_white(), 0);
+    lv_obj_set_style_outline_pad(tgt, 2, 0);
+    lv_obj_scroll_to_view(tgt, LV_ANIM_ON);
+    g_msg_ring_idx = next;
+}
+
+// Enter on the ring. A bubble gets its long-press replayed and keeps the
+// ring, so the same message is still selected when its overlay closes. The
+// composer is focused the way type-to-compose does it (state plus
+// LV_EVENT_FOCUSED, so on_compose_focused runs and the cursor blinks) and
+// the ring is dropped, since a focused field takes the keys for typing.
+static bool meck_msg_ring_enter(void) {
+    if (g_msg_ring_idx < 0) return false;
+    lv_obj_t *tgt = meck_msg_ring_target_at(g_msg_ring_idx);
+    if (!tgt) { g_msg_ring_idx = -1; return false; }
+    if (tgt == ta_compose) {
+        meck_msg_ring_clear();
+        lv_obj_add_state(ta_compose, LV_STATE_FOCUSED);
+        lv_obj_send_event(ta_compose, LV_EVENT_FOCUSED, NULL);
+    } else {
+        lv_obj_send_event(tgt, LV_EVENT_LONG_PRESSED, NULL);
+    }
     return true;
 }
 
@@ -19410,6 +20363,54 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
         return;
     }
 
+    // Repeater admin command overlays (on/off picker, confirm, response, and
+    // the parameter prompt when its field is not focused): modal to the
+    // keyboard. Up/Down ring the overlay's buttons, Enter presses the ringed
+    // one, Esc dismisses. With the parameter field focused, the textarea
+    // path below owns the keys (typing, Enter = OK, Esc = Cancel).
+    {
+        lv_obj_t *acmd_card = acmd_visible_modal_card();
+        if (acmd_card && !meck_find_focused_textarea(lv_screen_active())) {
+            switch (key) {
+                case LV_KEY_UP:    meck_row_ring_step(acmd_card, -1); break;
+                case LV_KEY_DOWN:  meck_row_ring_step(acmd_card, +1); break;
+                case LV_KEY_ENTER: meck_row_ring_enter();            break;
+                case LV_KEY_ESC:   acmd_modal_escape();              break;
+                default:           break;
+            }
+            return;
+        }
+    }
+
+    // Message overlays: the path popup and the retry modal are modal to the
+    // keyboard while open on the messages screen. Up/Down ring their buttons
+    // (Reply / Copy Path / Close, or Retry Send / Cancel), Enter presses the
+    // ringed one, Esc closes -- so a bubble opened by Enter can be finished
+    // without touch. Other keys are swallowed so they cannot reach the
+    // composer beneath.
+    if ((lv_screen_active() == scr_messages) && obj_path_panel &&
+        !lv_obj_has_flag(obj_path_panel, LV_OBJ_FLAG_HIDDEN)) {
+        switch (key) {
+            case LV_KEY_UP:    meck_row_ring_step(obj_path_card, -1); break;
+            case LV_KEY_DOWN:  meck_row_ring_step(obj_path_card, +1); break;
+            case LV_KEY_ENTER: meck_row_ring_enter();                 break;
+            case LV_KEY_ESC:   on_path_modal_close(NULL);            break;
+            default:           break;
+        }
+        return;
+    }
+    if ((lv_screen_active() == scr_messages) && obj_retry_panel &&
+        !lv_obj_has_flag(obj_retry_panel, LV_OBJ_FLAG_HIDDEN)) {
+        switch (key) {
+            case LV_KEY_UP:    meck_row_ring_step(obj_retry_card, -1); break;
+            case LV_KEY_DOWN:  meck_row_ring_step(obj_retry_card, +1); break;
+            case LV_KEY_ENTER: meck_row_ring_enter();                  break;
+            case LV_KEY_ESC:   on_retry_modal_cancel(NULL);            break;
+            default:           break;
+        }
+        return;
+    }
+
     // The textarea this key belongs to: whatever is focused on the active
     // screen. Generic by design, so screens built elsewhere are covered too.
     lv_obj_t *ta = meck_find_focused_textarea(lv_screen_active());
@@ -19537,15 +20538,24 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
             case LV_KEY_UP:
             case LV_KEY_DOWN: {
                 // Settings and the channel picker cycle a row-selection ring
-                // instead of the page scroll; everywhere else keeps the
+                // instead of the page scroll; the messages screen cycles the
+                // bubble ring (meck_msg_ring_step); everywhere else keeps the
                 // vertical-swipe paging.
-                lv_obj_t *cont = meck_row_ring_container();
                 const int dir  = (key == LV_KEY_DOWN) ? +1 : -1;
+                if (lv_screen_active() == scr_messages) {
+                    meck_msg_ring_step(dir);
+                    break;
+                }
+                lv_obj_t *cont = meck_row_ring_container();
                 if (cont) meck_row_ring_step(cont, dir);
                 else      meck_kbd_scroll_page(dir);
                 break;
             }
             case LV_KEY_ENTER:
+                if (lv_screen_active() == scr_messages) {
+                    meck_msg_ring_enter();
+                    break;
+                }
                 meck_row_ring_enter();
                 break;
             case LV_KEY_LEFT:
@@ -19750,6 +20760,18 @@ static void meck_ui_build_screens() {
     create_messages_screen();
     create_retry_modal();
     create_path_modal();
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // Keyboard bubble ring: reset the stored index (this function reruns on
+    // an orientation rebuild) and clear the ring when the messages screen
+    // unloads, as the row-ring screens above do.
+    g_msg_ring_idx = -1;
+    if (scr_messages) {
+        lv_obj_add_event_cb(scr_messages, [](lv_event_t *e) {
+            (void)e;
+            meck_msg_ring_clear();
+        }, LV_EVENT_SCREEN_UNLOAD_START, NULL);
+    }
+#endif
     create_dm_inbox_screen();
     create_contacts_screen();
     create_contact_detail_screen();
@@ -19797,7 +20819,7 @@ static void meck_ui_teardown_screens() {
         &scr_settings_contacts, &scr_discover, &scr_admin_login, &scr_admin_home,
         &scr_room_messages, &scr_admin_status, &scr_admin_cmd, &scr_admin_settings,
         &scr_admin_send_advert, &scr_admin_setting_placeholder, &scr_admin_fw_info,
-        &scr_admin_neighbours,
+        &scr_admin_neighbours, &scr_admin_cmdlist,
     };
     for (size_t i = 0; i < sizeof(screens) / sizeof(screens[0]); i++) {
         if (*screens[i]) { lv_obj_delete(*screens[i]); *screens[i] = NULL; }

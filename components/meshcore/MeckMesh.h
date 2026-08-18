@@ -338,17 +338,18 @@ struct P4ChannelMessage {
 
     // ---- Path view data (in-memory only, not persisted) ----
     // Incoming messages: repeater hashes from the packet's path field.
-    // Up to 8 hops × 2 bytes each = 16 bytes max.
-    uint8_t msg_path_hash_size;       // 1 or 2 bytes per hop (0 = not captured)
-    uint8_t msg_path_hash_count;      // number of hops stored
-    uint8_t msg_path_hashes[16];      // repeater pub_key prefix hashes
+    // Up to 16 hops x 3 bytes each = 48 bytes max.
+    uint8_t msg_path_hash_size;       // 1, 2 or 3 bytes per hop (0 = not captured)
+    uint8_t msg_path_hash_count;      // number of hops stored (<=16)
+    uint8_t msg_path_hashes[48];      // repeater pub_key prefix hashes
 
     // Outgoing messages: first-hop hash from each distinct echo packet.
     // Each echo that bounces back carries a path whose first entry is the
-    // repeater nearest to us that forwarded our packet. Up to 8 captured.
-    uint8_t echo_hash_size;           // 1 or 2 (matches getPathHashSize)
+    // repeater nearest to us that forwarded our packet. Up to 8 captured
+    // (8 x 3 bytes = 24 bytes max).
+    uint8_t echo_hash_size;           // 1, 2 or 3 (matches getPathHashSize)
     uint8_t echo_hash_count;          // distinct echo sources captured (<=8)
-    uint8_t echo_hashes[16];          // first-hop hash from each echo
+    uint8_t echo_hashes[24];          // first-hop hash from each echo
 };
 
 // ---- On-disk format for channel message persistence ----
@@ -2708,7 +2709,8 @@ protected:
                         // forwarded our packet. Store up to 8 distinct sources.
                         uint8_t ehsz = pkt->getPathHashSize();
                         uint8_t ehcnt = pkt->getPathHashCount();
-                        if (ehcnt > 0 && existing.echo_hash_count < 8) {
+                        if (ehcnt > 0 && existing.echo_hash_count < 8 &&
+                            (existing.echo_hash_count + 1) * ehsz <= sizeof(existing.echo_hashes)) {
                             existing.echo_hash_size = ehsz;
                             memcpy(&existing.echo_hashes[existing.echo_hash_count * ehsz],
                                    pkt->path, ehsz);
@@ -2817,9 +2819,9 @@ protected:
             // Capture path hashes from packet for path view
             m.msg_path_hash_size = pkt->getPathHashSize();
             m.msg_path_hash_count = pkt->getPathHashCount();
-            if (m.msg_path_hash_count > 8) m.msg_path_hash_count = 8;
+            if (m.msg_path_hash_count > 16) m.msg_path_hash_count = 16;
             uint8_t pb = m.msg_path_hash_count * m.msg_path_hash_size;
-            if (pb > 16) pb = 16;
+            if (pb > sizeof(m.msg_path_hashes)) pb = sizeof(m.msg_path_hashes);
             memcpy(m.msg_path_hashes, pkt->path, pb);
             // Clear echo fields (incoming messages don't have echoes)
             m.echo_hash_size = 0;

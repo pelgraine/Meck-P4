@@ -102,19 +102,24 @@ public:
             return 0;
         }
 
-        if (irq_status.all_flag.crc_error) {
-            SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::CRC_ERROR);
-            resetToRx();
-            return 0;
-        }
-
-        if (irq_status.all_flag.tx_rx_timeout) {
-            SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::TIMEOUT);
-            resetToRx();
+        // A failed reception (bad CRC, RX timeout, bad header): drop every
+        // flag it left behind -- including the PREAMBLE_DETECTED /
+        // HEADER_VALID bits from the same packet -- and re-arm RX. Clearing
+        // only the one bit, as before, left the others set until the next
+        // packet (and a stuck HEADER_ERROR re-armed RX on every loop pass).
+        if (irq_status.all_flag.crc_error || irq_status.all_flag.tx_rx_timeout ||
+            irq_status.lora_reg_flag.header_error) {
+            clearAndResetRx();
             return 0;
         }
 
         if (!irq_status.all_flag.rx_done) {
+            // Only PREAMBLE_DETECTED / HEADER_VALID: a packet is in flight.
+            // Leave the receiver alone; isReceiving() reports the state and
+            // expires the flags if they go stale (upstream #3036 / #2977).
+            if (irq_status.all_flag.preamble_detected || irq_status.lora_reg_flag.header_valid) {
+                return 0;
+            }
             clearAndResetRx();
             return 0;
         }
@@ -122,8 +127,7 @@ public:
         // Read received data
         uint8_t recv_len = SX1262->receive_data(bytes);
         if (recv_len == 0 || recv_len > sz) {
-            SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
-            resetToRx();
+            clearAndResetRx();
             return 0;
         }
 
@@ -134,8 +138,10 @@ public:
             _lastSNR = (float)pm.lora.snr;
         }
 
-        SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
-        resetToRx();
+        // Packet consumed: clear all of its flags (RX_DONE plus the
+        // preamble / header bits) so isReceiving() does not keep reporting
+        // it, then re-arm.
+        clearAndResetRx();
 
         _pktRecv++;
         return (int)recv_len;
@@ -234,11 +240,61 @@ public:
         return _inReceiveMode;
     }
 
+    // Is a packet arriving? Ported from upstream MeshCore v1.17.1
+    // CustomSX1262::isReceiving() (PRs #3036, #2977 and follow-ups): the
+    // PREAMBLE_DETECTED and HEADER_VALID IRQ bits (enabled by armRxIrqMask)
+    // report a packet in flight, and each is expired on a deadline if the
+    // reception never progresses -- preamble without a header within
+    // _preambleMillis, or header without RX_DONE within _maxPayloadMillis --
+    // so a stuck flag cannot hold the radio "busy" until the next packet.
+    // The previous BUSY-pin reading is kept as an additional signal only.
     bool isReceiving() override {
-        // Check if radio is currently mid-packet (BUSY high during RX)
-        // On SX1262, BUSY pin goes high during packet reception
-        // This is a direct GPIO read, not via XL9535
-        return (gpio_get_level((gpio_num_t)SX1262_BUSY) == 1) && _inReceiveMode;
+        if (!_inReceiveMode) return false;
+#if defined(MECK_RX_DUTY_CYCLE)
+        // Asleep between listen windows: nothing can be arriving, and an SPI
+        // read here would wake the chip.
+        if (_dutyState == DutyState::ASLEEP) return false;
+#endif
+        const bool busy = (gpio_get_level((gpio_num_t)SX1262_BUSY) == 1);
+
+        const uint16_t irq = SX1262->get_irq_flag();
+        const bool preamble = (irq & IRQ_PREAMBLE_DETECTED) != 0;
+        const bool header   = (irq & IRQ_HEADER_VALID) != 0;
+        const bool hdrErr   = (irq & IRQ_HEADER_ERROR) != 0;
+        const uint64_t now  = esp_timer_get_time();
+
+        if (hdrErr) {
+            clearIrqBits(IRQ_PREAMBLE_DETECTED | IRQ_SYNC_WORD_VALID | IRQ_HEADER_VALID | IRQ_HEADER_ERROR);
+            clearRxActivity();
+            return busy;
+        }
+        if (!header && _headerSeen) {
+            // Something cleared the header flag (recvRaw took the packet); reset.
+            clearRxActivity();
+            return busy;
+        }
+        if (header) {
+            if (!_headerSeen) { _headerSeen = true; _activityAtUs = now; }
+            if (now - _activityAtUs > (uint64_t)_maxPayloadMillis * 1000ULL) {
+                printf("P4SX1262Radio: clearing header IRQ after %ums\n", (unsigned)_maxPayloadMillis);
+                clearIrqBits(IRQ_PREAMBLE_DETECTED | IRQ_SYNC_WORD_VALID | IRQ_HEADER_VALID | IRQ_HEADER_ERROR);
+                clearRxActivity();
+                return busy;
+            }
+            return true;
+        }
+        if (preamble) {
+            if (_activityAtUs == 0) _activityAtUs = now;
+            if (now - _activityAtUs > (uint64_t)_preambleMillis * 1000ULL) {
+                printf("P4SX1262Radio: clearing preamble IRQ after %ums\n", (unsigned)_preambleMillis);
+                clearIrqBits(IRQ_PREAMBLE_DETECTED);
+                _activityAtUs = 0;
+                return busy;
+            }
+            return true;
+        }
+        clearRxActivity();
+        return busy;
     }
 
     float getLastRSSI() const override { return _lastRSSI; }
@@ -292,9 +348,36 @@ public:
         _currentBW = bw;
         _currentSF = sf;
         _currentCR = cr;
+        computeIrqDeadlines();
 #if defined(MECK_RX_DUTY_CYCLE)
         computeDutyPeriods();
 #endif
+    }
+
+    // IRQ bits (SX126x table 13-29). The driver's Irq_Mask_Flag carries the
+    // same values; raw bits are used where several are combined.
+    static constexpr uint16_t IRQ_TX_DONE           = 0x0001;
+    static constexpr uint16_t IRQ_RX_DONE           = 0x0002;
+    static constexpr uint16_t IRQ_PREAMBLE_DETECTED = 0x0004;
+    static constexpr uint16_t IRQ_SYNC_WORD_VALID   = 0x0008;
+    static constexpr uint16_t IRQ_HEADER_VALID      = 0x0010;
+    static constexpr uint16_t IRQ_HEADER_ERROR      = 0x0020;
+    static constexpr uint16_t IRQ_CRC_ERROR         = 0x0040;
+    static constexpr uint16_t IRQ_TIMEOUT           = 0x0200;
+
+    // IRQ mask while listening. The driver's set_irq_pin_mode() fixes the
+    // chip's IRQ mask at TX_DONE | RX_DONE | HEADER_ERROR | CRC_ERROR |
+    // TIMEOUT (0x0263), which never reports a preamble or a valid header,
+    // so nothing but BUSY could say a packet was in flight. PREAMBLE_DETECTED
+    // and HEADER_VALID are added here (upstream MeshCore PR #3036); DIO1
+    // keeps RX_DONE, though nothing reads it -- the IRQ register is polled
+    // over SPI. Called wherever RX is (re-)armed: resetToRx() and
+    // meck_radio_attach() in target.cpp.
+    static constexpr uint16_t RX_IRQ_MASK = IRQ_TX_DONE | IRQ_RX_DONE | IRQ_HEADER_ERROR |
+                                            IRQ_CRC_ERROR | IRQ_TIMEOUT |
+                                            IRQ_PREAMBLE_DETECTED | IRQ_HEADER_VALID;
+    void armRxIrqMask() {
+        SX1262->set_dio_irq_params(RX_IRQ_MASK, IRQ_RX_DONE, 0, 0);
     }
 
 private:
@@ -315,6 +398,47 @@ private:
     // throttles sampling to ~2 s intervals.
     int      _noiseFloor;
     uint64_t _lastFloorSampleUs;
+
+    // Receive-in-progress tracking for isReceiving() (see there). Deadlines
+    // are refreshed by computeIrqDeadlines() from the current LoRa params;
+    // the initial values are upstream's defaults.
+    uint32_t _preambleMillis   = 66;
+    uint32_t _maxPayloadMillis = 3934;
+    uint64_t _activityAtUs     = 0;
+    bool     _headerSeen       = false;
+
+    void clearRxActivity() { _activityAtUs = 0; _headerSeen = false; }
+
+    // Clear a combination of IRQ bits. The driver's clear_irq_flag() takes
+    // one Irq_Mask_Flag; the enum's values are the raw bits, so a combined
+    // value cast to it clears them all in one write.
+    void clearIrqBits(uint16_t bits) {
+        SX1262->clear_irq_flag((Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag)bits);
+    }
+
+    // Stuck-IRQ deadlines from the current params: upstream's
+    // RadioLibWrapper::calcMaxPacketMillis() (PR #2977) re-derived on our own
+    // airtime maths and preamble length (see target.cpp radio_set_params).
+    // preamble: (preamble + 8) symbols plus 6.25 (SF5/6) or 4.25 symbols for
+    // sync word / SFD / header. payload: a max-size packet at the current
+    // settings minus that, rescaled to CR 4/8 so any sender's packet fits.
+    void computeIrqDeadlines() {
+        if (_currentBW <= 0.0f || _currentSF == 0) return;
+        float bw_hz   = _currentBW * 1000.0f;
+        float tsym_us = (float)(1UL << _currentSF) * 1e6f / bw_hz;
+        uint32_t preamble_symbols = (_currentSF <= 8) ? 32u : 16u;
+        float sf_coeff = (_currentSF == 5 || _currentSF == 6) ? 6.25f : 4.25f;
+        uint32_t preamble_us = (uint32_t)(((float)preamble_symbols + 8.0f + sf_coeff) * tsym_us);
+        uint32_t total_us    = getEstAirtimeFor(MAX_TRANS_UNIT) * 1000u;
+        // fallback of 4 s if the airtime estimate is unusable (it never is:
+        // getEstAirtimeFor includes the preamble)
+        uint32_t payload_us  = (total_us > preamble_us) ? (total_us - preamble_us) : (4000000u - preamble_us);
+        if (_currentCR >= 5 && _currentCR < 8) payload_us = (payload_us * 8u) / _currentCR;
+        _preambleMillis   = (preamble_us + 999u) / 1000u;
+        _maxPayloadMillis = (payload_us + 999u) / 1000u;
+        printf("P4SX1262Radio: irq deadlines preamble=%ums payload=%ums\n",
+               (unsigned)_preambleMillis, (unsigned)_maxPayloadMillis);
+    }
 
 #if defined(MECK_RX_DUTY_CYCLE)
     // ---- MCU-driven RX duty cycle (approach B) ----
@@ -394,16 +518,14 @@ private:
 
     void resetToRx() {
         SX1262->start_lora_transmit(Cpp_Bus_Driver::Sx126x::Chip_Mode::RX);
-        SX1262->set_irq_pin_mode(
-            Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE,
-            Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::DISABLE,
-            Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::DISABLE
-        );
+        armRxIrqMask();
         SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
     }
 
+    // Drop every IRQ flag and the receive-progress state, then re-arm RX.
     void clearAndResetRx() {
-        SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::RX_DONE);
+        SX1262->clear_irq_flag(Cpp_Bus_Driver::Sx126x::Irq_Mask_Flag::ALL);
+        clearRxActivity();
         resetToRx();
     }
 };
