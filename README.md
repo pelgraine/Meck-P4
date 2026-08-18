@@ -331,7 +331,7 @@ Tap **`abc`** to switch back to letters.
 
 The two message-composer keyboards (channel and DM compose) have an **emoji key** just to the right of the space bar. Tap it to open a scrollable picker; tap an emoji to insert it and the picker closes, or tap outside the picker to dismiss without inserting.
 
-Emoji render in colour both in the picker and inline in your messages, drawn from a set of Twemoji images baked into the firmware. Codepoints outside that set fall back to the normal text font.
+Emoji render in colour in the picker, inline in messages, and in node and contact names, drawn from a set of Twemoji images baked into the firmware: 195 emoji plus the AU and EE flags as of v0.7.3, which added 93 from the Meck Watch's set (including the everyday red heart, which was previously dropped). Codepoints outside that set fall back to the normal text font. The set is generated from `tools/p4_emoji_registry.txt` by `tools/bake_p4_emoji.py`; sequences joined with ZWJ (for example the pirate flag) are not supported.
 
 -----
 
@@ -509,16 +509,25 @@ and duplicated the apostrophe instead.
 With no text field focused, the keyboard drives the whole UI:
 
 **Esc is Back, everywhere.** On any screen, Esc presses that screen's Back
-(or an open overlay's Cancel) button, running exactly the handler a tap
-would. On the home screen it does nothing (there is nowhere back to go).
+(or an open overlay's Cancel or Close) button, running exactly the handler
+a tap would. On the home screen it does nothing (there is nowhere back to
+go).
 
 **Up/Down scroll or select.** On most screens they page the main list up
 and down, the same movement a vertical swipe produces. On the Settings
-screen, the channel picker, and the Canned Messages sub-screen they
-instead move a thin white selection ring row by row, scrolling just enough
-to keep the ringed row in view, and **Enter** activates the ringed row --
-tapping it without touching the screen. The ring only appears once you
-use the keys, and disappears when you leave the screen or touch it.
+screen, the channel picker, the Canned Messages sub-screen, and the
+Repeater Admin Settings and command lists they instead move a thin white
+selection ring row by row, scrolling just enough to keep the ringed row in
+view, and **Enter** activates the ringed row -- tapping it without touching
+the screen. On the channel and DM message screens the ring moves bubble by
+bubble, with the compose box as the last stop (a first **Up** starts on
+the newest message, a first **Down** on the compose box): **Enter** on a
+bubble opens its [Path View](#path-view) -- or the Retry dialog for a
+failed send -- exactly as a touch long-press does, and **Enter** on the
+compose box starts typing. While a Path View, Retry dialog or Repeater
+Admin prompt is open, Up/Down ring its buttons, Enter presses the ringed
+one and Esc closes it. The ring only appears once you use the keys, and
+disappears when you leave the screen or touch it.
 
 **Left/Right** cycle the contact filter on the Contacts screen, and page
 the home screens (wrapping at the ends, like swipes).
@@ -590,7 +599,7 @@ so messages survive reboots when an SD card is present.
   - **✓ Heard N Repeats** – one or more repeaters relayed the message back. The count shows how many echoes were received, confirming the message propagated through the mesh.
   - **✕ Failed** – 18 seconds elapsed with no repeater echo. The message was transmitted but no repeater confirmed receipt. This typically means no repeater is in range, or the channel’s radio parameters don’t match the repeater’s.
 
-**Long-press outgoing messages:** long-press any outgoing message to see which repeaters acknowledged it. If the message failed, a **Retry Send** option re-queues it with a fresh timestamp. The recipient may see a duplicate if the original arrives late via a slow path.
+**Long-press outgoing messages:** long-press any outgoing message to see which repeaters acknowledged it. If the message failed, a **Retry Send** option re-queues it with a fresh timestamp. The recipient may see a duplicate if the original arrives late via a slow path. Long-pressing an incoming message opens its [Path View](#path-view). With the K270 keyboard, ring a bubble with Up/Down and press Enter for the same result.
 
 -----
 
@@ -728,7 +737,11 @@ On successful login, the admin home shows a persistent banner across the top —
 |**Status**     |Full RepeaterStats view: battery, clock-at-login, uptime, TX/RX airtime, last RSSI/SNR, noise floor, packet counts, duplicates, errors, queue length, debug flags. A Refresh button re-issues the request.|
 |**Send Advert**|Single big button that triggers the repeater to broadcast an advertisement. Status line goes yellow during in-flight, green on success with the repeater’s response text, red on send failure.            |
 |**Cmd Line**   |Free-form 100-character text input + Send button. Virtual keyboard slides up on focus. Scrollback shows command in cyan and response in white (or red on failure). Trimmed at 50 entries.                 |
-|**Settings**   |Scrollable menu list of setting categories — Position, Sync Clock, Admin Password, Guest Password, Change Identity Key, Manage Regions, Neighbours, Repeat Settings. Guest sessions see only Neighbours.  |
+|**Settings**   |Twelve command categories ported from the Meck Watch's repeater admin: Clock & Adverts, Neighbours, Get Config, Set Config, Bridge, GPS, Sensors, Regions, Powersaving & Power, Logs & Stats, Reboot & Power Off, Firmware & Device Info. Guest sessions see Neighbours and Firmware & Device Info.|
+
+**Settings categories.** Each category opens a list of commands covering the MeshCore v1.17.1 repeater CLI, including the newer `cad`, `radio.fem.rxgain` / `radio.fem.txgain`, `extra.sf` and `pwrmgt.bootreason` keys. The cue at the right of each row says what a tap does: **send** sends the command straight away; **...** prompts for a parameter (the on-screen keyboard opens, or type on the K270; Enter sends, Esc cancels); **on/off** offers a two-button picker; **confirm** asks first, which guards anything destructive -- reboot, `start ota`, power off, `log erase`, `clear stats`, the admin password and the private key. Neighbours and Firmware Info keep their dedicated screens.
+
+The repeater's reply is shown verbatim on a response panel: a green **Reply:** for a normal answer, or a red **Repeater returned an error:** when the text reads as one -- which is what a repeater without GPS, sensors, logging or power management, or one that does not know a newer key, sends back. If nothing arrives within the mesh's own round-trip estimate (plus five seconds) the panel reports **Timed out. No reply from repeater.**; the commands that never reply (reboot, `clkreboot`, `start ota`, power off) report **Command sent. No reply expected.** instead. Commands that only work on the repeater's own serial console (`log` status, `stats-*`, `erase`) are deliberately not listed; the free-form Cmd Line remains for anything else.
 
 **Single-session policy:** logging into a new repeater tears down the prior session. **Remember Password** persists the entered password for that contact, so subsequent visits skip the prompt.
 
@@ -836,7 +849,9 @@ Useful for diagnosing where in a chain a route is breaking down — if you get r
 
 ## Path View
 
-Long-pressing an incoming message opens **Path View**, which displays the routing path that message took through the mesh, showing each hop in the route.
+Long-pressing an incoming channel message opens **Path View**, which displays the routing path that message took through the mesh: the hop count and hash size, then each hop's hash and, where that repeater is in your contacts, its name. Routes of up to **16 hops** are shown in full at any path-hash size (1, 2 or 3 bytes; a 3-byte hash is printed in full). The panel grows to fit the route -- in portrait all 16 hops fit without scrolling -- and scrolls beyond that. **Copy Path** pastes the text into the compose box and **Reply** starts a reply to the sender. Long-pressing one of your own messages shows the **Heard by** list instead: the repeaters that echoed it (up to eight), or the Retry dialog if the send failed.
+
+With the K270 keyboard, ring a bubble with **Up/Down** and press **Enter** to open the same view; Up/Down then ring its buttons and **Esc** closes it (see [Navigating without touching the screen](#navigating-without-touching-the-screen)).
 
 -----
 
@@ -1458,20 +1473,20 @@ no particular timeframes attached.
 - [x] Tools script for one-command merged release builds
 - [x] **Direct messaging** — DM compose, DM conversation view with ACK tracking, DM Inbox in the channel picker with per-contact unread badges, per-contact persistence to SD
 - [x] **Roomserver access** — login via Admin button on Room contacts, post timeline as left-aligned bubbles with author + timestamp + hops, live re-render, composer, per-room persistence to SD
-- [x] **Repeater admin** — login (admin + guest sessions), Status / Send Advert / Cmd Line / Settings menu with Remember Password
+- [x] **Repeater admin** — login (admin + guest sessions), Status / Send Advert / Cmd Line / Settings menu with Remember Password; as of v0.7.3 Settings holds twelve table-driven command categories covering the MeshCore v1.17.1 CLI, with parameter prompts, on/off pickers, confirmations, verbatim replies with error and timeout reporting. See [Repeater Admin](#repeater-admin).
 - [x] **Trace route** — standalone Trace Path screen with manual hex hop entry and per-hop SNR results
 - [x] **Per-contact path editor** — Edit Path button on contact detail with Save / Reset to Flood, supports 1-byte and 2-byte path hash modes
 - [x] **Map screen** — slippy-tile viewer over `/sdcard/tiles/{z}/{x}/{y}.png` with pan, zoom, GPS dot, contact markers, filter modal
 - [x] **Config export to SD** — Settings → Export Config writes a MeshCore-app-compatible JSON file with selectable sections
 - [x] **Debug logs to SD** — Settings → Debug Logs → Start redirects printf to a per-session log file
 - [x] **Custom radio parameters** — editable Frequency, Bandwidth, Spreading Factor (text edit with confirm button) and Coding Rate (tap to cycle) in Settings. Radio Preset row shows “Custom” when values diverge from any preset.
-- [x] **Region scope** — device-wide default region in Settings, per-channel scope via Settings → Channels. Scope key derived via SHA-256, matching upstream Meck v1.7+ / MeshCore v1.15+ protocol. Repeater region management supported via CLI commands in the Repeater Admin screen.
+- [x] **Region scope** — device-wide default region in Settings, per-channel scope via Settings → Channels. Scope key derived via SHA-256, matching upstream Meck v1.7+ / MeshCore v1.15+ protocol. Repeater region management is available in Repeater Admin under Settings > Regions, and via the free-form Cmd Line.
 - [x] **Channels settings sub-screen** — Settings → Channels with per-channel region scope, notification preferences (All / Mentions / None), notification tone picker, add and delete channels
 - [x] **Notification sounds** — 7 bundled MP3 tones copied to SD on first boot, per-channel tone assignment via picker, automatic playback at 80% volume on new messages (skips if audio player is active), tone config persisted to SD
 - [x] **Position adverts** — encode GPS position into outgoing adverts so other nodes see your location on their Maps screen
 - [x] **Share position** — + button on channel/DM compose to send current position as a message
 - [x] **Position settings sub-screen** — Settings > Position with manual lat/lon entry, share position mode cycle (Off / Manual / Auto-GPS), copy position button, GPS auto-update every 15 minutes
-- [x] **Path view** — view message routing paths through the mesh via the + button
+- [x] **Path view** — long-press an incoming message to see its route through the mesh; as of v0.7.3 up to 16 hops at any hash size, in a panel that grows and scrolls, reachable from the K270 keyboard. See [Path View](#path-view).
 - [x] **Private channels** — channels without a # prefix generate a random secret; share via DM with contact picker, pending invite accept/dismiss
 - [x] **Voice over LoRa infrastructure** — Codec2 1200bps encode/decode, ES8311 mic capture, VE3 protocol, recording/playback/send UI (infrastructure complete, not yet enabled)
 - [x] **Picture over LoRa infrastructure** — chunked image transfer protocol (infrastructure complete, not yet enabled)
@@ -1487,8 +1502,15 @@ no particular timeframes attached.
 - [x] **Cyrillic keyboard** — ЙЦУКЕН layout added to the KB Layout cycle (Russian / Bulgarian).
 - [x] **M5Stack CardKB support** — optional physical I2C keyboard for the message composers, gated behind the `MECK_CARDKB` build flag. See [CardKB](#cardkb).
 - [x] **Screen orientation** — Portrait / Landscape toggle in Settings with a live rebuild. See [Screen Orientation](#screen-orientation).
+- [x] **Keyboard bubble ring** (v0.7.3) — on the message screens Up/Down ring the bubbles and the compose box, Enter opens Path View / Retry or starts typing, Esc closes; the Path View, Retry and Repeater Admin overlays are keyboard-driven too. See [Navigating without touching the screen](#navigating-without-touching-the-screen).
+- [x] **Emoji set expanded** (v0.7.3) — 195 emoji plus the AU and EE flags, adding the Meck Watch's set (including the red heart); regenerable with `tools/bake_p4_emoji.py`. See [Emoji](#emoji).
+- [x] **SX1262 receive handling aligned with MeshCore v1.17.x** (v0.7.3) — the receiver now sees a packet from its preamble and a stalled preamble or header no longer holds up sending until the next packet (upstream PRs #3036 and #2977, re-implemented for the P4's own radio driver).
+- [x] **MeshCore core sync** (v0.7.3) — malformed `PAYLOAD_TYPE_PATH` packets are rejected (MeshCore v1.17.0).
 
 **Pending:**
+
+- [ ] LR2021 radio support — LilyGo has produced a T-Display P4 variant carrying Semtech's LR2021 (listed alongside the SX1262 in LilyGo's hardware table); support is next in line
+- [ ] Ethernet companion over the P4's onboard IP101GRI PHY, following upstream MeshCore's Ethernet support
 
 - [ ] Voice over LoRa — enable Codec2 voice messaging end-to-end (infrastructure is complete, UI and protocol are in place, pending final integration and testing)
 - [ ] Picture over LoRa — enable image transfer end-to-end (infrastructure is complete, pending final integration)
