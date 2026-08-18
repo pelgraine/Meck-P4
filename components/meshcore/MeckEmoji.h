@@ -23,9 +23,10 @@ extern "C" {
 void meck_emoji_init(void);
 
 // True if cp is a codepoint Meck can render as an emoji, so strip_unrenderable
-// keeps it instead of dropping it. Covers the 77 single-codepoint emoji, the
-// AU flag's two regional indicators (U+1F1E6, U+1F1FA), and the VS-16 emoji
-// presentation selector (U+FE0F).
+// keeps it instead of dropping it. Covers every codepoint in the generated
+// table (meck_emoji_gen.h, baked by tools/bake_p4_emoji.py from
+// tools/p4_emoji_registry.txt), the regional indicators of the baked flag
+// pairs, and the VS-16 emoji presentation selector (U+FE0F).
 bool meck_emoji_is_renderable(uint32_t cp);
 
 #ifdef __cplusplus

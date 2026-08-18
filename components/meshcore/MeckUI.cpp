@@ -19938,10 +19938,29 @@ static lv_obj_t *meck_msg_ring_target_at(int idx) {
     return NULL;
 }
 
+// Painting the ring. A bubble sits flush inside a zero-padding row that
+// clips its children, so an outline (drawn outside the bounds, as the row
+// rings use) is cut off; the bubble ring is therefore a 3px white border,
+// drawn inside the bubble's own edge (bubbles never use their border for
+// anything else). The composer is a screen child with room around it and
+// keeps the outline the other rings use.
+static void meck_msg_ring_paint(lv_obj_t *tgt, bool on) {
+    if (!tgt) return;
+    if (tgt == ta_compose) {
+        lv_obj_set_style_outline_width(tgt, on ? 3 : 0, 0);
+        if (on) {
+            lv_obj_set_style_outline_color(tgt, lv_color_white(), 0);
+            lv_obj_set_style_outline_pad(tgt, 2, 0);
+        }
+    } else {
+        lv_obj_set_style_border_width(tgt, on ? 3 : 0, 0);
+        if (on) lv_obj_set_style_border_color(tgt, lv_color_white(), 0);
+    }
+}
+
 static void meck_msg_ring_clear(void) {
     if (g_msg_ring_idx >= 0) {
-        lv_obj_t *old = meck_msg_ring_target_at(g_msg_ring_idx);
-        if (old) lv_obj_set_style_outline_width(old, 0, 0);
+        meck_msg_ring_paint(meck_msg_ring_target_at(g_msg_ring_idx), false);
     }
     g_msg_ring_idx = -1;
 }
@@ -19959,14 +19978,11 @@ static void meck_msg_ring_step(int delta) {
         if (next < 0) next = 0;
     } else {
         next = ((g_msg_ring_idx + delta) % total + total) % total;
-        lv_obj_t *old = meck_msg_ring_target_at(g_msg_ring_idx);
-        if (old) lv_obj_set_style_outline_width(old, 0, 0);
+        meck_msg_ring_paint(meck_msg_ring_target_at(g_msg_ring_idx), false);
     }
     lv_obj_t *tgt = meck_msg_ring_target_at(next);
     if (!tgt) { g_msg_ring_idx = -1; return; }
-    lv_obj_set_style_outline_width(tgt, 3, 0);
-    lv_obj_set_style_outline_color(tgt, lv_color_white(), 0);
-    lv_obj_set_style_outline_pad(tgt, 2, 0);
+    meck_msg_ring_paint(tgt, true);
     lv_obj_scroll_to_view(tgt, LV_ANIM_ON);
     g_msg_ring_idx = next;
 }

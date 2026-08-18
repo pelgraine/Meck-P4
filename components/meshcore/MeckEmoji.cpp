@@ -23,17 +23,17 @@ extern "C" {
 }
 
 #define VS16  0xFE0F    // variation selector-16 (emoji presentation)
-#define RI_A  0x1F1E6   // regional indicator A   (AU flag = A + U)
-#define RI_U  0x1F1FA   // regional indicator U
 
 // imgfont path callback. Maps a codepoint to its image at the size bound to
 // this font instance (the size index is passed as user_data). Returns NULL
 // for anything unsupported, letting LVGL continue down the font chain.
 //
-// LVGL advances one codepoint at a time and does not consume unicode_next on
-// our behalf, so trailing combiners (VS-16, the second regional indicator)
-// are mapped to a 1px transparent spacer to keep them from rendering as a
-// box after the base emoji.
+// Flags are regional-indicator pairs (MECK_EMOJI_PAIR_CP, generated from the
+// registry): the first indicator, seen with the second as unicode_next, draws
+// the flag. LVGL advances one codepoint at a time and does not consume
+// unicode_next on our behalf, so trailing combiners -- VS-16 and the second
+// indicator of a pair -- are mapped to a 1px transparent spacer to keep them
+// from rendering as a box after the base emoji.
 static const void* meck_emoji_path_cb(const lv_font_t* font, uint32_t unicode,
                                       uint32_t unicode_next, int32_t* offset_y,
                                       void* user_data) {
@@ -41,11 +41,15 @@ static const void* meck_emoji_path_cb(const lv_font_t* font, uint32_t unicode,
     int si = (int)(intptr_t)user_data;
     *offset_y = 0;
 
-    if (unicode == VS16 || unicode == RI_U) return &emoji_blank;
+    if (unicode == VS16) return &emoji_blank;
 
-    if (unicode == RI_A) {
-        if (unicode_next == RI_U) return MECK_EMOJI_FLAG_AU[si];
-        return NULL;
+    for (int p = 0; p < MECK_EMOJI_PAIR_COUNT; p++) {
+        if (MECK_EMOJI_PAIR_CP[p][0] == unicode && MECK_EMOJI_PAIR_CP[p][1] == unicode_next) {
+            return MECK_EMOJI_PAIR_IMG[si][p];
+        }
+    }
+    for (int p = 0; p < MECK_EMOJI_PAIR_COUNT; p++) {
+        if (MECK_EMOJI_PAIR_CP[p][1] == unicode) return &emoji_blank;
     }
 
     for (int j = 0; j < MECK_EMOJI_COUNT; j++) {
@@ -81,6 +85,9 @@ void meck_emoji_init(void) {
 
 bool meck_emoji_is_renderable(uint32_t cp) {
     if (cp == VS16) return true;
+    for (int p = 0; p < MECK_EMOJI_PAIR_COUNT; p++) {
+        if (MECK_EMOJI_PAIR_CP[p][0] == cp || MECK_EMOJI_PAIR_CP[p][1] == cp) return true;
+    }
     for (int j = 0; j < MECK_EMOJI_COUNT; j++) {
         if (MECK_EMOJI_CP[j] == cp) return true;
     }
