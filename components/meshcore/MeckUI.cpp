@@ -11138,6 +11138,12 @@ static void show_clear_history_prompt(int ch_idx) {
 }
 
 static void on_picker_row_long_press(lv_event_t *e) {
+    // A long press still produces LV_EVENT_CLICKED when the finger lifts,
+    // which would open the channel under the prompt. Tell the input device
+    // to swallow the rest of this press (no-op on the keyboard path, which
+    // sends the event synthetically with no active indev).
+    lv_indev_t *indev = lv_indev_active();
+    if (indev) lv_indev_wait_release(indev);
     show_clear_history_prompt((int)(intptr_t)lv_event_get_user_data(e));
 }
 
