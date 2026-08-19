@@ -350,6 +350,9 @@ struct P4ChannelMessage {
     uint8_t echo_hash_size;           // 1, 2 or 3 (matches getPathHashSize)
     uint8_t echo_hash_count;          // distinct echo sources captured (<=8)
     uint8_t echo_hashes[24];          // first-hop hash from each echo
+    // Region scope marker for display (session only, never persisted; see
+    // Meck::resolveScopeMarker for the encoding). 0 = no scope information.
+    uint8_t scope_idx;
 };
 
 // ---- On-disk format for channel message persistence ----
@@ -725,6 +728,7 @@ public:
                 m.msg_path_hash_count = 0;
                 m.echo_hash_size = 0;
                 m.echo_hash_count = 0;
+                m.scope_idx = scopeMarkerForSend(channel_idx);  // the scope this send goes out under
                 strncpy(m.text, echo, P4_MSG_TEXT_LEN - 1);
                 m.text[P4_MSG_TEXT_LEN - 1] = '\0';
                 if (_msg_count_ch[channel_idx] < P4_MSG_PER_CHANNEL) _msg_count_ch[channel_idx]++;
@@ -2024,6 +2028,7 @@ public:
                 // predate a table reshuffle.
                 m.channel_idx = ch;
                 m.path_len = buf[i].path_len;
+                m.scope_idx = 0;  // region scope is session-only, not stored on SD
                 // heard_count restored from schema v2 (or zero on a v1
                 // record, since v1's byte at this offset was reserved zero).
                 m.heard_count = buf[i].heard_count;
@@ -2108,6 +2113,110 @@ public:
     const char* getNodeName() const { return _prefs ? _prefs->node_name : "NONAME"; }
     P4NodePrefs* getNodePrefs() { return _prefs; }
 
+    // ---- Region scope recognition (display only, session only) ----
+    // Ported from Meck (T-Deck) / Meck Watch. A scoped flood carries a one-way
+    // transport code -- an HMAC over the payload keyed by the scope key -- so
+    // a region can only be recognised by trying candidate keys against the
+    // packet. Candidates, in order: the receiving channel's own scope, the
+    // device default scope, the other channels' scopes, then the fixed
+    // SCOPE_NAMES list shared with the other Meck firmwares (keys computed
+    // once on first use). The result is a one-byte marker on the message,
+    // never persisted:
+    //   0                      no scope information (unscoped, or loaded from SD)
+    //   1..SCOPE_COUNT         SCOPE_NAMES[marker - 1]
+    //   SCOPE_MK_DEFAULT       the device default scope (name read at display time)
+    //   SCOPE_MK_CHANNEL | i   channel i's own scope (name read at display time)
+    //   SCOPE_MK_UNKNOWN       scoped, but not one of the known regions
+    static const uint8_t SCOPE_COUNT      = 28;
+    static const uint8_t SCOPE_MK_DEFAULT = 0x40;
+    static const uint8_t SCOPE_MK_CHANNEL = 0x80;   // OR'd with the channel index (< 0x40)
+    static const uint8_t SCOPE_MK_UNKNOWN = 0xFE;
+    static constexpr const char* SCOPE_NAMES[SCOPE_COUNT] = {
+        "au",
+        "au-nsw", "au-vic", "au-act", "au-sa", "au-wa", "au-tas", "au-nt", "au-qld",
+        "au-nsw-syd", "au-nsw-bhs", "au-nsw-hun", "au-nsw-ntl", "au-nsw-wol",
+        "au-nsw-cw", "au-nsw-wsi", "au-nsw-syd-iwc",
+        "au-vic-mel", "au-vic-east", "au-vic-north", "au-vic-west",
+        "au-act-cbr",
+        "au-tas-hob",
+        "au-qld-bne",
+        "au-wa-per", "au-wa-fre", "au-wa-buy",
+        "au-hume"
+    };
+
+    // Which scope a received packet was sent under, as a marker (see above).
+    uint8_t resolveScopeMarker(const mesh::Packet* pkt, uint8_t ch_idx) {
+        if (!pkt || !pkt->hasTransportCodes()) return 0;
+        const uint16_t code = pkt->transport_codes[0];
+        TransportKey k;
+        ChannelDetails ch;
+        // 1. the receiving channel's own scope
+        if (ch_idx < MAX_GROUP_CHANNELS && getChannel(ch_idx, ch) && ch.scope_name[0] != '\0' &&
+            deriveScopeKey(ch.scope_name, k.key) && k.calcTransportCode(pkt) == code) {
+            return (uint8_t)(SCOPE_MK_CHANNEL | ch_idx);
+        }
+        // 2. the device default scope
+        if (_prefs && _prefs->default_scope_name[0] != '\0' &&
+            deriveScopeKey(_prefs->default_scope_name, k.key) && k.calcTransportCode(pkt) == code) {
+            return SCOPE_MK_DEFAULT;
+        }
+        // 3. the other channels' scopes
+        for (uint8_t i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            if (i == ch_idx) continue;
+            if (getChannel(i, ch) && ch.name[0] != '\0' && ch.scope_name[0] != '\0' &&
+                deriveScopeKey(ch.scope_name, k.key) && k.calcTransportCode(pkt) == code) {
+                return (uint8_t)(SCOPE_MK_CHANNEL | i);
+            }
+        }
+        // 4. the shared fixed list
+        if (!_scope_keys_ready) initScopeKeys();
+        for (uint8_t i = 0; i < SCOPE_COUNT; i++) {
+            if (_scope_keys[i].calcTransportCode(pkt) == code) return (uint8_t)(i + 1);
+        }
+        return SCOPE_MK_UNKNOWN;
+    }
+
+    // Marker for a message we send on channel ch_idx: its own scope if set,
+    // else the device default if set, else 0 (unscoped).
+    uint8_t scopeMarkerForSend(uint8_t ch_idx) {
+        ChannelDetails ch;
+        if (ch_idx < MAX_GROUP_CHANNELS && getChannel(ch_idx, ch) && ch.scope_name[0] != '\0') {
+            return (uint8_t)(SCOPE_MK_CHANNEL | ch_idx);
+        }
+        if (_prefs && _prefs->default_scope_name[0] != '\0') return SCOPE_MK_DEFAULT;
+        return 0;
+    }
+
+    // Label for a marker. Returns false when there is nothing to show
+    // (marker 0, or a device/channel scope that has since been cleared).
+    bool getScopeLabel(uint8_t marker, char* out, size_t out_len) {
+        if (!out || out_len == 0) return false;
+        out[0] = '\0';
+        if (marker == 0) return false;
+        if (marker == SCOPE_MK_UNKNOWN) { snprintf(out, out_len, "(reg unknown)"); return true; }
+        if (marker == SCOPE_MK_DEFAULT) {
+            if (_prefs && _prefs->default_scope_name[0] != '\0') {
+                snprintf(out, out_len, "%s", _prefs->default_scope_name);
+                return true;
+            }
+            return false;
+        }
+        if (marker & SCOPE_MK_CHANNEL) {
+            ChannelDetails ch;
+            uint8_t i = marker & 0x3F;
+            if (getChannel(i, ch) && ch.scope_name[0] != '\0') {
+                snprintf(out, out_len, "%s", ch.scope_name);
+                return true;
+            }
+            return false;
+        }
+        if (marker >= 1 && marker <= SCOPE_COUNT) {
+            snprintf(out, out_len, "%s", SCOPE_NAMES[marker - 1]);
+            return true;
+        }
+        return false;
+    }
+
     // ---- Contact flag mutation ----
     //
     // BaseChatMesh::addContact() appends a new slot — it does NOT upsert by
@@ -2168,6 +2277,16 @@ public:
     // ---- Region scope helpers ----
 
     // Derive a 16-byte scope key from a region name (e.g. "au-nsw").
+    // Keys for the fixed SCOPE_NAMES list, derived on first use.
+    TransportKey _scope_keys[SCOPE_COUNT];
+    bool _scope_keys_ready = false;
+    void initScopeKeys() {
+        for (uint8_t i = 0; i < SCOPE_COUNT; i++) {
+            deriveScopeKey(SCOPE_NAMES[i], _scope_keys[i].key);
+        }
+        _scope_keys_ready = true;
+    }
+
     // Prepends '#' and takes SHA-256, mirroring upstream MyMesh::deriveScopeKey
     // / TransportKeyStore::getAutoKeyFor. Writes the first 16 bytes of the
     // hash into keyOut. Returns true if name is non-empty and key was derived.
@@ -2280,6 +2399,7 @@ public:
             m.heard_count = 0;
             m.valid = true;
             m.file_offset = 0;
+            m.scope_idx = 0;  // DMs: region scope not tracked
             m.msg_path_hash_size = 0;
             m.msg_path_hash_count = 0;
             m.echo_hash_size = 0;
@@ -2823,6 +2943,8 @@ protected:
             uint8_t pb = m.msg_path_hash_count * m.msg_path_hash_size;
             if (pb > sizeof(m.msg_path_hashes)) pb = sizeof(m.msg_path_hashes);
             memcpy(m.msg_path_hashes, pkt->path, pb);
+            // Region scope of the sender (display only, session only)
+            m.scope_idx = resolveScopeMarker(pkt, ch_idx);
             // Clear echo fields (incoming messages don't have echoes)
             m.echo_hash_size = 0;
             m.echo_hash_count = 0;

@@ -1035,6 +1035,7 @@ struct BubbleRetryCtx {
     uint8_t  echo_hash_size;
     uint8_t  echo_hash_count;
     uint8_t  echo_hashes[24];       // up to 8 sources x 3 bytes (matches P4ChannelMessage)
+    uint8_t  scope_idx;             // region scope marker (see Meck::resolveScopeMarker)
     uint8_t  heard_count;
     char     sender[64];        // parsed sender name (received channel msgs
                                 // only; empty for sent and DM). Used to
@@ -3509,7 +3510,7 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
         //   else               → "✓ Heard N Repeats"
         char timebuf[32];
         format_local_time(msgs[i].timestamp, timebuf, sizeof(timebuf));
-        char meta[64];
+        char meta[128];
         meta[0] = '\0';
         if (is_sent) {
             uint8_t hc = msgs[i].heard_count;
@@ -3535,7 +3536,29 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
                          hops, hops == 1 ? "" : "s");
             }
         }
-        char footer[96];
+        // Byte mode (path hash size) and region scope, as the MeshCore app
+        // shows them beside the time and hop count. A received flood carries
+        // the sender's hash size in the upper bits of path_len; a route-direct
+        // packet (0xFF) and our own sends do not, so those show this device's
+        // mode (the rule Meck and Meck Watch use). The region is the marker
+        // resolved at reception (or, for our sends, the scope we used).
+        {
+            Meck* mesh = meck_get_instance();
+            P4NodePrefs* np = mesh ? mesh->getNodePrefs() : NULL;
+            unsigned own_mode = np ? (unsigned)np->path_hash_mode + 1u : 0u;
+            uint8_t pl = msgs[i].path_len;
+            unsigned bpm = (is_sent || pl == 0xFF) ? own_mode : (unsigned)((pl >> 6) + 1);
+            if (bpm >= 1 && bpm <= 3) {
+                size_t ml = strlen(meta);
+                snprintf(meta + ml, sizeof(meta) - ml, "  \xC2\xB7  %u-byte", bpm);
+            }
+            char scope[40];
+            if (mesh && mesh->getScopeLabel(msgs[i].scope_idx, scope, sizeof(scope))) {
+                size_t ml = strlen(meta);
+                snprintf(meta + ml, sizeof(meta) - ml, "  \xC2\xB7  %s", scope);
+            }
+        }
+        char footer[160];
         if (timebuf[0] && meta[0]) {
             snprintf(footer, sizeof(footer), "%s  ·  %s", timebuf, meta);
         } else if (timebuf[0]) {
@@ -3568,6 +3591,7 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
             // Path hashes (incoming)
             ctx->msg_path_hash_size  = msgs[i].msg_path_hash_size;
             ctx->msg_path_hash_count = msgs[i].msg_path_hash_count;
+            ctx->scope_idx = msgs[i].scope_idx;
             memcpy(ctx->msg_path_hashes, msgs[i].msg_path_hashes,
                    sizeof(ctx->msg_path_hashes));
             // Echo hashes (outgoing)
@@ -7509,7 +7533,15 @@ static void build_path_info_text(const BubbleRetryCtx *ctx) {
                             ctx->heard_count == 1 ? "" : "s");
         }
     } else {
-        // Incoming: show path as numbered list
+        // Incoming: region line first (scoped messages only; session-only,
+        // resolved at reception), then the path as a numbered list
+        {
+            Meck* mesh = meck_get_instance();
+            char scope[40];
+            if (mesh && mesh->getScopeLabel(ctx->scope_idx, scope, sizeof(scope))) {
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "Region: %s\n", scope);
+            }
+        }
         uint8_t hops = ctx->msg_path_hash_count;
         if (ctx->path_len == 0xFF) {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "Route: direct");
