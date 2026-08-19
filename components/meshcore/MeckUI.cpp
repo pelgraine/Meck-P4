@@ -3320,9 +3320,61 @@ static bool render_picture_in_bubble(lv_obj_t *bubble, const char *sd_path,
 // hash-into-CH_COLORS for visual identification across the conversation.
 // ============================================================================
 
+// ---- Paged window over the channel message ring ----
+// The ring holds P4_MSG_PER_CHANNEL messages per channel; the view renders a
+// window of MSG_WIN_PAGE * pages of them (newest first), at most
+// MSG_WIN_MAX_PAGES pages at a time. An "Earlier messages" row at the top
+// pages back (sliding the window once the cap is reached); a "Newer
+// messages" row at the bottom pages forward again. The copy buffer lives in
+// PSRAM. Both rows are keyboard-reachable through the bubble ring.
+#define MSG_WIN_PAGE       100
+#define MSG_WIN_MAX_PAGES  3
+static P4ChannelMessage* g_msg_win_buf       = NULL;   // PSRAM, MSG_WIN_PAGE * MSG_WIN_MAX_PAGES
+static uint8_t  g_msg_win_ch                 = 0xFF;   // channel the window state belongs to
+static int      g_msg_win_pages              = 1;      // pages rendered (1..MSG_WIN_MAX_PAGES)
+static int      g_msg_win_back               = 0;      // pages of newest messages scrolled past
+static int      g_msg_win_last_skip          = 0;      // skip used by the last rebuild
+static int      g_msg_win_last_n             = 0;      // rows rendered by the last rebuild
+static int      g_msg_win_anchor_idx         = -1;     // newest-first index to place at the top after the next rebuild
+static int32_t  g_msg_win_prev_scroll_y      = 0;      // scroll offset before the last rebuild
+
+static void on_msg_win_earlier(lv_event_t *e) {
+    (void)e;
+    // Keep the row that is currently at the top at the top.
+    g_msg_win_anchor_idx = g_msg_win_last_skip + g_msg_win_last_n - 1;
+    if (g_msg_win_pages < MSG_WIN_MAX_PAGES) g_msg_win_pages++;
+    else g_msg_win_back++;
+    rebuild_message_bubbles(g_msg_win_ch);
+}
+
+static void on_msg_win_newer(lv_event_t *e) {
+    (void)e;
+    // Keep the row that is currently at the bottom at the top, so reading
+    // continues downward into the newer page.
+    g_msg_win_anchor_idx = g_msg_win_last_skip;
+    if (g_msg_win_back > 0) g_msg_win_back--;
+    rebuild_message_bubbles(g_msg_win_ch);
+}
+
+static lv_obj_t *msg_win_make_nav_row(const char *text, lv_event_cb_t cb) {
+    lv_obj_t *btn = lv_button_create(obj_msg_scroll);
+    lv_obj_set_size(btn, (SCREEN_WIDTH - 20) - 20, 44);
+    lv_obj_set_style_bg_color(btn, lv_color_make(40, 40, 55), 0);
+    lv_obj_set_style_radius(btn, 10, 0);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    meck_set_font(lbl, &meck_montserrat_18, 0);
+    lv_obj_center(lbl);
+    return btn;
+}
+
 static void rebuild_message_bubbles(uint8_t ch_idx) {
     if (!obj_msg_scroll) return;
     Meck* mesh = meck_get_instance();
+    g_msg_win_prev_scroll_y = lv_obj_get_scroll_y(obj_msg_scroll);
 
     // Burn down old bubbles. obj_msg_scroll is the parent for everything
     // we render here, so a single clean() resets the whole conversation.
@@ -3335,8 +3387,27 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
     lv_obj_set_flex_flow(obj_msg_scroll, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(obj_msg_scroll, 6, 0);
 
-    P4ChannelMessage msgs[16];
-    int n = mesh ? mesh->getMessages(msgs, 16, ch_idx) : 0;
+    if (ch_idx != g_msg_win_ch) {            // another channel: start at the newest page
+        g_msg_win_ch = ch_idx;
+        g_msg_win_pages = 1;
+        g_msg_win_back = 0;
+        g_msg_win_anchor_idx = -1;
+    }
+    if (!g_msg_win_buf) {
+        g_msg_win_buf = (P4ChannelMessage*)heap_caps_malloc(
+            sizeof(P4ChannelMessage) * MSG_WIN_PAGE * MSG_WIN_MAX_PAGES, MALLOC_CAP_SPIRAM);
+        if (!g_msg_win_buf) printf("rebuild_message_bubbles: PSRAM window alloc failed\n");
+    }
+    int total = mesh ? mesh->getMessageCount(ch_idx) : 0;
+    int skip  = g_msg_win_back * MSG_WIN_PAGE;
+    if (skip >= total) { g_msg_win_back = 0; skip = 0; }   // ring shrank (cleared) under us
+    int want  = g_msg_win_pages * MSG_WIN_PAGE;
+    P4ChannelMessage* msgs = g_msg_win_buf;
+    int n = (mesh && msgs) ? mesh->getMessages(msgs, want, ch_idx, skip) : 0;
+    const bool have_older = (skip + n) < total;
+    const bool have_newer = skip > 0;
+    g_msg_win_last_skip = skip;
+    g_msg_win_last_n    = n;
 
     // Current UTC for send-timeout detection
     uint32_t now_utc = 0;
@@ -3371,6 +3442,12 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
     // the retry threshold and flip to "Failed". Written to g_chan_flip_deadline
     // after the loop so the UI timer can redraw exactly once when it is due.
     uint32_t next_flip_deadline = 0;
+
+    if (have_older) {
+        char mt[48];
+        snprintf(mt, sizeof(mt), LV_SYMBOL_UP "  Earlier messages (%d more)", total - (skip + n));
+        msg_win_make_nav_row(mt, on_msg_win_earlier);
+    }
 
     for (int i = n - 1; i >= 0; i--) {
         // Strip non-renderable Unicode from the raw text. After this step
@@ -3615,13 +3692,38 @@ static void rebuild_message_bubbles(uint8_t ch_idx) {
         }
     }
 
+    if (have_newer) {
+        char mt[48];
+        snprintf(mt, sizeof(mt), LV_SYMBOL_DOWN "  Newer messages (%d more)", skip);
+        msg_win_make_nav_row(mt, on_msg_win_newer);
+    }
+
     // Hold a non-NULL pointer in lbl_messages_body so the timer callback's
     // dirty-check still gates correctly. We point it at the last bubble
     // (which gets cleaned along with everything else on next rebuild).
     g_chan_flip_deadline = next_flip_deadline;
     lbl_messages_body = lv_obj_get_child(obj_msg_scroll, -1);
 
-    lv_obj_scroll_to_y(obj_msg_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+    // Scroll position. A paging row asked for a particular message to sit at
+    // the top; otherwise the newest page sits at the bottom as before, and a
+    // paged window keeps its offset so an incoming message does not yank
+    // the reader back down.
+    if (g_msg_win_anchor_idx >= 0) {
+        int k = (skip + n - 1) - g_msg_win_anchor_idx;      // oldest-first row of that message
+        g_msg_win_anchor_idx = -1;
+        if (k >= 0 && k < n) {
+            lv_obj_update_layout(obj_msg_scroll);
+            lv_obj_t *row = lv_obj_get_child(obj_msg_scroll, k + (have_older ? 1 : 0));
+            if (row) lv_obj_scroll_to_y(obj_msg_scroll, lv_obj_get_y(row), LV_ANIM_OFF);
+        } else {
+            lv_obj_scroll_to_y(obj_msg_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+        }
+    } else if (g_msg_win_back == 0 && g_msg_win_pages == 1) {
+        lv_obj_scroll_to_y(obj_msg_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+    } else {
+        lv_obj_update_layout(obj_msg_scroll);
+        lv_obj_scroll_to_y(obj_msg_scroll, g_msg_win_prev_scroll_y, LV_ANIM_OFF);
+    }
 }
 
 // ============================================================================
@@ -10979,6 +11081,124 @@ static void create_radio_picker_screen() {
 // Channel picker screen (lifted from old:759-906)
 // ============================================================================
 
+// ---- Clear channel message history (channel picker) ----
+// Touch long-press on a channel row, or X on a ringed row (the Meck T-Deck's
+// key for the same action), opens a confirmation prompt. Delete clears that
+// channel's stored messages on the device (ring, unread count, SD file);
+// the channel itself is kept. Keyboard-modal like the other overlays:
+// Up/Down ring Delete / Cancel, Enter presses, Esc cancels.
+static lv_obj_t *obj_clrhist_panel = NULL;
+static lv_obj_t *obj_clrhist_card  = NULL;
+static lv_obj_t *lbl_clrhist_body  = NULL;
+static int       g_clrhist_ch      = -1;
+
+static void on_clrhist_cancel(lv_event_t *e) {
+    (void)e;
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_clrhist_card);
+#endif
+    if (obj_clrhist_panel) lv_obj_add_flag(obj_clrhist_panel, LV_OBJ_FLAG_HIDDEN);
+    g_clrhist_ch = -1;
+}
+
+static void on_clrhist_delete(lv_event_t *e) {
+    (void)e;
+    Meck* mesh = meck_get_instance();
+    int ch = g_clrhist_ch;
+    on_clrhist_cancel(NULL);
+    if (!mesh || ch < 0) return;
+    mesh->clearChannelHistory((uint8_t)ch);
+    refresh_channel_picker();
+    // If that channel's conversation is the one built on scr_messages,
+    // rebuild it so it shows empty from the newest page.
+    if (!g_in_dm_mode && g_active_channel == (uint8_t)ch && obj_msg_scroll) {
+        g_msg_win_pages = 1;
+        g_msg_win_back  = 0;
+        rebuild_message_bubbles((uint8_t)ch);
+    }
+}
+
+static void show_clear_history_prompt(int ch_idx) {
+    Meck* mesh = meck_get_instance();
+    if (!mesh || !obj_clrhist_panel || ch_idx < 0 || ch_idx >= MAX_GROUP_CHANNELS) return;
+    ChannelDetails ch;
+    if (!mesh->getChannel((uint8_t)ch_idx, ch) || ch.name[0] == '\0') return;
+    g_clrhist_ch = ch_idx;
+    if (lbl_clrhist_body) {
+        char body[160];
+        snprintf(body, sizeof(body),
+                 "%s\n\n%d stored message%s will be removed from this device. "
+                 "The channel itself is kept.",
+                 ch.name, mesh->getMessageCount((uint8_t)ch_idx),
+                 mesh->getMessageCount((uint8_t)ch_idx) == 1 ? "" : "s");
+        lv_label_set_text(lbl_clrhist_body, body);
+    }
+    lv_obj_clear_flag(obj_clrhist_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(obj_clrhist_panel);
+}
+
+static void on_picker_row_long_press(lv_event_t *e) {
+    show_clear_history_prompt((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+// Built by create_channel_picker_screen (so it is rebuilt with the screen on
+// an orientation change).
+static void create_clear_history_prompt() {
+    obj_clrhist_panel = lv_obj_create(scr_channel_picker);
+    lv_obj_set_size(obj_clrhist_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_clrhist_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_clrhist_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_clrhist_panel, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(obj_clrhist_panel, 0, 0);
+    lv_obj_add_flag(obj_clrhist_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_clrhist_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_clrhist_panel, LV_SCROLLBAR_MODE_OFF);
+
+    const int card_w = SCREEN_WIDTH - 60;
+    const int inner  = card_w - 32;
+    obj_clrhist_card = lv_obj_create(obj_clrhist_panel);
+    lv_obj_set_size(obj_clrhist_card, card_w, 360);
+    lv_obj_center(obj_clrhist_card);
+    lv_obj_set_style_bg_color(obj_clrhist_card, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(obj_clrhist_card, 12, 0);
+    lv_obj_set_style_border_width(obj_clrhist_card, 1, 0);
+    lv_obj_set_style_border_color(obj_clrhist_card, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_pad_all(obj_clrhist_card, 16, 0);
+    lv_obj_clear_flag(obj_clrhist_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(obj_clrhist_card);
+    lv_label_set_text(title, "Delete message history?");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_RED), 0);
+    meck_set_font(title, &meck_montserrat_22, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lbl_clrhist_body = lv_label_create(obj_clrhist_card);
+    lv_label_set_text(lbl_clrhist_body, "");
+    lv_obj_set_style_text_color(lbl_clrhist_body, lv_color_white(), 0);
+    meck_set_font(lbl_clrhist_body, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_clrhist_body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_clrhist_body, inner);
+    lv_obj_align(lbl_clrhist_body, LV_ALIGN_TOP_LEFT, 0, 44);
+
+    struct { const char *text; lv_color_t bg; int y; lv_event_cb_t cb; } btns[2] = {
+        { "Delete", lv_palette_darken(LV_PALETTE_RED, 1), -65, on_clrhist_delete },
+        { "Cancel", lv_color_make(60, 60, 70),            0,   on_clrhist_cancel },
+    };
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *btn = lv_button_create(obj_clrhist_card);
+        lv_obj_set_size(btn, inner, 55);
+        lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, btns[i].y);
+        lv_obj_set_style_bg_color(btn, btns[i].bg, 0);
+        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, btns[i].text);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_18, 0);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(btn, btns[i].cb, LV_EVENT_CLICKED, NULL);
+    }
+}
+
 static void refresh_channel_picker() {
     Meck* mesh = meck_get_instance();
     if (!obj_ch_picker_scroll || !mesh) return;
@@ -11053,6 +11273,11 @@ static void refresh_channel_picker() {
         lv_obj_set_style_border_width(btn, 2, 0);
         lv_obj_set_style_border_color(btn, color, 0);
         lv_obj_add_event_cb(btn, goto_channel_n, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+        // Long-press: clear this channel's message history (confirmation
+        // prompt). The keyboard path (X on a ringed row) finds the channel
+        // through the button's user data (index + 1; 0 = not a channel row).
+        lv_obj_set_user_data(btn, (void*)(intptr_t)(i + 1));
+        lv_obj_add_event_cb(btn, on_picker_row_long_press, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)i);
 
         lv_obj_t *lbl_name = lv_label_create(btn);
         lv_label_set_text(lbl_name, ch.name);
@@ -12370,6 +12595,8 @@ static void create_channel_picker_screen() {
     lv_obj_add_event_cb(kb_ch_add, on_ch_add_kb_event, LV_EVENT_CANCEL, NULL);
     lv_obj_add_event_cb(kb_ch_add, on_kb_long_press,
                         LV_EVENT_LONG_PRESSED, NULL);
+
+    create_clear_history_prompt();
 }
 
 // ============================================================================
@@ -12712,6 +12939,11 @@ static void create_messages_screen() {
 // ============================================================================
 
 static void load_channel_view(uint8_t ch_idx) {
+    // Entering a channel always starts at its newest page.
+    g_msg_win_ch = ch_idx;
+    g_msg_win_pages = 1;
+    g_msg_win_back = 0;
+    g_msg_win_anchor_idx = -1;
     g_active_channel = ch_idx;
     g_in_dm_mode = false;  // shared scr_messages — make sure we're not in DM mode
     Meck* mesh = meck_get_instance();
@@ -19938,6 +20170,7 @@ static int g_msg_ring_idx = -1;
 // Bubble rows are the plain-object children of obj_msg_scroll, each holding
 // one bubble as its first child; the "No messages yet." label is not one.
 static bool meck_msg_ring_is_row(lv_obj_t *child) {
+    if (lv_obj_check_type(child, &lv_button_class)) return true;   // Earlier / Newer rows
     return lv_obj_check_type(child, &lv_obj_class) &&
            (lv_obj_get_child_count(child) > 0);
 }
@@ -19961,7 +20194,9 @@ static lv_obj_t *meck_msg_ring_target_at(int idx) {
     for (uint32_t i = 0; i < c; i++) {
         lv_obj_t *row = lv_obj_get_child(obj_msg_scroll, i);
         if (!meck_msg_ring_is_row(row)) continue;
-        if (n == idx) return lv_obj_get_child(row, 0);
+        if (n == idx) {
+            return lv_obj_check_type(row, &lv_button_class) ? row : lv_obj_get_child(row, 0);
+        }
         n++;
     }
     if ((idx == n) && ta_compose && !lv_obj_has_flag(ta_compose, LV_OBJ_FLAG_HIDDEN)) {
@@ -20015,7 +20250,10 @@ static void meck_msg_ring_step(int delta) {
     lv_obj_t *tgt = meck_msg_ring_target_at(next);
     if (!tgt) { g_msg_ring_idx = -1; return; }
     meck_msg_ring_paint(tgt, true);
-    lv_obj_scroll_to_view(tgt, LV_ANIM_ON);
+    // Recursive: a bubble sits inside a non-scrolling row inside
+    // obj_msg_scroll, and lv_obj_scroll_to_view() only scrolls the direct
+    // parent, so the list itself never moved once the ring left the screen.
+    lv_obj_scroll_to_view_recursive(tgt, LV_ANIM_ON);
     g_msg_ring_idx = next;
 }
 
@@ -20032,6 +20270,8 @@ static bool meck_msg_ring_enter(void) {
         meck_msg_ring_clear();
         lv_obj_add_state(ta_compose, LV_STATE_FOCUSED);
         lv_obj_send_event(ta_compose, LV_EVENT_FOCUSED, NULL);
+    } else if (lv_obj_check_type(tgt, &lv_button_class)) {
+        lv_obj_send_event(tgt, LV_EVENT_CLICKED, NULL);        // Earlier / Newer page row
     } else {
         lv_obj_send_event(tgt, LV_EVENT_LONG_PRESSED, NULL);
     }
@@ -20430,6 +20670,20 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
         }
     }
 
+    // Clear-history prompt on the channel picker: keyboard-modal (Up/Down
+    // ring Delete / Cancel, Enter presses the ringed one, Esc cancels).
+    if ((lv_screen_active() == scr_channel_picker) && obj_clrhist_panel &&
+        !lv_obj_has_flag(obj_clrhist_panel, LV_OBJ_FLAG_HIDDEN)) {
+        switch (key) {
+            case LV_KEY_UP:    meck_row_ring_step(obj_clrhist_card, -1); break;
+            case LV_KEY_DOWN:  meck_row_ring_step(obj_clrhist_card, +1); break;
+            case LV_KEY_ENTER: meck_row_ring_enter();                   break;
+            case LV_KEY_ESC:   on_clrhist_cancel(NULL);                 break;
+            default:           break;
+        }
+        return;
+    }
+
     // Message overlays: the path popup and the retry modal are modal to the
     // keyboard while open on the messages screen. Up/Down ring their buttons
     // (Reply / Copy Path / Close, or Retry Send / Cancel), Enter presses the
@@ -20579,6 +20833,17 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
     // Down = further down the list -- the same convention as the home
     // tileview paging above.
     if (!ta) {
+        // Channel picker: X on a ringed channel row opens the clear-history
+        // prompt (the Meck T-Deck's key for the same action).
+        if ((key == 'x' || key == 'X') && (lv_screen_active() == scr_channel_picker) &&
+            (g_row_ring_cont == obj_ch_picker_scroll) && (g_row_ring_idx >= 0)) {
+            lv_obj_t *b = meck_row_ring_button_at(g_row_ring_cont, g_row_ring_idx);
+            int ch = b ? ((int)(intptr_t)lv_obj_get_user_data(b)) - 1 : -1;
+            if (ch >= 0) {
+                show_clear_history_prompt(ch);
+                return;
+            }
+        }
         switch (key) {
             case LV_KEY_ESC:
                 meck_kbd_press_back();

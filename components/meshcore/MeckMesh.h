@@ -2415,7 +2415,9 @@ public:
         xSemaphoreGive(_mutex);
     }
 
-    int getMessages(P4ChannelMessage* dest, int max_count, uint8_t channel_idx) {
+    // Copy up to max_count messages of a channel, newest first, skipping the
+    // newest `skip` valid messages (for paging back through history).
+    int getMessages(P4ChannelMessage* dest, int max_count, uint8_t channel_idx, int skip = 0) {
         if (channel_idx >= MAX_GROUP_CHANNELS) return 0;
         P4ChannelMessage* ring = _msgs_ch[channel_idx];
         if (!ring) return 0;
@@ -2424,13 +2426,54 @@ public:
         int newest = _msg_newest_ch[channel_idx];
         int count  = _msg_count_ch[channel_idx];
         int out = 0;
+        int seen = 0;
         for (int i = 0; i < count && out < max_count; i++) {
             int idx = (newest - i + P4_MSG_PER_CHANNEL) % P4_MSG_PER_CHANNEL;
             if (!ring[idx].valid) continue;
+            if (seen++ < skip) continue;
             dest[out++] = ring[idx];
         }
         xSemaphoreGive(_mutex);
         return out;
+    }
+
+    // Number of valid messages held in a channel's ring.
+    int getMessageCount(uint8_t channel_idx) {
+        if (channel_idx >= MAX_GROUP_CHANNELS) return 0;
+        P4ChannelMessage* ring = _msgs_ch[channel_idx];
+        if (!ring) return 0;
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        int newest = _msg_newest_ch[channel_idx];
+        int count  = _msg_count_ch[channel_idx];
+        int n = 0;
+        for (int i = 0; i < count; i++) {
+            int idx = (newest - i + P4_MSG_PER_CHANNEL) % P4_MSG_PER_CHANNEL;
+            if (ring[idx].valid) n++;
+        }
+        xSemaphoreGive(_mutex);
+        return n;
+    }
+
+    // Clear one channel's stored message history: the in-RAM ring, its
+    // unread count, and its history file on SD (keyed by channel identity,
+    // as deleteChannel does). The channel itself is untouched. Pending
+    // persist requests for the cleared slots are skipped by the drain's
+    // timestamp check (see meck_app.cpp).
+    void clearChannelHistory(uint8_t idx) {
+        if (idx >= MAX_GROUP_CHANNELS) return;
+        uint32_t ident = channelIdentAt(idx);
+        xSemaphoreTake(_mutex, portMAX_DELAY);
+        if (_msgs_ch[idx]) {
+            memset(_msgs_ch[idx], 0, P4_MSG_PER_CHANNEL * sizeof(P4ChannelMessage));
+        }
+        _msg_count_ch[idx]  = 0;
+        _msg_newest_ch[idx] = -1;
+        _msg_unread_ch[idx] = 0;
+        xSemaphoreGive(_mutex);
+        if (_store && ident) {
+            _store->deleteChannelMessageFile(ident);
+        }
+        printf("clearChannelHistory: channel %u cleared\n", (unsigned)idx);
     }
 
     int getRecentHeard(P4RecentHeard* dest, int max_count) {

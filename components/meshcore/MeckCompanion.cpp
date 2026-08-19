@@ -922,26 +922,24 @@ void MeckCompanion::handleCmdFrame(size_t len) {
 
 void MeckCompanion::addToOfflineQueue(const uint8_t frame[], int len) {
     if (len <= 0 || len > MAX_FRAME_SIZE) return;
+    if (!_offline_queue) return;
     if (_offline_queue_len >= OFFLINE_QUEUE_SIZE) {
-        // Queue full -- drop oldest
+        // Queue full -- drop the oldest frame (advance the head)
+        _offline_head = (_offline_head + 1) % OFFLINE_QUEUE_SIZE;
         _offline_queue_len--;
-        for (int i = 0; i < _offline_queue_len; i++) {
-            _offline_queue[i] = _offline_queue[i + 1];
-        }
     }
-    _offline_queue[_offline_queue_len].len = (uint8_t)len;
-    memcpy(_offline_queue[_offline_queue_len].buf, frame, len);
+    int slot = (_offline_head + _offline_queue_len) % OFFLINE_QUEUE_SIZE;
+    _offline_queue[slot].len = (uint8_t)len;
+    memcpy(_offline_queue[slot].buf, frame, len);
     _offline_queue_len++;
 }
 
 int MeckCompanion::getFromOfflineQueue(uint8_t frame[]) {
-    if (_offline_queue_len <= 0) return 0;
-    int len = _offline_queue[0].len;
-    memcpy(frame, _offline_queue[0].buf, len);
+    if (_offline_queue_len <= 0 || !_offline_queue) return 0;
+    int len = _offline_queue[_offline_head].len;
+    memcpy(frame, _offline_queue[_offline_head].buf, len);
+    _offline_head = (_offline_head + 1) % OFFLINE_QUEUE_SIZE;
     _offline_queue_len--;
-    for (int i = 0; i < _offline_queue_len; i++) {
-        _offline_queue[i] = _offline_queue[i + 1];
-    }
     return len;
 }
 

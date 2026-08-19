@@ -14,6 +14,7 @@
 #pragma once
 
 #include "MeckMesh.h"
+#include "esp_heap_caps.h"
 #include <helpers/BaseSerialInterface.h>
 #include <helpers/ContactInfo.h>
 #include <helpers/ChannelDetails.h>
@@ -23,11 +24,22 @@ public:
     MeckCompanion() : _mesh(nullptr), _serial(nullptr),
                       _iter_started(false), _iter_filter_since(0),
                       _most_recent_lastmod(0), _app_target_ver(0),
-                      _offline_queue_len(0) {}
+                      _offline_queue(nullptr), _offline_head(0), _offline_queue_len(0) {}
 
     void begin(Meck* mesh, BaseSerialInterface* serial) {
         _mesh = mesh;
         _serial = serial;
+        // Offline queue lives in PSRAM (1500 x 173 bytes); allocated once.
+        if (!_offline_queue) {
+            _offline_queue = (Frame*)heap_caps_malloc(sizeof(Frame) * OFFLINE_QUEUE_SIZE,
+                                                      MALLOC_CAP_SPIRAM);
+            if (!_offline_queue) {
+                printf("MeckCompanion: offline queue PSRAM alloc failed (%u bytes)\n",
+                       (unsigned)(sizeof(Frame) * OFFLINE_QUEUE_SIZE));
+            }
+            _offline_head = 0;
+            _offline_queue_len = 0;
+        }
     }
 
     // Call every meck_task loop iteration.
@@ -108,13 +120,19 @@ private:
     // Protocol version the connected app understands
     uint8_t _app_target_ver;
 
-    // Offline queue
-    static constexpr int OFFLINE_QUEUE_SIZE = 32;
+    // Offline queue: messages (channel and DM) queued for the app while no
+    // companion is connected, drained by CMD_SYNC_NEXT_MESSAGE. A ring of
+    // OFFLINE_QUEUE_SIZE frames in PSRAM (allocated in begin()); when full
+    // the oldest frame is dropped. 1500 frames is roughly a full day's
+    // traffic on a busy mesh (upstream's static default is 16, sized for
+    // boards without PSRAM).
+    static constexpr int OFFLINE_QUEUE_SIZE = 1500;
     struct Frame {
         uint8_t len;
         uint8_t buf[MAX_FRAME_SIZE];
     };
-    Frame _offline_queue[OFFLINE_QUEUE_SIZE];
+    Frame* _offline_queue;      // PSRAM, OFFLINE_QUEUE_SIZE entries
+    int _offline_head;          // index of the oldest queued frame
     int _offline_queue_len;
 
     // Frame buffers
