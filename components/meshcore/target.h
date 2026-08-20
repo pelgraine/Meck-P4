@@ -14,11 +14,20 @@
 #pragma once
 
 #include "variant.h"
-#include "P4SX1262Radio.h"
+#include "sdkconfig.h"
+#if defined(CONFIG_MECK_RADIO_LR2021)
+#include "P4LR2021Radio.h"   // Semtech LR2021 on RadioLib (T-Display P4 LR2021 variant)
+#else
+#include "P4SX1262Radio.h"   // SX1262 on LilyGo cpp_bus_driver (default)
+#endif
 #include "meck.h"   // for meck_radio_attach() declaration
 
 // MeshCore radio adapter (defined in target.cpp)
+#if defined(CONFIG_MECK_RADIO_LR2021)
+extern P4LR2021Radio radio_driver;
+#else
 extern P4SX1262Radio radio_driver;
+#endif
 
 void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr);
 void radio_set_tx_power(uint8_t dbm);

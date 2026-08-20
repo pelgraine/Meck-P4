@@ -83,6 +83,7 @@ idf_component_register(
     REQUIRES
         arduino_cpp_bus_driver
         cpp_bus_driver
+        RadioLib
         private_library
         lvgl__lvgl
         mbedtls

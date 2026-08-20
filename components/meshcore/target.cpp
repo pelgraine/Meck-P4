@@ -31,7 +31,11 @@
 // definitions break.
 
 // ---- MeshCore radio adapter instance ----
+#if defined(CONFIG_MECK_RADIO_LR2021)
+P4LR2021Radio radio_driver;
+#else
 P4SX1262Radio radio_driver;
+#endif
 
 // LilyGo's main.cpp defines `auto XL9535 = std::make_unique<...>(...)` at file
 // scope (external linkage). We reference it here to drive the SKY13453 RF
@@ -52,6 +56,23 @@ extern "C" void meck_set_antenna(uint8_t external) {
 // ============================================================
 
 bool meck_radio_attach() {
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    // LR2021 variant: LilyGo's main.cpp skips its SX1262 bring-up on this
+    // build, so the radio is initialised here from scratch (reset through
+    // the XL9535 inside RadioLib's begin(), MeshCore parameters, continuous
+    // RX). See P4LR2021Radio.h for the board constants to confirm.
+    printf("meck_radio_attach() -- initialising LR2021 (RadioLib)\n");
+    if (!radio_driver.init(LORA_FREQ_DEFAULT, LORA_BW_DEFAULT, LORA_SF_DEFAULT,
+                           LORA_CR_DEFAULT, LORA_TX_POWER_DEFAULT)) {
+        printf("meck_radio_attach() -- LR2021 init FAILED\n");
+        return false;
+    }
+    radio_driver.begin();
+    printf("meck_radio_attach() -- radio ready on %.3f MHz, SF%u, BW=%.1f kHz\n",
+           (double)LORA_FREQ_DEFAULT, (unsigned)LORA_SF_DEFAULT,
+           (double)LORA_BW_DEFAULT);
+    return true;
+#else
     printf("meck_radio_attach() — wrapping LilyGo's already-running SX1262\n");
 
     // Apply MeshCore's preset (overwrites LilyGo's demo SF9/125kHz/920MHz)
@@ -73,6 +94,7 @@ bool meck_radio_attach() {
            (double)LORA_FREQ_DEFAULT, (unsigned)LORA_SF_DEFAULT,
            (double)LORA_BW_DEFAULT);
     return true;
+#endif
 }
 
 
@@ -81,6 +103,14 @@ bool meck_radio_attach() {
 // ============================================================
 
 void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr) {
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    // Preamble (32 symbols at SF<=8 else 16) and the MeshCore sync word are
+    // applied inside the backend.
+    radio_driver.setParams(freq, bw, sf, cr);
+    printf("radio_set_params() -- LR2021 freq=%.3f bw=%.1f sf=%u cr=4/%u\n",
+           (double)freq, (double)bw, (unsigned)sf, (unsigned)cr);
+    return;
+#else
     Cpp_Bus_Driver::Sx126x::Lora_Bw bw_enum;
     if (bw >= 500.0f)       bw_enum = Cpp_Bus_Driver::Sx126x::Lora_Bw::BW_500000HZ;
     else if (bw >= 250.0f)  bw_enum = Cpp_Bus_Driver::Sx126x::Lora_Bw::BW_250000HZ;
@@ -118,6 +148,7 @@ void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr) {
     printf("radio_set_params() — freq=%.3f bw=%.1f sf=%u cr=4/%u sync=0x%04X\n",
            (double)freq, (double)bw, (unsigned)sf, (unsigned)cr,
            (unsigned)meshcore_sync_word);
+#endif
 }
 
 
@@ -128,6 +159,10 @@ void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr) {
 void radio_set_tx_power(uint8_t dbm) {
     if (dbm > 22) dbm = 22;
     printf("radio_set_tx_power() — %u dBm\n", (unsigned)dbm);
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    radio_driver.setTxPower(dbm);
+    return;
+#endif
     // Applied via config_lora_params on next radio_set_params() call.
 }
 

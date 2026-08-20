@@ -5514,6 +5514,11 @@ void System_Startup_Message_Init(void)
         }
     }
 
+#if !defined(CONFIG_MECK_RADIO_LR2021)
+    // On the LR2021 build the SX1262 driver's begin() is intentionally
+    // skipped (the fitted radio is an LR2021, initialised by Meck's
+    // meck_radio_attach), so init_flag is always false there and this check
+    // would pop a false "sx1262 init fail" box on every boot.
     if (Sys_Status.sx1262.init_flag == false)
     {
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -5527,6 +5532,7 @@ void System_Startup_Message_Init(void)
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
+#endif
 }
 
 // =============================================================================
@@ -6284,6 +6290,13 @@ extern "C" void app_main(void)
 #if defined CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
     SX1262_SPI_Bus->_bus_init_flag = true;
 #endif
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    // Meck LR2021 variant: the radio is an LR2021, initialised by Meck's
+    // meck_radio_attach() through RadioLib. Skip the SX1262 driver's begin()
+    // (its commands are not valid for this chip).
+    printf("sx1262 begin skipped (CONFIG_MECK_RADIO_LR2021)\n");
+    Sys_Status.sx1262.init_flag = false;
+#else
     if (SX1262->begin(10000000) == false)
     {
         printf("sx1262 begin fail\n");
@@ -6294,6 +6307,7 @@ extern "C" void app_main(void)
         printf("sx1262 begin success\n");
         Sys_Status.sx1262.init_flag = true;
     }
+#endif
 
     System_Ui->set_config_rf_params(System_Ui->_device_sx1262);
 

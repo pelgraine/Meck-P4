@@ -113,6 +113,20 @@ menu "Example Configuration"
                 bool "RGB888"
     endchoice
 
+    choice MECK_RADIO
+        prompt "Meck: LoRa radio fitted"
+        default MECK_RADIO_SX1262
+        help
+            Which LoRa transceiver the T-Display P4 carries. The SX1262 is the
+            standard board (driven through LilyGo's cpp_bus_driver). The LR2021
+            is LilyGo's LR2021 variant, driven through RadioLib; see
+            components/meshcore/P4LR2021Radio.h for the board constants.
+        config MECK_RADIO_SX1262
+            bool "Semtech SX1262 (standard T-Display P4)"
+        config MECK_RADIO_LR2021
+            bool "Semtech LR2021 (T-Display P4 LR2021 variant)"
+    endchoice
+
     choice BOARD_TYPE
         prompt "Board type"
         default BOARD_TYPE_T_DISPLAY_P4
