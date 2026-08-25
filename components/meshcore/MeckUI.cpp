@@ -944,6 +944,13 @@ static bool g_in_room_mode            = false;
 static lv_obj_t *scr_contacts            = NULL;
 static lv_obj_t *obj_contacts_scroll     = NULL;
 static lv_obj_t *obj_contacts_filter_bar = NULL;  // chip row above the list
+static lv_obj_t *lbl_contacts_count      = NULL;  // "shown/total" in the header gap
+// Windowed contacts list: only CONTACTS_WIN_PAGE rows of the sorted+filtered
+// set are built at once (a "Show more" row extends the window), so the object
+// count stays bounded regardless of contact count -- building every row on the
+// LVGL task is what tripped the task watchdog at ~700+ contacts.
+#define CONTACTS_WIN_PAGE 60
+static int g_contacts_win_shown = CONTACTS_WIN_PAGE;  // how many filtered rows to render
 static lv_obj_t *scr_contact_detail      = NULL;
 static lv_obj_t *lbl_contact_detail_body = NULL;
 static int g_selected_contact_idx        = -1;
@@ -5958,6 +5965,7 @@ static void on_contacts_screen_gesture(lv_event_t *e) {
     else                        return;            // ignore vertical
     int n = (int)CONTACT_FILTER_COUNT;
     g_contact_filter = (ContactFilter)(((int)g_contact_filter + dir + n) % n);
+    g_contacts_win_shown = CONTACTS_WIN_PAGE;   // new filter: back to the top
     refresh_contacts_list();
 }
 
@@ -5967,6 +5975,7 @@ static void on_filter_chip_tap(lv_event_t *e) {
     intptr_t f = (intptr_t)lv_event_get_user_data(e);
     if (f < 0 || f >= CONTACT_FILTER_COUNT) return;
     g_contact_filter = (ContactFilter)f;
+    g_contacts_win_shown = CONTACTS_WIN_PAGE;   // new filter: back to the top
     refresh_contacts_list();
 }
 
@@ -13089,6 +13098,16 @@ static void create_contacts_screen() {
     lv_obj_set_style_pad_column(obj_contacts_filter_bar, 6, 0);
     lv_obj_set_scroll_dir(obj_contacts_filter_bar, LV_DIR_HOR);
 
+    // Total-contacts count in the header gap to the right of the filter chips
+    // (shown/total, matching the Meck Watch). A separate label rather than a
+    // chip so it right-aligns independent of the chip widths.
+    lbl_contacts_count = lv_label_create(scr_contacts);
+    lv_label_set_text(lbl_contacts_count, "");
+    lv_obj_set_style_text_color(lbl_contacts_count, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(lbl_contacts_count, &meck_montserrat_18, 0);
+    lv_obj_set_style_text_align(lbl_contacts_count, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(lbl_contacts_count, LV_ALIGN_TOP_RIGHT, -14, 104);
+
     obj_contacts_scroll = lv_obj_create(scr_contacts);
     lv_obj_set_size(obj_contacts_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 160);
     lv_obj_set_pos(obj_contacts_scroll, 10, 150);
@@ -13150,6 +13169,15 @@ static bool contact_matches_filter(const ContactInfo& ci, ContactFilter f) {
         case CONTACT_FILTER_FAV:      return (ci.flags & 0x01) != 0;
         default: return true;
     }
+}
+
+// "Show more" row at the bottom of the contacts list: extend the window by
+// one page and rebuild. The row is added by refresh_contacts_list when more
+// filtered contacts exist than are currently shown.
+static void on_contacts_show_more(lv_event_t *e) {
+    (void)e;
+    g_contacts_win_shown += CONTACTS_WIN_PAGE;
+    refresh_contacts_list();
 }
 
 static void refresh_contacts_list() {
@@ -13241,14 +13269,21 @@ static void refresh_contacts_list() {
             return a.ts > b.ts;
         });
 
-    int shown = 0;
+    // Two passes' worth of work in one loop: count every filtered match
+    // (cheap, no objects), but only build rows up to the current window
+    // (g_contacts_win_shown). Building all rows on the LVGL task is what
+    // tripped the watchdog, so the built count is bounded.
+    int matched = 0;   // total contacts matching the filter
+    int built   = 0;   // rows actually created
     int row_y = 0;
     for (int s = 0; s < sort_count; s++) {
         int i = s_sort_buf[s].idx;
         ContactInfo ci;
         if (!mesh->getContactByIdx(i, ci)) continue;
         if (!contact_matches_filter(ci, g_contact_filter)) continue;
-        shown++;
+        matched++;
+        if (built >= g_contacts_win_shown) continue;   // beyond the window: count only
+        built++;
 
         lv_obj_t *row = lv_button_create(obj_contacts_scroll);
         lv_obj_set_size(row, SCREEN_WIDTH - 40, 60);
@@ -13326,9 +13361,27 @@ static void refresh_contacts_list() {
         lv_obj_align(pk, LV_ALIGN_RIGHT_MID, -10, 0);
     }
 
+    // "Show more" row when the window doesn't cover all matches.
+    if (built < matched) {
+        lv_obj_t *more = lv_button_create(obj_contacts_scroll);
+        lv_obj_set_size(more, SCREEN_WIDTH - 40, 44);
+        lv_obj_set_pos(more, 5, row_y);
+        lv_obj_set_style_bg_color(more, lv_color_make(40, 40, 55), 0);
+        lv_obj_set_style_radius(more, 8, 0);
+        lv_obj_set_style_border_width(more, 0, 0);
+        lv_obj_add_event_cb(more, on_contacts_show_more, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *ml = lv_label_create(more);
+        char mbuf[48];
+        snprintf(mbuf, sizeof(mbuf), "Show more (%d remaining)", matched - built);
+        lv_label_set_text(ml, mbuf);
+        lv_obj_set_style_text_color(ml, lv_color_white(), 0);
+        meck_set_font(ml, &meck_montserrat_18, 0);
+        lv_obj_center(ml);
+    }
+
     // If a filter ate the entire list, surface a hint so the empty screen
     // doesn't look like a bug.
-    if (shown == 0) {
+    if (matched == 0) {
         lv_obj_t *empty = lv_label_create(obj_contacts_scroll);
         char buf[80];
         snprintf(buf, sizeof(buf), "No %s contacts.\nSwipe to change filter.",
@@ -13336,6 +13389,18 @@ static void refresh_contacts_list() {
         lv_label_set_text(empty, buf);
         lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
         meck_set_font(empty, &meck_montserrat_16, 0);
+    }
+
+    // Header count: matched/total, matching the Meck Watch. On the All filter
+    // that is total/MAX_CONTACTS (how full the contact store is); on a
+    // specific filter it is matched/total.
+    if (lbl_contacts_count) {
+        char cbuf[24];
+        if (g_contact_filter == CONTACT_FILTER_ALL)
+            snprintf(cbuf, sizeof(cbuf), "%d/%d", n, (int)MAX_CONTACTS);
+        else
+            snprintf(cbuf, sizeof(cbuf), "%d/%d", matched, n);
+        lv_label_set_text(lbl_contacts_count, cbuf);
     }
 }
 
@@ -20936,6 +21001,7 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
                     const int n   = (int)CONTACT_FILTER_COUNT;
                     g_contact_filter =
                         (ContactFilter)(((int)g_contact_filter + dir + n) % n);
+                    g_contacts_win_shown = CONTACTS_WIN_PAGE;   // new filter: back to the top
                     refresh_contacts_list();
                 }
                 break;
