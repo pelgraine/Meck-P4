@@ -24,8 +24,9 @@
  * reset / IRQ lines). Each is a single constant:
  *   LR2021_PIN_CS, LR2021_PIN_BUSY        CS = SX1262_CS (24), BUSY = SX1262_BUSY (6)
  *   LR2021_XL_RST, LR2021_XL_IRQ          XL9535 IO16 / IO17
- *   LR2021_TCXO_VOLTAGE                   1.6 V; falls back to 0 V if the chip
- *                                         rejects it (-706/-707), as upstream does
+ *   LR2021_TCXO_VOLTAGE                   3.3 V (LilyGo's LR2021 example); falls
+ *                                         back to 0 V if the chip rejects it
+ *                                         (-706/-707), as upstream does
  *   LR2021_SPI_HZ                         SPI clock for the HAL device.
  *                                         The bus itself is SPI2_HOST, the
  *                                         same host LilyGo's main.cpp uses
@@ -35,10 +36,12 @@
  *                                         (ESP_ERR_INVALID_STATE accepted,
  *                                         EspHal.cpp) and only adds its own
  *                                         CS device, so sharing is safe
- *   LR2021_RF_SWITCH_*                    the LR2021 drives the RF switch from
- *                                         its own DIOs (like the LR11x0); the
- *                                         table must match the module and is
- *                                         left empty until the board is in hand
+ *   LR2021_RF_SWITCH_*                    set from LilyGo's LR2021 example
+ *                                         (LR2021_RF_SWITCH_TABLE below); the
+ *                                         LR2021 drives the switch from its
+ *                                         DIOs and RadioLib picks the path from
+ *                                         the frequency, so 2.4 GHz needs no
+ *                                         GPIO action
  * Not yet ported for this backend: MECK_RX_DUTY_CYCLE (the SX1262 path's
  * listen/sleep duty cycling) and rx-boosted gain.
  */
@@ -65,7 +68,8 @@ extern std::unique_ptr<Cpp_Bus_Driver::Xl95x5> XL9535;
 #define LR2021_XL_RST        XL9535_SX1262_RST     // Cpp_Bus_Driver::Xl95x5::Pin::IO16
 #define LR2021_XL_IRQ        XL9535_SX1262_DIO1    // Cpp_Bus_Driver::Xl95x5::Pin::IO17
 #ifndef LR2021_TCXO_VOLTAGE
-#define LR2021_TCXO_VOLTAGE  1.6f
+// LilyGo's LR2021 example (radiolib_lr2021_send_receive) uses 3.3 V.
+#define LR2021_TCXO_VOLTAGE  3.3f
 #endif
 #ifndef LR2021_SPI_HZ
 #define LR2021_SPI_HZ        8000000
@@ -77,6 +81,30 @@ static constexpr uint32_t LR2021_VPIN_RST = 0x100;
 static constexpr uint32_t LR2021_VPIN_IRQ = 0x101;
 
 // RadioLib's ESP-IDF HAL, with reset and IRQ redirected to the XL9535.
+// LR2021 antenna (RF) switch, from LilyGo's radiolib_lr2021_send_receive
+// example for this board. The LR2021 drives the switch from its own DIO
+// lines; RadioLib selects the mode automatically from the frequency (the
+// sub-GHz MODE_RX/TX vs the 2.4 GHz MODE_RX_HF/TX_HF, chosen by the driver's
+// highFreq flag). So tuning to a 2.4 GHz frequency routes the antenna to the
+// 2.4 GHz port with no GPIO action. Installed once in init() via
+// setRfSwitchTable(). Values are transcribed verbatim from LilyGo's example.
+static const uint32_t LR2021_RF_SWITCH_PINS[] = {
+    RADIOLIB_NC,
+    RADIOLIB_LR2021_DIO6,
+    RADIOLIB_LR2021_DIO7,
+    RADIOLIB_LR2021_DIO8,
+    RADIOLIB_LR2021_DIO10,
+};
+static const Module::RfSwitchMode_t LR2021_RF_SWITCH_TABLE[] = {
+    // mode              NC   DIO6 DIO7 DIO8 DIO10
+    { LR2021::MODE_STBY,  { 0, 0, 0, 0, 0 } },
+    { LR2021::MODE_RX,    { 0, 0, 0, 1, 0 } },   // sub-GHz RX
+    { LR2021::MODE_TX,    { 0, 0, 0, 1, 0 } },   // sub-GHz TX
+    { LR2021::MODE_RX_HF, { 0, 1, 0, 0, 1 } },   // 2.4 GHz RX
+    { LR2021::MODE_TX_HF, { 0, 0, 1, 0, 1 } },   // 2.4 GHz TX
+    END_OF_MODE_TABLE,
+};
+
 class P4RadioHal : public EspHal {
 public:
     P4RadioHal() : EspHal(SX1262_SCLK, SX1262_MISO, SX1262_MOSI, SPI2_HOST, LR2021_SPI_HZ) {}
@@ -155,8 +183,9 @@ public:
         }
         _radio.setCRC(2);
         _radio.explicitHeader();
-        // LR2021_RF_SWITCH_*: configure here once the module's DIO-to-switch
-        // mapping is known (Module::setRfSwitchTable). Nothing is set yet.
+        // Antenna switch: LR2021 drives it from its DIOs, RadioLib selects the
+        // path from the frequency (2.4 GHz -> the HF modes). See the table above.
+        _radio.setRfSwitchTable(LR2021_RF_SWITCH_PINS, LR2021_RF_SWITCH_TABLE);
         printf("P4LR2021Radio: init ok (tcxo=%.1fV) %.3f MHz SF%u BW%.1f CR4/%u TX %u dBm\n",
                (double)tcxo, (double)freq, (unsigned)sf, (double)bw, (unsigned)cr, (unsigned)tx_power);
         computeIrqDeadlines();

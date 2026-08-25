@@ -363,11 +363,30 @@ static const RadioPreset RADIO_PRESETS[] = {
     { "USA/Canada (Recommended)", 910.525f,  62.5f,  7, 5, 22 },
     { "Vietnam (Narrow)",         920.250f,  62.5f,  8, 5, 22 },
     { "Vietnam (Deprecated)",     920.250f, 250.0f, 11, 5, 22 },
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    // 2.4 GHz LoRa, LR2021 build only. Frequencies/SF/CR follow the MeshCore
+    // 2.4 GHz convention (GrayHatGuy variants and the Meck Watch SX1280 plan);
+    // TX is capped at the LR2021's 2.4 GHz PA ceiling of +12 dBm (RadioLib
+    // checkOutputPower: -19..+12 on the high-frequency path). Bandwidths are
+    // valid LR2021 LoRa steps (406.25 / 812.5 / 1000 kHz; the chip's LoRa max
+    // is 1000, not the SX1280's 1625).
+    { "2.4GHz Sydney",            2400.500f, 406.25f, 11, 5, 12 },
+    { "2.4GHz (2450)",            2450.000f, 812.5f,  10, 5, 12 },
+    { "2.4GHz Wide (2450)",       2450.000f, 1000.0f, 10, 5, 12 },
+#endif
 };
 #define NUM_RADIO_PRESETS (sizeof(RADIO_PRESETS) / sizeof(RADIO_PRESETS[0]))
 
+// TX power options cycled by the Settings toggle. The LR2021 build adds 12,
+// the chip's 2.4 GHz PA ceiling, so a 2.4 GHz user can reach it; on the
+// 2.4 GHz band the cycle skips any option above that ceiling (see
+// on_settings_txpower_tap). Sub-GHz behaviour is unchanged.
+#if defined(CONFIG_MECK_RADIO_LR2021)
+static const uint8_t TX_POWER_OPTIONS[] = { 10, 12, 14, 17, 20, 22 };
+#else
 static const uint8_t TX_POWER_OPTIONS[] = { 10, 14, 17, 20, 22 };
-#define NUM_TX_POWER_OPTIONS 5
+#endif
+#define NUM_TX_POWER_OPTIONS ((int)(sizeof(TX_POWER_OPTIONS) / sizeof(TX_POWER_OPTIONS[0])))
 
 // Screen brightness levels — eight-step ladder spanning the full visible
 // range. Lowest level (32) is dim but readable in a dark room; highest
@@ -4253,7 +4272,20 @@ static void on_settings_txpower_tap(lv_event_t *e) {
     for (int i = 0; i < NUM_TX_POWER_OPTIONS; i++) {
         if (TX_POWER_OPTIONS[i] == prefs->tx_power_dbm) { cur = i; break; }
     }
-    cur = (cur + 1) % NUM_TX_POWER_OPTIONS;
+    // Highest TX the current band allows. On the LR2021 build the 2.4 GHz PA
+    // tops out at +12 dBm (RadioLib checkOutputPower: -19..+12 on the
+    // high-frequency path), so at a 2.4 GHz frequency the cycle skips any
+    // option above 12. Every other case keeps the full ladder.
+    uint8_t tx_ceiling = 0xFF;
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    if (prefs->freq >= 2400.0f) tx_ceiling = 12;
+#endif
+    // Advance to the next allowed option (wrapping). The loop is bounded by
+    // the option count, so it always terminates even if none were <= ceiling.
+    for (int step = 0; step < NUM_TX_POWER_OPTIONS; step++) {
+        cur = (cur + 1) % NUM_TX_POWER_OPTIONS;
+        if (TX_POWER_OPTIONS[cur] <= tx_ceiling) break;
+    }
     prefs->tx_power_dbm = TX_POWER_OPTIONS[cur];
     mesh->getDataStore()->savePrefs(*prefs);
 
@@ -4313,6 +4345,16 @@ static void on_num_edit_save(lv_event_t *e) {
         // Frequency
         float f = strtof(text, nullptr);
         if (f >= 400.0f && f <= 2500.0f) {
+#if defined(CONFIG_MECK_RADIO_LR2021)
+            // Crossing up into the 2.4 GHz band, where the LR2021 PA tops out
+            // at +12 dBm: drop TX to 12 so the reconfig is not rejected. Only
+            // on the crossing (old band was sub-GHz) -- a user already on
+            // 2.4 GHz keeps whatever <=12 they have set.
+            if (f >= 2400.0f && prefs->freq < 2400.0f && prefs->tx_power_dbm > 12) {
+                prefs->tx_power_dbm = 12;
+                printf("Settings: TX auto-set to 12 dBm for 2.4 GHz\n");
+            }
+#endif
             prefs->freq = f;
             mesh->getDataStore()->savePrefs(*prefs);
             radio_request_reconfig(prefs->freq, prefs->bw, prefs->sf, prefs->cr, prefs->tx_power_dbm);
@@ -5535,6 +5577,13 @@ static void on_send_clicked(lv_event_t *e) {
         lv_textarea_set_text(ta_compose, "");
     }
     if (kb_compose) lv_obj_add_flag(kb_compose, LV_OBJ_FLAG_HIDDEN);
+    // Release focus from the composer. The keyboard bubble ring (Up/Down on
+    // the message screens) only runs when no textarea is focused; leaving the
+    // composer focused after a send is what disabled keyboard navigation.
+    if (ta_compose) {
+        lv_obj_remove_state(ta_compose, LV_STATE_FOCUSED);
+        lv_obj_send_event(ta_compose, LV_EVENT_DEFOCUSED, NULL);
+    }
 }
 
 // Recompute obj_msg_scroll's height from the current ta_compose height
@@ -7587,7 +7636,10 @@ static const char* lookup_hash_name(const uint8_t *hash, uint8_t hash_size,
     Meck *mesh = meck_get_instance();
     if (mesh) {
         ContactInfo *ci = mesh->lookupContactByPubKey(hash, hash_size);
-        if (ci && ci->name[0] != '\0') {
+        // Path hops are always repeaters. A chat or room contact whose pubkey
+        // prefix happens to collide with a hop hash must never be shown here,
+        // so require the matched contact to be a repeater (ADV_TYPE_REPEATER).
+        if (ci && ci->type == ADV_TYPE_REPEATER && ci->name[0] != '\0') {
             strip_emojis(ci->name, name_out, name_out_len);
             if (name_out[0] != '\0') return name_out;
         }
