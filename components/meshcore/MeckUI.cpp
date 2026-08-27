@@ -7597,7 +7597,10 @@ static bool retry_is_eligible(const BubbleRetryCtx *ctx) {
                                               ctx->timestamp);
         if (hc < 0) return false;                    // not found
         if (hc > 0) return false;                    // already echoed
-        uint32_t now = meck_clock_get_utc();
+        Meck *mesh = meck_get_instance();
+        if (!mesh) return false;
+        mesh::RTCClock *rtc = mesh->getRTCClock();
+        uint32_t now = rtc ? rtc->getCurrentTime() : 0;
         if (now < ctx->timestamp) return false;      // clock skew
         return (now - ctx->timestamp) >= MECK_RETRY_CHANNEL_THRESHOLD_SEC;
     }
