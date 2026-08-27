@@ -11,8 +11,11 @@
  *   - the IRQ register is polled over SPI. On this board family the radio's
  *     IRQ line is routed through the XL9535 expander, which is unreliable as
  *     an interrupt source, so nothing is ever attached to it;
- *   - RX is continuous (RX_TIMEOUT_INF) and re-armed after every packet or
- *     failed reception; TX completion is polled;
+ *   - RX is continuous (RX_TIMEOUT_INF). The chip stays in RX after a packet
+ *     (good or bad) and refuses a startReceive() issued while still in RX
+ *     (-706), so recvRaw() never re-arms after a packet; after a TX the
+ *     re-arm is attempted from recvRaw() each loop until accepted, as upstream
+ *     RadioLibWrapper does. TX completion is polled;
  *   - isReceiving() uses the PREAMBLE_DETECTED / LORA_HEADER_VALID bits with
  *     stuck-flag deadlines -- the logic of upstream MeshCore's CustomLR2021
  *     (PRs #3115 / #3146), deadlines re-derived from RadioLib's time-on-air;
@@ -158,7 +161,8 @@ public:
           _lastRSSI(0), _lastSNR(0), _noiseFloor(-100), _pktRecv(0), _pktSent(0),
           _lastFloorSampleUs(0),
           _currentFreq(0), _currentBW(0), _currentSF(0), _currentCR(0), _txPower(0),
-          _preambleMillis(66), _maxPayloadMillis(3934), _activityAtUs(0), _headerSeen(false) {}
+          _preambleMillis(66), _maxPayloadMillis(3934), _activityAtUs(0), _headerSeen(false),
+          _rxArmRetries(0) {}
 
     // ---- bring-up (called once from meck_radio_attach) ----
     // Full chip init: reset through the XL9535 (RadioLib drives it via the
@@ -201,7 +205,14 @@ public:
 
     int recvRaw(uint8_t* bytes, int sz) override {
         if (!_initOk) return 0;
-        if (!_inReceiveMode) return 0;
+        if (!_inReceiveMode) {
+            // Not armed: a TX just finished (onSendFinished does not re-arm) or
+            // the last re-arm was refused. Retry here, once per loop, as upstream
+            // RadioLibWrapper::recvRaw does. Never while a TX is in flight.
+            if (_sending) return 0;
+            startRx();
+            if (!_inReceiveMode) return 0;
+        }
 
         const uint64_t now = esp_timer_get_time();
         if (now - _lastFloorSampleUs >= 250000) {   // 250 ms, as the SX1262 backend
@@ -211,33 +222,41 @@ public:
 
         const uint32_t irq = _radio.getIrqFlags();
         if (irq == 0) return 0;
-
-        // A failed reception: drop every flag it left behind and re-arm RX.
-        if (irq & (RADIOLIB_LR2021_IRQ_CRC_ERROR | RADIOLIB_LR2021_IRQ_TIMEOUT |
-                   RADIOLIB_LR2021_IRQ_LORA_HDR_CRC_ERROR)) {
-            clearAndResetRx();
-            return 0;
-        }
-        if (!(irq & RADIOLIB_LR2021_IRQ_RX_DONE)) {
+        if (!(irq & (RADIOLIB_LR2021_IRQ_RX_DONE | RADIOLIB_LR2021_IRQ_CRC_ERROR |
+                     RADIOLIB_LR2021_IRQ_TIMEOUT | RADIOLIB_LR2021_IRQ_LORA_HDR_CRC_ERROR))) {
             // PREAMBLE_DETECTED / HEADER_VALID only: a packet is in flight.
             // Leave the receiver alone; isReceiving() reports the state and
             // expires the flags if they go stale.
             return 0;
         }
 
-        size_t len = _radio.getPacketLength();
-        if (len == 0 || (int)len > sz) {
-            clearAndResetRx();
+        // A packet has finished, good or bad. The LR2021 stays in continuous RX
+        // afterwards and refuses a startReceive() issued while it is still in RX
+        // (-706; upstream RadioLibWrapper::recvRaw documents the same), so this
+        // path never re-arms. readData() drains the RX FIFO and clears every IRQ
+        // flag itself (LR2021::readData) and the receiver carries on.
+        clearRxActivity();
+        const size_t len = _radio.getPacketLength();
+        if (len == 0) {
+            // Nothing in the FIFO to drain (e.g. a header CRC error): just clear.
+            chk("clearIrqFlags", _radio.clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL));
             return 0;
         }
-        int16_t st = _radio.readData(bytes, len);
+        // Reads min(len, sz) bytes. A CRC or header error comes back as
+        // CRC_MISMATCH / LORA_HEADER_DAMAGED only after the FIFO and flags are
+        // already cleared, so those are simply dropped. Any other error means
+        // readData() bailed before its own clear: clear here so the flags
+        // cannot be re-read next loop.
+        const int16_t st = _radio.readData(bytes, (size_t)sz);
+        if (st == RADIOLIB_ERR_CRC_MISMATCH || st == RADIOLIB_ERR_LORA_HEADER_DAMAGED) return 0;
         if (st != RADIOLIB_ERR_NONE) {
-            clearAndResetRx();
+            chk("readData", st);
+            chk("clearIrqFlags", _radio.clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL));
             return 0;
         }
+        if ((int)len > sz) return 0;
         _lastRSSI = _radio.getRSSI();
         _lastSNR  = _radio.getSNR();
-        clearAndResetRx();
         _pktRecv++;
         return (int)len;
     }
@@ -256,8 +275,8 @@ public:
 
     bool startSendRaw(const uint8_t* bytes, int len) override {
         if (!_initOk) return false;
-        _radio.standby();
-        _radio.clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL);
+        chk("standby", _radio.standby());
+        chk("clearIrqFlags", _radio.clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL));
         clearRxActivity();
         int16_t st = _radio.startTransmit(bytes, (size_t)len);
         if (st != RADIOLIB_ERR_NONE) {
@@ -285,10 +304,13 @@ public:
     }
 
     void onSendFinished() override {
-        _radio.finishTransmit();
+        chk("finishTransmit", _radio.finishTransmit());   // clears IRQ flags, standby
         _sending = false;
         _pktSent++;
-        startRx();
+        // No re-arm here: the startReceive() issued straight after
+        // finishTransmit() was refused (-706) after every TX in the field logs.
+        // recvRaw() re-arms on its next call and keeps retrying until accepted
+        // (upstream RadioLibWrapper: onSendFinished marks idle, recvRaw arms).
     }
 
     bool isInRecvMode() const override { return _inReceiveMode; }
@@ -354,7 +376,7 @@ public:
     void setParams(float freq, float bw, uint8_t sf, uint8_t cr) {
         _currentFreq = freq; _currentBW = bw; _currentSF = sf; _currentCR = cr;
         if (!_initOk) return;
-        _radio.standby();
+        chk("standby", _radio.standby());
         int16_t st;
         if ((st = _radio.setFrequency(freq)) != RADIOLIB_ERR_NONE)        printf("P4LR2021Radio: setFrequency %d\n", (int)st);
         if ((st = _radio.setBandwidth(bw)) != RADIOLIB_ERR_NONE)          printf("P4LR2021Radio: setBandwidth %d\n", (int)st);
@@ -374,7 +396,7 @@ public:
         // radio is receiving can leave the receiver down until reboot, so
         // drop to standby first and re-arm RX afterwards (setParams already
         // follows this shape).
-        _radio.standby();
+        chk("standby", _radio.standby());
         int16_t st = _radio.setOutputPower((int8_t)dbm);
         if (st != RADIOLIB_ERR_NONE) printf("P4LR2021Radio: setOutputPower(%u) %d\n", (unsigned)dbm, (int)st);
         clearAndResetRx();
@@ -410,7 +432,16 @@ private:
     uint64_t _activityAtUs;
     bool     _headerSeen;
 
+    // Consecutive startReceive() refusals since the last accepted one; also
+    // gates the failure print to once per outage (recvRaw retries every loop).
+    uint32_t _rxArmRetries;
+
     static uint16_t preambleFor(uint8_t sf) { return (sf <= 8) ? 32 : 16; }
+
+    // Print a RadioLib status the caller would otherwise drop.
+    static void chk(const char* what, int16_t st) {
+        if (st != RADIOLIB_ERR_NONE) printf("P4LR2021Radio: %s %d\n", what, (int)st);
+    }
 
     void clearRxActivity() { _activityAtUs = 0; _headerSeen = false; }
 
@@ -421,15 +452,21 @@ private:
                                          RADIOLIB_IRQ_RX_DEFAULT_FLAGS | (1UL << RADIOLIB_IRQ_PREAMBLE_DETECTED),
                                          RADIOLIB_IRQ_RX_DEFAULT_MASK, 0);
         if (st != RADIOLIB_ERR_NONE) {
-            printf("P4LR2021Radio: startReceive failed: %d\n", (int)st);
+            if (_rxArmRetries == 0) printf("P4LR2021Radio: startReceive failed: %d\n", (int)st);
+            _rxArmRetries++;
             _inReceiveMode = false;
             return;
+        }
+        if (_rxArmRetries != 0) {
+            printf("P4LR2021Radio: startReceive accepted after %u refusal(s)\n", (unsigned)_rxArmRetries);
+            _rxArmRetries = 0;
         }
         _inReceiveMode = true;
     }
 
+    // Re-arm from standby (setTxPower). Not used on the packet paths any more.
     void clearAndResetRx() {
-        _radio.clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL);
+        chk("clearIrqFlags", _radio.clearIrqFlags(RADIOLIB_LR2021_IRQ_ALL));
         clearRxActivity();
         startRx();
     }

@@ -6309,7 +6309,13 @@ extern "C" void app_main(void)
     }
 #endif
 
+#if !defined(CONFIG_MECK_RADIO_LR2021)
+    // Meck LR2021 variant: this drives the SX1262 driver (config_lora_params,
+    // start_lora_transmit, ...) whose SPI device was never created because
+    // begin() is skipped above -- the first transaction faults. Meck applies
+    // the saved antenna switch state itself in meck_app_init().
     System_Ui->set_config_rf_params(System_Ui->_device_sx1262);
+#endif
 
     _lock_acquire(&lvgl_api_lock);
     Set_Lvgl_Startup_Progress_Bar(85);
