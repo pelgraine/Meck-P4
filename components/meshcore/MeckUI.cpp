@@ -68,6 +68,7 @@ extern "C" int meck_voice_send_get_status(void);
 #include "MeckCardKB.h"
 #include "MeckP4Keyboard.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -998,6 +999,18 @@ static ContactFilter g_contact_filter = CONTACT_FILTER_ALL;
 // Contacts → auto-add submenu under Settings
 static lv_obj_t *scr_settings_contacts        = NULL;
 static lv_obj_t *obj_contacts_settings_scroll = NULL;   // rows container (keyboard row cycling)
+// Settings > Experimental Features sub-screen and its purge prompt (card
+// pattern as the channel picker's clear-history prompt, keyboard-modal).
+static lv_obj_t *scr_settings_experimental     = NULL;
+static lv_obj_t *obj_experimental_settings_scroll = NULL;   // rows container (keyboard row cycling)
+static lv_obj_t *obj_purge_panel   = NULL;
+static lv_obj_t *obj_purge_card    = NULL;
+static lv_obj_t *lbl_purge_title   = NULL;
+static lv_obj_t *lbl_purge_body    = NULL;
+static lv_obj_t *lbl_purge_restart = NULL;   // large restart notice above the buttons
+static lv_obj_t *btn_purge_yes     = NULL;
+static lv_obj_t *btn_purge_no      = NULL;
+static bool      g_purge_busy      = false;   // set from Yes until the restart
 static lv_obj_t *lbl_set_contact_mode         = NULL;
 static lv_obj_t *lbl_set_autoadd_chat         = NULL;
 static lv_obj_t *lbl_set_autoadd_repeater     = NULL;
@@ -1548,6 +1561,10 @@ static void admin_cmd_send_current();
 static void create_settings_contacts_screen();
 static void goto_settings_contacts(lv_event_t *e);
 static void goto_settings_from_contacts(lv_event_t *e);
+static void create_settings_experimental_screen();
+static void goto_settings_experimental(lv_event_t *e);
+static void goto_settings_from_experimental(lv_event_t *e);
+static void on_purge_no(lv_event_t *e);
 static void settings_contacts_update_labels();
 static int  settings_contacts_get_mode();
 static void settings_contacts_apply_mode(int mode);
@@ -10081,6 +10098,248 @@ static void create_settings_contacts_screen() {
 }
 
 // ============================================================================
+// Settings > Experimental Features
+// ============================================================================
+//
+// A level away from the main Settings list on purpose. Currently holds one
+// action: Delete all contacts. Flow: row -> "Delete all contacts?" card with
+// Yes / No -> "Purging" (buttons hidden, work runs from a one-shot timer so
+// the text is on screen first) -> result -> restart 2 s later.
+//
+// The purge empties the in-RAM contact table, writes an empty contacts.bin
+// (which also erases the legacy NVS contacts blob) and deletes dms.bin, the
+// direct-message history file. Everything that is keyed by contact index in
+// RAM (DM rings, admin session, UI indices) is rebuilt from the empty store
+// by the restart rather than cleared piecemeal here. Channel messages are
+// not touched.
+
+static void goto_settings_experimental(lv_event_t *e) {
+    (void)e;
+    if (scr_settings_experimental) lv_screen_load(scr_settings_experimental);
+}
+
+static void goto_settings_from_experimental(lv_event_t *e) {
+    (void)e;
+    settings_update_labels();
+    if (scr_settings) lv_screen_load(scr_settings);
+}
+
+static void on_purge_no(lv_event_t *e) {
+    (void)e;
+    if (g_purge_busy) return;   // no dismissing once the purge has started
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_purge_card);
+#endif
+    if (obj_purge_panel) lv_obj_add_flag(obj_purge_panel, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Step 3: restart, 2 s after the result was shown.
+static void purge_restart_timer_cb(lv_timer_t *t) {
+    lv_timer_delete(t);
+    esp_restart();
+}
+
+// Step 2: the purge itself. Restarts either way: on success the empty store
+// is what boots; on a failed SD write the RAM table is already empty, and a
+// restart reloads whatever the card still holds, which is the only way back
+// to a consistent state.
+static void purge_run_timer_cb(lv_timer_t *t) {
+    lv_timer_delete(t);
+    Meck* mesh = meck_get_instance();
+    P4DataStore* ds = mesh ? mesh->getDataStore() : NULL;
+    int n = mesh ? mesh->getNumContacts() : 0;
+    bool contacts_ok = false, dms_ok = false;
+    if (mesh && ds) {
+        mesh->clearAdminSession();   // drop any repeater login and its pending tags
+        mesh->purgeAllContacts();    // RAM table empty; a pending lazy save now writes the empty set
+        contacts_ok = ds->saveContacts(nullptr, 0);   // header-only contacts.bin + legacy NVS blob erased
+        dms_ok      = ds->deleteDMFile();             // /sdcard/meshcore/dms.bin
+    }
+    const bool ok = contacts_ok && dms_ok;
+    printf("Meck: purge contacts: %d removed, contacts.bin %s, dms.bin %s\n", n,
+           contacts_ok ? "written" : "FAILED", dms_ok ? "deleted" : "FAILED");
+    char body[240];
+    if (ok) {
+        snprintf(body, sizeof(body),
+                 "Done. %d contact%s and the direct-message history have been "
+                 "deleted from this device.",
+                 n, n == 1 ? "" : "s");
+    } else {
+        snprintf(body, sizeof(body),
+                 "Purge failed: the SD card did not accept the change "
+                 "(contacts file %s, DM file %s). The restart reloads what the "
+                 "card still holds.",
+                 contacts_ok ? "ok" : "failed", dms_ok ? "ok" : "failed");
+    }
+    if (lbl_purge_title)   lv_label_set_text(lbl_purge_title, ok ? "Contacts deleted" : "Purge failed");
+    if (lbl_purge_body)    lv_label_set_text(lbl_purge_body, body);
+    if (lbl_purge_restart) lv_label_set_text(lbl_purge_restart, "RESTARTING NOW...");
+    lv_timer_create(purge_restart_timer_cb, 2000, NULL);
+}
+
+// Step 1: Yes. Show the wait text, hide the buttons, run step 2 after the
+// next redraw.
+static void on_purge_yes(lv_event_t *e) {
+    (void)e;
+    if (g_purge_busy) return;
+    g_purge_busy = true;
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    meck_row_ring_clear_if_on(obj_purge_card);
+#endif
+    if (btn_purge_yes) lv_obj_add_flag(btn_purge_yes, LV_OBJ_FLAG_HIDDEN);
+    if (btn_purge_no)  lv_obj_add_flag(btn_purge_no,  LV_OBJ_FLAG_HIDDEN);
+    if (lbl_purge_title)   lv_label_set_text(lbl_purge_title, "Purging");
+    if (lbl_purge_body)    lv_label_set_text(lbl_purge_body,
+        "Deleting all contacts and the direct-message history. Please wait...");
+    if (lbl_purge_restart) lv_label_set_text(lbl_purge_restart,
+        "Do not switch off. The device restarts when this is done.");
+    lv_timer_create(purge_run_timer_cb, 300, NULL);
+}
+
+// The row on the Experimental Features screen: open the confirmation card.
+static void on_experimental_purge_tap(lv_event_t *e) {
+    (void)e;
+    Meck* mesh = meck_get_instance();
+    if (!mesh || !obj_purge_panel) return;
+    const int n = mesh->getNumContacts();
+    char body[260];
+    snprintf(body, sizeof(body),
+             "All %d contact%s will be deleted, with their favourites and custom "
+             "paths, and so will the direct-message history on this device. "
+             "Channel messages are kept.",
+             n, n == 1 ? "" : "s");
+    if (lbl_purge_title)   lv_label_set_text(lbl_purge_title, "Delete all contacts?");
+    if (lbl_purge_body)    lv_label_set_text(lbl_purge_body, body);
+    if (lbl_purge_restart) lv_label_set_text(lbl_purge_restart,
+        "The device will RESTART when the purge finishes.");
+    if (btn_purge_yes) lv_obj_clear_flag(btn_purge_yes, LV_OBJ_FLAG_HIDDEN);
+    if (btn_purge_no)  lv_obj_clear_flag(btn_purge_no,  LV_OBJ_FLAG_HIDDEN);
+    g_purge_busy = false;
+    lv_obj_clear_flag(obj_purge_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(obj_purge_panel);
+}
+
+// Built by create_settings_experimental_screen (so it is rebuilt with the
+// screen on an orientation change). Same card as the clear-history prompt.
+static void create_purge_prompt() {
+    obj_purge_panel = lv_obj_create(scr_settings_experimental);
+    lv_obj_set_size(obj_purge_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_purge_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_purge_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_purge_panel, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(obj_purge_panel, 0, 0);
+    lv_obj_add_flag(obj_purge_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_purge_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_purge_panel, LV_SCROLLBAR_MODE_OFF);
+
+    const int card_w = SCREEN_WIDTH - 60;
+    const int inner  = card_w - 32;
+    obj_purge_card = lv_obj_create(obj_purge_panel);
+    lv_obj_set_size(obj_purge_card, card_w, 470);
+    lv_obj_center(obj_purge_card);
+    lv_obj_set_style_bg_color(obj_purge_card, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(obj_purge_card, 12, 0);
+    lv_obj_set_style_border_width(obj_purge_card, 1, 0);
+    lv_obj_set_style_border_color(obj_purge_card, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_pad_all(obj_purge_card, 16, 0);
+    lv_obj_clear_flag(obj_purge_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lbl_purge_title = lv_label_create(obj_purge_card);
+    lv_label_set_text(lbl_purge_title, "Delete all contacts?");
+    lv_obj_set_style_text_color(lbl_purge_title, lv_palette_main(LV_PALETTE_RED), 0);
+    meck_set_font(lbl_purge_title, &meck_montserrat_22, 0);
+    lv_obj_align(lbl_purge_title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lbl_purge_body = lv_label_create(obj_purge_card);
+    lv_label_set_text(lbl_purge_body, "");
+    lv_obj_set_style_text_color(lbl_purge_body, lv_color_white(), 0);
+    meck_set_font(lbl_purge_body, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_purge_body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_purge_body, inner);
+    lv_obj_align(lbl_purge_body, LV_ALIGN_TOP_LEFT, 0, 44);
+
+    // Restart notice: larger and orange, anchored above the buttons so it
+    // stays put whatever the body wraps to. Text is set per phase.
+    lbl_purge_restart = lv_label_create(obj_purge_card);
+    lv_label_set_text(lbl_purge_restart, "");
+    lv_obj_set_style_text_color(lbl_purge_restart, lv_palette_main(LV_PALETTE_ORANGE), 0);
+    meck_set_font(lbl_purge_restart, &meck_montserrat_24, 0);
+    lv_label_set_long_mode(lbl_purge_restart, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_purge_restart, inner);
+    lv_obj_set_style_text_align(lbl_purge_restart, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lbl_purge_restart, LV_ALIGN_BOTTOM_MID, 0, -135);
+
+    struct { const char *text; lv_color_t bg; int y; lv_event_cb_t cb; lv_obj_t **out; } btns[2] = {
+        { "Yes", lv_palette_darken(LV_PALETTE_RED, 1), -65, on_purge_yes, &btn_purge_yes },
+        { "No",  lv_color_make(60, 60, 70),            0,   on_purge_no,  &btn_purge_no  },
+    };
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *btn = lv_button_create(obj_purge_card);
+        lv_obj_set_size(btn, inner, 55);
+        lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, btns[i].y);
+        lv_obj_set_style_bg_color(btn, btns[i].bg, 0);
+        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, btns[i].text);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        meck_set_font(lbl, &meck_montserrat_18, 0);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(btn, btns[i].cb, LV_EVENT_CLICKED, NULL);
+        *btns[i].out = btn;
+    }
+}
+
+static void create_settings_experimental_screen() {
+    scr_settings_experimental = lv_obj_create(NULL);
+    lock_screen_scroll(scr_settings_experimental);
+    lv_obj_set_style_bg_color(scr_settings_experimental, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_settings_experimental, 1, &meck_montserrat_24, 30);
+
+    // Custom back button -> main Settings (not home).
+    lv_obj_t *btn_back = lv_button_create(scr_settings_experimental);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, goto_settings_from_experimental,
+                        LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_settings_experimental);
+    lv_label_set_text(title, "Experimental");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    lv_obj_t *scroll = lv_obj_create(scr_settings_experimental);
+    obj_experimental_settings_scroll = scroll;
+    lv_obj_set_size(scroll, SCREEN_WIDTH, SCREEN_HEIGHT - 90);
+    lv_obj_set_pos(scroll, 0, 90);
+    lv_obj_set_style_bg_color(scroll, lv_color_black(), 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 10, 0);
+    lv_obj_set_scroll_dir(scroll, LV_DIR_VER);
+
+    int y = 5;
+
+    lv_obj_t *purge_value_lbl = NULL;
+    create_settings_row(scroll, "Delete all contacts",
+        &purge_value_lbl, on_experimental_purge_tap, y);
+    if (purge_value_lbl) {
+        lv_label_set_text(purge_value_lbl, "Tap");
+        lv_obj_set_style_text_color(purge_value_lbl,
+            lv_palette_main(LV_PALETTE_RED), 0);
+    }
+    y += 65;
+
+    create_purge_prompt();
+}
+
+// ============================================================================
 // Settings screen
 // ============================================================================
 
@@ -10464,6 +10723,18 @@ static void create_settings_screen() {
     // live at the new orientation (see on_settings_orientation_tap).
     create_settings_row(scroll, "Orientation (tap to flip)",
         &lbl_set_orientation, on_settings_orientation_tap, y);
+    y += 65;
+
+    // Experimental Features navigation row -> sub-screen holding actions kept
+    // a level away from this list (currently Delete all contacts).
+    lv_obj_t *experimental_value_lbl = NULL;
+    create_settings_row(scroll, "Experimental Features",
+        &experimental_value_lbl, goto_settings_experimental, y);
+    if (experimental_value_lbl) {
+        lv_label_set_text(experimental_value_lbl, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(experimental_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
     y += 65;
 
     lv_obj_t *id_row = lv_obj_create(scroll);
@@ -20210,6 +20481,7 @@ static lv_obj_t *meck_row_ring_container(void) {
     if (scr == scr_settings_canned)   return obj_canned_rows;
     if (scr == scr_settings_wifi)     return obj_wifi_settings_scroll;
     if (scr == scr_settings_contacts) return obj_contacts_settings_scroll;
+    if (scr == scr_settings_experimental) return obj_experimental_settings_scroll;
     if (scr == scr_settings_channels) return obj_ch_settings_scroll;
     if (scr == scr_channel_detail)    return scr_channel_detail;
     if (scr == scr_settings_position) return scr_settings_position;
@@ -20807,6 +21079,23 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
         return;
     }
 
+    // Purge prompt on the Experimental Features screen: keyboard-modal in the
+    // same way (Up/Down ring Yes / No, Enter presses the ringed one, Esc is
+    // No). Keys are swallowed once the purge is running.
+    if ((lv_screen_active() == scr_settings_experimental) && obj_purge_panel &&
+        !lv_obj_has_flag(obj_purge_panel, LV_OBJ_FLAG_HIDDEN)) {
+        if (!g_purge_busy) {
+            switch (key) {
+                case LV_KEY_UP:    meck_row_ring_step(obj_purge_card, -1); break;
+                case LV_KEY_DOWN:  meck_row_ring_step(obj_purge_card, +1); break;
+                case LV_KEY_ENTER: meck_row_ring_enter();                  break;
+                case LV_KEY_ESC:   on_purge_no(NULL);                      break;
+                default:           break;
+            }
+        }
+        return;
+    }
+
     // Message overlays: the path popup and the retry modal are modal to the
     // keyboard while open on the messages screen. Up/Down ring their buttons
     // (Reply / Copy Path / Close, or Retry Send / Cancel), Enter presses the
@@ -21152,6 +21441,7 @@ static void meck_ui_build_screens() {
     create_settings_screen();
     create_debug_logs_screen();
     create_settings_contacts_screen();
+    create_settings_experimental_screen();
     create_settings_wifi_screen();
     create_web_screen();
 #if MECK_BLE_KEYBOARD_ENABLED
@@ -21179,7 +21469,8 @@ static void meck_ui_build_screens() {
     {
         lv_obj_t *ring_screens[] = {
             scr_settings, scr_channel_picker, scr_settings_canned,
-            scr_settings_wifi, scr_settings_contacts, scr_settings_channels,
+            scr_settings_wifi, scr_settings_contacts, scr_settings_experimental,
+            scr_settings_channels,
             scr_channel_detail, scr_settings_position, scr_debug_logs,
 #if MECK_BLE_KEYBOARD_ENABLED
             scr_settings_keyboard,
@@ -21253,7 +21544,8 @@ static void meck_ui_teardown_screens() {
         &scr_voice_landing, &scr_voice_inbox, &scr_voice,
         &scr_radio_picker, &scr_channel_picker, &scr_dm_inbox, &scr_messages,
         &scr_contacts, &scr_contact_detail, &scr_trace, &scr_path_editor,
-        &scr_settings_contacts, &scr_discover, &scr_admin_login, &scr_admin_home,
+        &scr_settings_contacts, &scr_settings_experimental,
+        &scr_discover, &scr_admin_login, &scr_admin_home,
         &scr_room_messages, &scr_admin_status, &scr_admin_cmd, &scr_admin_settings,
         &scr_admin_send_advert, &scr_admin_setting_placeholder, &scr_admin_fw_info,
         &scr_admin_neighbours, &scr_admin_cmdlist,

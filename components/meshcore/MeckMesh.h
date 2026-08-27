@@ -2272,6 +2272,11 @@ public:
         printf("Meck: deleted contact '%s'\n", ci.name);
         return true;
     }
+
+    // Empty the in-RAM contact table in one step (BaseChatMesh::resetContacts
+    // is protected). Used by the Settings > Experimental Features purge; the
+    // caller persists the empty set and restarts the device.
+    void purgeAllContacts() { resetContacts(); }
     P4DataStore* getDataStore() { return _store; }
 
     // ---- Region scope helpers ----
@@ -4068,9 +4073,13 @@ protected:
 
     bool shouldAutoAddContactType(uint8_t type) const override {
         if (!_prefs) return true;
-        if (_prefs->manual_add_contacts != 0) return false;
-        // Check per-type bits in autoadd_config
         uint8_t cfg = _prefs->autoadd_config;
+        // Manual Only is the manual bit with no per-type bits. The UI's
+        // Custom mode sets the manual bit as well but keeps the wanted types
+        // in the bits (settings_contacts_apply_mode / _get_mode in
+        // MeckUI.cpp), so whenever any type bit is set the bits decide.
+        if (_prefs->manual_add_contacts != 0 && (cfg & 0x1E) == 0) return false;
+        // Check per-type bits in autoadd_config
         switch (type) {
             case 1: return (cfg & 0x02) != 0;  // ADV_TYPE_CHAT
             case 2: return (cfg & 0x04) != 0;  // ADV_TYPE_REPEATER

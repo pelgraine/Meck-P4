@@ -803,6 +803,12 @@ void MeckCompanion::handleCmdFrame(size_t len) {
             // or nothing gets added. Mirrors the on-screen Auto All fix in
             // MeckUI.cpp. The overwrite bit (0x01) is left as it was.
             prefs->autoadd_config |= 0x1E;
+        } else {
+            // Manual mode: clear the per-type bits so this is the same state
+            // as the on-screen Manual Only. shouldAutoAddContactType() treats
+            // manual-bit-plus-type-bits as the UI's Custom mode, so bits left
+            // over from a previous auto selection would keep auto-adding.
+            prefs->autoadd_config &= ~0x1E;
         }
         if (len >= 4) {
             // byte[3] = advert_loc_policy: 0=don't share, 1+=share
