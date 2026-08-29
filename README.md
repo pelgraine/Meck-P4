@@ -81,6 +81,8 @@ Meck-P4 runs on the LilyGo T-Display P4 in **both** of its display variants, and
 
 Both panels are 10-point capacitive touch, and the UI is rendered rotated to portrait. Everything outside the screen is common to both boards: an **ESP32-P4** (RISC-V dual-core) with 16 MB flash and 32 MB PSRAM; an onboard **ESP32-C6** (WiFi 6 / BLE 5.3) coprocessor over SDIO that provides WiFi companion connectivity to the MeshCore app as of v0.4 (BLE not yet enabled); an **SX1262** LoRa radio on the HPD16A module; a **BQ27220** fuel gauge (1000 mAh) with an **LGS4056H** charger; an **L76K** GPS on UART1; a **PCF8563** RTC (initialised but not yet used); an **ES8311** audio codec (NS4150B amplifier plus an electret microphone); an **ICM20948** IMU; an **AW86224** haptic motor; an **OV2710** MIPI camera; and an **XL9535** IO expander.
 
+LilyGo also makes an **LR2021** radio variant of the board, and Meck-P4 supports it with its own firmware build (the standard builds are for the SX1262). On sub-GHz it behaves exactly like the SX1262 boards, and it adds **2.4 GHz LoRa**: the Radio Preset picker gains three 2.4 GHz presets (**2.4GHz Sydney**, **2.4GHz (2450)** and **2.4GHz Wide (2450)**), and on 2.4 GHz frequencies TX power is limited to **10 or 12 dBm**, the LR2021's 2.4 GHz ceiling. **2.4 GHz currently works on the internal antenna only** — the external antenna path is sub-GHz only for now. Sub-GHz works on Internal or External as usual on either radio.
+
 -----
 
 ## SD Card Requirements
@@ -250,7 +252,7 @@ needed.
 
 ## Screen-Off Power Saving
 
-The Auto Off timer (Settings > Auto Off, tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes) puts the device into a low-power screen-off state after the set period of inactivity. When the timer fires, the MIPI-DSI display bus is torn down and CPU usage drops from ~94% to ~57%. The radio stays active and continues receiving messages in the background.
+The Auto Off timer (Settings > Auto Off, tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes) puts the device into a low-power screen-off state after the set period of inactivity. When the timer fires the display is switched off, and on the AMOLED build the display pipeline behind it is shut down as well, releasing the driver lock that otherwise pins the CPU at full speed — with the screen off the CPU then spends most of its time (85-88% of it in testing) at 40 MHz instead of 360 MHz. On the TFT build the screen switches off but its display driver still holds the CPU at full speed. Either way the radio stays active and continues receiving messages in the background.
 
 On keyboard (K270) builds, every keypress counts as activity and resets
 the idle timer, so the screen never blanks mid-typing or while you are
@@ -260,7 +262,7 @@ navigating by keyboard.
 
 <img width="300" height="600" alt="40BA63C0-4825-4C39-BA60-AAA020A8F475" src="https://github.com/user-attachments/assets/a5eebc32-ac66-459a-80e4-13d4081b1456" />
 
-This is not true light sleep. The PM config sets `light_sleep_enable=true`, but some PM locks are still preventing light sleep from actually engaging. The visible power saving comes from dynamic frequency scaling running more aggressively when the screen-on workload disappears. With low to moderate usage at 35% brightness, screen-off idle can add roughly an hour to an hour and a half of additional run time.
+On the AMOLED build, waking rebuilds the display pipeline in about 130 ms and deliberately skips the panel's hardware reset — testing showed a reset added about 170 ms to every wake without fixing anything, so it now runs only at boot. This is not light sleep: the PM config keeps `light_sleep_enable=false`, and the saving comes from dynamic frequency scaling stepping the CPU between 360 MHz and 40 MHz as the display workload comes and goes.
 
 -----
 
@@ -591,9 +593,12 @@ Tap **Messages** from the home grid to open the channel messages screen.
 Channel message history is persisted to per-channel files on the SD card,
 so messages survive reboots when an SD card is present.
 
+The view opens on the newest 100 messages and pages back through the whole stored history (up to 500 per channel): an **Earlier messages (N more)** row at the top adds the next 100, up to 300 on screen at once — beyond that the window slides and a **Newer messages (N more)** row at the bottom pages forward again. The message you were reading stays put while you page, a new arrival while you are paged back no longer jumps the view to the bottom, and both rows are keyboard stops on the K270 build.
+
 **Per-message metadata:**
 
 - **Incoming messages** display a small hop-count badge showing how many repeaters the packet passed through to reach you. Direct receptions show 0 hops.
+- The footer under each bubble — `21:57 · 4 hops` — continues with the sender's **path-hash mode** and, where recognised, the **region scope** the message was sent under: `21:57 · 4 hops · 2-byte · au-nsw`. Byte mode comes from the packet itself, so it shows for stored history too; route-direct messages and your own sends show this device's mode. A scoped message whose region is not recognised shows *(reg unknown)*; an unscoped message shows nothing. Region is worked out when a message arrives and kept for the session only — history reloaded from SD after a reboot shows byte mode but no region. See [Region Scope](#region-scope).
 - **Outgoing messages** show a send status that updates as repeater echoes arrive:
   - **Sending…** – the message has been transmitted but no repeater echo has been heard yet.
   - **✓ Heard N Repeats** – one or more repeaters relayed the message back. The count shows how many echoes were received, confirming the message propagated through the mesh.
@@ -658,6 +663,8 @@ The Public and #test channels are configured by default. New channels
 can be added via the channel picker’s Add Channel button (with a
 Confirm button and virtual keyboard) or through Settings → Channels.
 
+A channel's stored history can also be cleared from here: **long-press a channel row** — or ring it and press **X** on the keyboard — for a **Delete message history?** confirmation showing how many stored messages will be removed from this device (the channel itself is kept). Delete clears that channel's messages from memory, its unread count, and its SD history file; Cancel does nothing.
+
 -----
 
 ## Contacts
@@ -666,6 +673,8 @@ Tap **Contacts** from the home grid to open the contacts list. All known
 mesh contacts are shown sorted by most recently heard, with their type
 prefix (colour-coded: C / R / RS / S) and a 4-byte public-key prefix to
 disambiguate near-key-collisions.
+
+The list is windowed so it opens quickly however many contacts you hold: the first **60** of the sorted, filtered set are built, ending in a **Show more (N remaining)** row that adds the next 60. Changing filter — a swipe, a chip tap, or Left/Right on the keyboard — returns the list to its first 60, while an extended window is kept when you leave Contacts and come back. A grey count at the right end of the filter-chip row shows how full the store is — `stored/2000` on **All** (the P4 holds up to 2,000 contacts), `matched/stored` on any other filter — refreshed on open, on a filter change, and on Show more.
 
 **Filter chip bar** at the top of the list:
 
@@ -701,6 +710,8 @@ to prevent accidental loss).
 
 An **Overwrite oldest when full** toggle decides what happens when the
 contacts table reaches its 2,000-entry limit.
+
+To delete **every** contact at once — favourites and custom paths included, along with the direct-message history, while channel messages are kept — use **Settings > Experimental Features > Delete all contacts**. A confirmation card states exactly what goes, and the device restarts when the purge finishes.
 
 To add a contact that hasn’t broadcast an advert recently (so it’s not in your auto-add list), use the **Discover** screen below to send an active discovery probe and add the node from the response. This is the easiest way to pick up a nearby repeater you’ve just brought online or one whose advert your device missed.
 
@@ -770,6 +781,8 @@ Meck-P4 does not pre-set any region on a fresh flash. Region names are determine
 **Device-wide default region:** Set in Settings > Default Region. This applies to all channels and DMs unless a channel has its own override.
 
 **Per-channel region:** In Settings > Channels, tap a channel, then tap Region Scope to edit. This overrides the device default for that specific channel only. Empty = use the device default.
+
+**What shows on messages:** as of v0.7.3.5 the scope travels the other way too — each incoming channel message's footer names the region it was sent under, when the device can recognise it. A scope can only be recognised, never read back: a scoped packet carries a one-way code, so the device tries every scope it knows against it — your device default (**Settings > Default Region**), each channel's own scope (**Settings > Channels**, tap the channel, then **Region Scope**), and the shared 28-name list all the Meck firmwares carry (`au`, the Australian states and territories, and the NSW / VIC / ACT / TAS / QLD / WA sub-regions). A scoped message from outside that set shows *(reg unknown)*; an unscoped message shows nothing; your own sends show the scope they went out under. Recognition happens on arrival and lasts the session only — history reloaded from SD shows no region — and [Path View](#path-view) gains a **Region:** line above the route.
 
 **Repeater region management:** Repeaters running MeshCore v1.10+ support region management via CLI commands. From the Repeater Admin screen, log in and use the Cmd Line to send region commands directly. All remote-capable region commands work through this interface:
 
@@ -1190,15 +1203,15 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Bandwidth**       |Tap to open numeric editor, type value in kHz (e.g. 62.5), **Confirm** to save and apply                                                                                                                                        |
 |**Spreading Factor**|Tap to open numeric editor, type value (5-12), **Confirm** to save and apply                                                                                                                                                    |
 |**Coding Rate**     |Tap to cycle: 4/5, 4/6, 4/7, 4/8                                                                                                                                                                                                |
-|**Radio Preset**    |Tap to open preset picker — 17 community presets covering AU, US, EU, CN regions. Selecting a preset populates the Frequency, Bandwidth, SF, and CR fields above. Shows “Custom” when the current values don’t match any preset.|
-|**TX Power**        |Tap to cycle: 10 / 14 / 17 / 20 / 22 dBm                                                                                                                                                                                        |
+|**Radio Preset**    |Tap to open preset picker — 17 community presets covering AU, US, EU, CN regions, plus three 2.4 GHz presets on the LR2021 build. Selecting a preset populates the Frequency, Bandwidth, SF, and CR fields above. Shows “Custom” when the current values don’t match any preset.|
+|**TX Power**        |Tap to cycle: 10 / 14 / 17 / 20 / 22 dBm. The LR2021 build adds 12 to the ladder, and on 2.4 GHz frequencies the cycle is limited to 10 / 12                                                                                                                                                                                        |
 |**Path Hash Mode**  |Tap to cycle: 1-byte / 2-byte / 3-byte (default 2-byte matches the AU mesh)                                                                                                                                                     |
 |**Default Region**  |Tap to open text editor, enter region name (e.g. `au-nsw`), **Confirm** to save. Empty = unscoped. See [Region Scope](#region-scope).                                                                                           |
 |**UTC Offset**      |Tap to adjust (-12 to +14)                                                                                                                                                                                                      |
 |**Font Size**       |Tap to cycle: Classic / Larger / Extra Large. Rescales every label live, without a reboot or screen rebuild. Also sizes the reader's body text and the Notes markdown view.|
 |**Home Color**      |Tap to cycle: Plain / Multi                                                                                                                                                                                                     |
 |**Canned Messages >>**|Opens the Canned Messages sub-screen — five editable message slots sent from the compose screens via the keyboard mic key. See [Canned Messages](#canned-messages).|
-|**Antenna**         |Tap to toggle: Internal / External. Selects the SKY13453 LoRa antenna port and applies live.                                                                                                                                    |
+|**Antenna**         |Tap to toggle: Internal / External. Selects the SKY13453 LoRa antenna port and applies live. On 2.4 GHz frequencies keep this on Internal — the external path is sub-GHz only for now.                                                                                                                                    |
 |**Position >>**     |Opens the Position sub-screen (latitude, longitude, share position mode, copy position). See [Position Adverts and Share Position](#position-adverts-and-share-position).|
 |**Contacts >>**     |Opens the Contacts sub-screen (auto-add policies, type toggles)                                                                                                                                                                 |
 |**Channels >>**     |Opens the Channels sub-screen (per-channel region scope, notification preferences, notification tones, add/delete channels)                                                                                                     |
@@ -1207,10 +1220,11 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Debug Logs >>**   |Opens the Debug Logs sub-screen. Captures all firmware printf output to an SD log file for troubleshooting. See [Debug Logs](#debug-logs).                                                                                          |
 |**Brightness**      |Slider: 12% to 100% -- applies live                                                                                                                                                                                              |
 |**Keyboard Backlight**|Slider: 5% to 100%, default 25% -- applies live, saved on release. Keyboard builds only. The LilyGo key on the keyboard toggles the light on and off; this sets the level it comes on at. See [T-Display P4 Keyboard (K270)](#t-display-p4-keyboard-k270).|
-|**Auto Off**        |Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — when idle, the screen tears down the MIPI-DSI bus and CPU usage drops from ~94% to ~57% CPU_MAX. Wake with the **boot button** (touch wake is not yet supported)            |
+|**Auto Off**        |Tap to cycle: Never / 1 / 2 / 5 / 10 / 30 minutes — when idle the screen switches off, and on the AMOLED build the display pipeline shuts down too, letting the CPU drop to 40 MHz. Wake with the **boot button** (touch wake is not yet supported). See [Screen-Off Power Saving](#screen-off-power-saving)            |
 |**Orientation**     |Tap to toggle: Portrait (default) / Landscape. Applies live, rebuilding every screen at the new rotation, and persists across reboots. See [Screen Orientation](#screen-orientation).|
 |**KB Theme**        |Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details.                                                                                                  |
 |**KB Layout**       |Tap to cycle: QWERTY / AZERTY / QWERTZ / ЙЦУКЕН (Cyrillic). Layout switches apply live to every keyboard instance.                                                                                                            |
+|**Experimental Features >>**|Opens the Experimental Features sub-screen — kept a level away from the main list on purpose. Currently holds one action, **Delete all contacts**: after a confirmation card, every contact is deleted (favourites and custom paths included) along with the direct-message history; channel messages are kept, and the device restarts when the purge finishes.|
 |**Identity**        |Read-only display of your public key                                                                                                                                                                                            |
 
 All settings persist via NVS with an SD card mirror.
@@ -1506,10 +1520,10 @@ no particular timeframes attached.
 - [x] **Emoji set expanded** (v0.7.3) — 195 emoji plus the AU and EE flags, adding the Meck Watch's set (including the red heart); regenerable with `tools/bake_p4_emoji.py`. See [Emoji](#emoji).
 - [x] **SX1262 receive handling aligned with MeshCore v1.17.x** (v0.7.3) — the receiver now sees a packet from its preamble and a stalled preamble or header no longer holds up sending until the next packet (upstream PRs #3036 and #2977, re-implemented for the P4's own radio driver).
 - [x] **MeshCore core sync** (v0.7.3) — malformed `PAYLOAD_TYPE_PATH` packets are rejected (MeshCore v1.17.0).
+- [x] **LR2021 radio support** (v0.7.4) — LilyGo's LR2021 variant of the T-Display P4 runs its own build of the firmware, verified working, adding 2.4 GHz LoRa alongside sub-GHz (2.4 GHz on the internal antenna only for now). See [Supported Devices](#supported-devices).
 
 **Pending:**
 
-- [ ] LR2021 radio support — LilyGo has produced a T-Display P4 variant carrying Semtech's LR2021 (listed alongside the SX1262 in LilyGo's hardware table); support is next in line
 - [ ] Ethernet companion over the P4's onboard IP101GRI PHY, following upstream MeshCore's Ethernet support
 
 - [ ] Voice over LoRa — enable Codec2 voice messaging end-to-end (infrastructure is complete, UI and protocol are in place, pending final integration and testing)
@@ -1527,10 +1541,7 @@ no particular timeframes attached.
 - [ ] IRC client — port the upstream Meck web reader's IRC client (Stage 6)
 - [ ] PCF8563 hardware RTC integration — read on boot, write on shutdown
   so time survives power-off
-- [ ] Light sleep actually engaging — the screen-off path releases the
-  dsi_phy NO_LIGHT_SLEEP PM lock, but other PM locks still prevent
-  automatic light sleep entry. Power saving in v0.3.5 comes from
-  dynamic frequency scaling instead.
+- [ ] Light sleep actually engaging — light sleep is disabled in the PM config; screen-off power saving currently comes from dynamic frequency scaling (on the AMOLED build the screen-off path shuts the display pipeline down so the CPU can reach 40 MHz).
 - [ ] Touch wake from screen-off — currently boot-button only
 - [ ] OTA firmware updates over WiFi via the ESP32-C6
 - [ ] GPS cold-boot acquisition speed-up — EASY (predicted ephemeris)
