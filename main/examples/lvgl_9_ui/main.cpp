@@ -3253,6 +3253,33 @@ extern "C" bool meck_screen_is_off()
     return meck_screen_state_off;
 }
 
+#if defined(CONFIG_SCREEN_TYPE_RM69A10)
+// Meck: (re)register the DPI "flush done" callback on the current panel.
+// LVGL's flush path (the flush_cb set in Lvgl_Init) does NOT call
+// lv_display_flush_ready itself in the normal case -- it relies on the panel's
+// on_color_trans_done event to do it. meck_screen_off deletes the panel to
+// release the dsi_dpi PM lock, and meck_screen_on rebuilds it; a rebuilt panel
+// has no callbacks, so without this re-registration LVGL would hang forever on
+// the first repaint after wake. Gated exactly like the original registration
+// in Lvgl_Init: only the non-USB-display build relies on the event.
+#if CONFIG_ENABLE_USB_DISPLAY == true
+static inline void meck_register_dpi_flush_cb(lv_display_t *display) { (void)display; }
+#else
+static void meck_register_dpi_flush_cb(lv_display_t *display)
+{
+    esp_lcd_dpi_panel_event_callbacks_t cbs = {
+        .on_color_trans_done = [](esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx) -> bool
+        {
+            lv_display_t *disp = (lv_display_t *)user_ctx;
+            lv_display_flush_ready(disp);
+            return false;
+        },
+    };
+    esp_lcd_dpi_panel_register_event_callbacks(Screen_Mipi_Dpi_Panel, &cbs, display);
+}
+#endif
+#endif
+
 extern "C" void meck_screen_off()
 {
     if (meck_screen_state_off) return;  // already off, idempotent
@@ -3322,20 +3349,40 @@ extern "C" void meck_screen_off()
     //    rather than dereference freed memory.
     lv_display_set_user_data(display, NULL);
 
-    // 5. Blank the panel: DISPOFF only. We deliberately do NOT delete the
-    //    panel or tear down the DSI bus. The teardown/rebuild only ever
-    //    existed to release the dsi_phy NO_LIGHT_SLEEP lock so light sleep
-    //    could engage; light sleep is disabled (it can't run safely with the
-    //    always-on radio), so the teardown buys nothing and the runtime
-    //    DSI-bus delete/rebuild is what was hanging the device on P4. On this
-    //    AMOLED, brightness-0 + DISPOFF already removes almost all panel
-    //    power, and leaving the bus up makes wake instant and reliable.
+    // 5. Blank the panel with DISPOFF.
     if (Screen_Mipi_Dpi_Panel) {
         esp_lcd_panel_disp_on_off(Screen_Mipi_Dpi_Panel, false);  // 0x28 DISPOFF
     }
 
+    // 6. On the RM69A10 AMOLED, also DELETE the DPI panel. This releases the
+    //    dsi_dpi CPU_FREQ_MAX PM lock the DPI driver holds for the panel's
+    //    entire life -- the reason the P4 stayed pinned at 360 MHz even with
+    //    the screen dark. With it gone, the DFS config (min 40 MHz) drops the
+    //    CPU right down. The panel keeps the last (brightness-0, dark) frame
+    //    lit from its own GRAM via self-refresh -- proven on hardware -- so the
+    //    screen stays dark and nothing flickers. We delete ONLY the panel,
+    //    never the DSI bus: the bus teardown is what used to hang the P4, and
+    //    it stays up here. meck_screen_on() rebuilds the panel on wake. Gated
+    //    to RM69A10 because self-refresh across the delete is only validated on
+    //    that panel; other panels keep the DISPOFF-only path.
+#if defined(CONFIG_SCREEN_TYPE_RM69A10)
+    if (Screen_Mipi_Dpi_Panel) {
+        esp_lcd_panel_del(Screen_Mipi_Dpi_Panel);
+        Screen_Mipi_Dpi_Panel = NULL;
+    }
+    meck_screen_state_off = true;
+    printf("meck_screen_off: panel deleted, dsi_dpi lock released (CPU can drop to DFS min)\n");
+    // TEMP DIAG (2026-08-28): dump PM locks + CPU frequency mode stats so the
+    // dsi_dpi lock disappearing (ceiling released) is visible on serial. Its
+    // APB_MIN time here vs at the next wake shows how long the CPU sat at the
+    // low frequency while the screen was off. Remove once confirmed.
+#if CONFIG_PM_ENABLE
+    esp_pm_dump_locks(stdout);
+#endif
+#else
     meck_screen_state_off = true;
     printf("meck_screen_off: panel blanked (DISPOFF), DSI bus left up\n");
+#endif
 }
 
 extern "C" void meck_screen_on()
@@ -3348,15 +3395,88 @@ extern "C" void meck_screen_on()
         return;
     }
 
-    // 1. Wake the existing panel. We no longer tear the DSI bus down in
-    //    meck_screen_off, so there is nothing to rebuild: the panel handle
-    //    and DSI bus are still live. Just undo the DISPOFF with a DISPON.
+    // 1. Bring the panel back.
+#if defined(CONFIG_SCREEN_TYPE_RM69A10)
+    //    The AMOLED path DELETED the panel in meck_screen_off to release the
+    //    dsi_dpi CPU_FREQ_MAX lock. Rebuild it on the still-live DSI bus. Hold
+    //    the CPU at max across the rebuild and stream start, so the video fetch
+    //    does not begin while the clock is still down at the DFS minimum -- that
+    //    race is what produces a one-frame underrun on wake. Once the rebuilt
+    //    panel is streaming it holds the dsi_dpi lock itself, so we release ours.
+    //    panel_init runs the vendor init (~200 ms, SLPOUT settle), which is why
+    //    wake is a touch slower than before.
+#if CONFIG_PM_ENABLE
+    static esp_pm_lock_handle_t s_wake_freq_lock = NULL;
+    if (s_wake_freq_lock == NULL) {
+        esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "scrn_wake", &s_wake_freq_lock);
+    }
+    if (s_wake_freq_lock) esp_pm_lock_acquire(s_wake_freq_lock);
+#endif
+    printf("meck_screen_on: [diag] wake begin -- freq lock held, rebuilding panel\n");   // TEMP DIAG 2026-08-28
+    if (!Screen_Rebuild_Panel(&Screen_Mipi_Dpi_Panel)) {
+        printf("meck_screen_on: Screen_Rebuild_Panel FAILED, aborting\n");
+#if CONFIG_PM_ENABLE
+        if (s_wake_freq_lock) esp_pm_lock_release(s_wake_freq_lock);
+#endif
+        return;
+    }
+    // Stop the DPI stream before the slow vendor init runs.
+    //
+    // Creating the panel re-enables the DPI clock and the DSI bridge, but the
+    // IDF driver's panel delete never clears the bridge's DPI-output enable or
+    // the host's video-mode enable (esp_lcd_panel_dpi.c: enable_dpi_output and
+    // enable_video_mode are set true in dpi_panel_init and never set false in
+    // dpi_panel_del). So on a rebuild the stream restarts at CREATION, while
+    // the DMA that feeds it is not enabled until esp_lcd_panel_init() -- and
+    // the vendor init commands (including a 120 ms sleep-out delay) run in
+    // between. The bridge spends all of that streaming from an empty FIFO,
+    // which is the "can't fetch data from external memory fast enough" underrun
+    // seen on every wake and never at boot (at boot the DPI-output bit has
+    // never been set, so nothing streams until the DMA is running).
+    //
+    // The driver does not resynchronise after an underrun -- it logs and
+    // carries on -- so the scan stays offset and the whole image is displaced,
+    // cumulatively, one slip per rebuild. Selecting a non-NONE pattern is the
+    // only public API that clears the bridge's DPI-output enable, so use it to
+    // halt the stream across the vendor init.
+    esp_lcd_dpi_panel_set_pattern(Screen_Mipi_Dpi_Panel, MIPI_DSI_PATTERN_BAR_VERTICAL);
+
+    printf("meck_screen_on: [diag] rebuild OK -- running panel_init (vendor init + stream)\n");   // TEMP DIAG 2026-08-28
+    if (esp_lcd_panel_init(Screen_Mipi_Dpi_Panel) != ESP_OK) {
+        printf("meck_screen_on: esp_lcd_panel_init FAILED after rebuild\n");
+    }
+
+    // Restart the stream cleanly now that the DMA is live. panel_init has
+    // re-enabled DPI output, but the host pattern generator is still selected
+    // from above; switching back to NONE selects real framebuffer data and
+    // toggles the bridge's DPI output off/on again, so the stream restarts from
+    // a clean frame boundary with the FIFO being fed. Brightness is 0 here (the
+    // vendor init sequence ends with 0x51=0x00 and the caller restores
+    // brightness only after this function returns), so the pattern generator
+    // output is never visible on the glass.
+    esp_lcd_dpi_panel_set_pattern(Screen_Mipi_Dpi_Panel, MIPI_DSI_PATTERN_NONE);
+
+    // The rebuilt panel has no callbacks; re-register the flush-done event or
+    // LVGL hangs on the first repaint (see meck_register_dpi_flush_cb).
+    meck_register_dpi_flush_cb(display);
+#if CONFIG_PM_ENABLE
+    if (s_wake_freq_lock) esp_pm_lock_release(s_wake_freq_lock);
+#endif
+    // TEMP DIAG (2026-08-28): confirm the rebuilt panel re-took the dsi_dpi
+    // CPU_FREQ_MAX lock (ceiling back up while the screen is on). Remove once
+    // confirmed.
+#if CONFIG_PM_ENABLE
+    esp_pm_dump_locks(stdout);
+#endif
+#else
+    //    Non-AMOLED: the panel was only blanked (DISPOFF); just wake it.
     if (Screen_Mipi_Dpi_Panel) {
         esp_lcd_panel_disp_on_off(Screen_Mipi_Dpi_Panel, true);   // 0x29 DISPON
     } else {
         printf("meck_screen_on: no panel handle, aborting\n");
         return;
     }
+#endif
 
     // 3. Restore the LVGL display's panel handle so the flush callback at
     //    line 3893 (set in Lvgl_Init via lv_display_set_flush_cb) can find

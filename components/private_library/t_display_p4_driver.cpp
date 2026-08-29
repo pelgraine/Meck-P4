@@ -19,6 +19,11 @@
 // call esp_lcd_del_dsi_bus(bus) and release the dsi_phy PM lock.
 static esp_lcd_dsi_bus_handle_t s_screen_mipi_dsi_bus = NULL;
 
+// Meck: file-scope handle to the screen's DBI (command) io, captured alongside
+// the bus in Mipi_Dsi_Init on the screen path. Screen_Rebuild_Panel reuses it
+// so a rebuilt panel does not need a fresh io created each wake.
+static esp_lcd_panel_io_handle_t s_screen_mipi_dbi_io = NULL;
+
 bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t dpi_clock_freq_mhz, lcd_color_rgb_pixel_format_t color_rgb_pixel_format, uint8_t num_fbs, uint32_t width, uint32_t height,
                    uint32_t mipi_dsi_hsync, uint32_t mipi_dsi_hbp, uint32_t mipi_dsi_hfp, uint32_t mipi_dsi_vsync, uint32_t mipi_dsi_vbp, uint32_t mipi_dsi_vfp,
                    uint32_t bits_per_pixel, esp_lcd_panel_handle_t *mipi_dpi_panel,
@@ -125,6 +130,8 @@ bool Mipi_Dsi_Init(uint8_t num_data_lanes, uint32_t lane_bit_rate_mbps, uint32_t
     // succeeded, so callers never see a half-baked bus.
     if (out_dsi_bus != nullptr) {
         *out_dsi_bus = mipi_dsi_bus;
+        // Meck: same call site captures the DBI io for Screen_Rebuild_Panel.
+        s_screen_mipi_dbi_io = mipi_dbi_io;
     }
 
     return true;
@@ -153,6 +160,81 @@ bool Screen_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)
 esp_lcd_dsi_bus_handle_t Screen_Get_Mipi_Dsi_Bus_Handle()
 {
     return s_screen_mipi_dsi_bus;
+}
+
+// Meck: recreate the DPI panel on the already-live DSI bus. This is the
+// panel-creation half of Mipi_Dsi_Init (identical dpi_config via the SCREEN_*
+// macros) but it reuses the captured bus and DBI io instead of creating new
+// ones, so it never makes a second DSI bus and never deletes/rebuilds the bus
+// (the teardown that hung the P4). The caller runs esp_lcd_panel_init() on the
+// returned panel to send the vendor init and start the video stream.
+bool Screen_Rebuild_Panel(esp_lcd_panel_handle_t *mipi_dpi_panel)
+{
+    if (s_screen_mipi_dsi_bus == NULL || s_screen_mipi_dbi_io == NULL)
+    {
+        printf("Screen_Rebuild_Panel: no live bus/io (Screen_Init not run?)\n");
+        return false;
+    }
+
+    esp_lcd_dpi_panel_config_t dpi_config = {
+        .virtual_channel = 0,
+        .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
+        .dpi_clock_freq_mhz = SCREEN_MIPI_DSI_DPI_CLK_MHZ,
+        .pixel_format = SCREEN_COLOR_RGB_PIXEL_FORMAT,
+        .num_fbs = 0,
+        .video_timing = {
+            .h_size = SCREEN_WIDTH,
+            .v_size = SCREEN_HEIGHT,
+            .hsync_pulse_width = SCREEN_MIPI_DSI_HSYNC,
+            .hsync_back_porch = SCREEN_MIPI_DSI_HBP,
+            .hsync_front_porch = SCREEN_MIPI_DSI_HFP,
+            .vsync_pulse_width = SCREEN_MIPI_DSI_VSYNC,
+            .vsync_back_porch = SCREEN_MIPI_DSI_VBP,
+            .vsync_front_porch = SCREEN_MIPI_DSI_VFP,
+        },
+        .flags = {
+            .use_dma2d = true,
+        }};
+
+#if defined CONFIG_SCREEN_TYPE_HI8561
+    hi8561_vendor_config_t vendor_config = {
+        .mipi_config = {
+            .dsi_bus = s_screen_mipi_dsi_bus,
+            .dpi_config = &dpi_config,
+        },
+    };
+    esp_lcd_panel_dev_config_t dev_config = {
+        .reset_gpio_num = -1,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .bits_per_pixel = SCREEN_BITS_PER_PIXEL,
+        .vendor_config = &vendor_config,
+    };
+    esp_err_t assert = esp_lcd_new_panel_hi8561(s_screen_mipi_dbi_io, &dev_config, mipi_dpi_panel);
+#elif defined CONFIG_SCREEN_TYPE_RM69A10
+    rm69a10_vendor_config_t vendor_config = {
+        .mipi_config = {
+            .dsi_bus = s_screen_mipi_dsi_bus,
+            .dpi_config = &dpi_config,
+        },
+    };
+    esp_lcd_panel_dev_config_t dev_config = {
+        .reset_gpio_num = -1,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .bits_per_pixel = SCREEN_BITS_PER_PIXEL,
+        .vendor_config = &vendor_config,
+    };
+    esp_err_t assert = esp_lcd_new_panel_rm69a10(s_screen_mipi_dbi_io, &dev_config, mipi_dpi_panel);
+#else
+#error "unknown macro definition, please select the correct macro definition."
+#endif
+
+    if (assert != ESP_OK)
+    {
+        printf("Screen_Rebuild_Panel: panel creation fail (error code: %#X)\n", assert);
+        return false;
+    }
+
+    return true;
 }
 
 bool Camera_Init(esp_lcd_panel_handle_t *mipi_dpi_panel)

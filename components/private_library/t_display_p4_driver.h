@@ -107,3 +107,13 @@ bool Init_Ldo_Channel_Power(uint8_t chan_id, uint32_t voltage_mv);
 // been deleted (call sites in meck_screen_off are responsible for
 // ensuring the screen is in a state where this handle is valid).
 esp_lcd_dsi_bus_handle_t Screen_Get_Mipi_Dsi_Bus_Handle();
+
+// Meck: recreate the DPI panel on the ALREADY-LIVE DSI bus, reusing the bus
+// and DBI io captured by Screen_Init. Used by the screen-off power path:
+// meck_screen_off() deletes the DPI panel (esp_lcd_panel_del) to release the
+// dsi_dpi CPU_FREQ_MAX PM lock so the CPU can drop to its DFS minimum while
+// the panel self-refreshes the last frame from GRAM; meck_screen_on() calls
+// this to rebuild the panel on wake. This never creates a second DSI bus and
+// never touches the bus teardown that hung the P4. Returns false if
+// Screen_Init has not run (no live bus/io) or panel creation fails.
+bool Screen_Rebuild_Panel(esp_lcd_panel_handle_t *mipi_dpi_panel);
