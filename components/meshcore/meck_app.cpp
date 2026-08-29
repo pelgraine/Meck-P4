@@ -723,9 +723,11 @@ extern "C" bool meck_app_init() {
     // available, so it boots the radio on variant.h defaults
     // (which are the AU Narrow preset). This is where the user's
     // actual saved preset finally takes effect.
+    // Power before params -- radio_set_params programs the SX1262 with the
+    // stored TX value (see target.cpp), so store it first.
+    radio_set_tx_power(g_node_prefs.tx_power_dbm);
     radio_set_params(g_node_prefs.freq, g_node_prefs.bw,
                      g_node_prefs.sf,   g_node_prefs.cr);
-    radio_set_tx_power(g_node_prefs.tx_power_dbm);
     meck_set_antenna(g_node_prefs.antenna);
     printf("meck_app_init: applied prefs to radio: "
            "%.3f MHz, BW=%.1f kHz, SF%u, CR=%u, TX=%d dBm\n",

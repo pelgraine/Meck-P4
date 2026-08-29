@@ -98,6 +98,16 @@ bool meck_radio_attach() {
 }
 
 
+// Meck: TX power the SX1262 build programs into config_lora_params.
+// radio_set_tx_power() stores the user's selection here and
+// radio_set_params() reads it, so the Settings value actually reaches the
+// chip. The call site used to pass LORA_TX_POWER_DEFAULT, which left the PA
+// at 22 dBm regardless of the setting (issue #15). Seeded with the variant
+// default to cover the boot window before saved prefs are applied. The
+// LR2021 build does not use this; its backend stores and applies power
+// itself.
+static uint8_t g_sx1262_tx_power_dbm = LORA_TX_POWER_DEFAULT;
+
 // ============================================================
 // radio_set_params() — Configure LoRa modulation
 // ============================================================
@@ -136,7 +146,7 @@ void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr) {
 
     if (SX1262) {
         SX1262->config_lora_params(
-            freq, bw_enum, 140 /*current limit mA*/, LORA_TX_POWER_DEFAULT,
+            freq, bw_enum, 140 /*current limit mA*/, g_sx1262_tx_power_dbm,
             sf_enum, cr_enum,
             Cpp_Bus_Driver::Sx126x::Lora_Crc_Type::ON,
             preamble, meshcore_sync_word
@@ -163,7 +173,12 @@ void radio_set_tx_power(uint8_t dbm) {
     radio_driver.setTxPower(dbm);
     return;
 #endif
-    // Applied via config_lora_params on next radio_set_params() call.
+    // SX1262: store the value; radio_set_params() passes it into
+    // config_lora_params. Call sites set power BEFORE params so the new
+    // value lands on the same reconfig rather than the next one (see
+    // radio_apply_pending_reconfig below and the prefs apply in
+    // meck_app.cpp).
+    g_sx1262_tx_power_dbm = dbm;
 }
 
 
@@ -207,8 +222,14 @@ extern "C" void radio_apply_pending_reconfig() {
     uint8_t tx   = g_pending_tx_power;
 
     printf("radio_apply_pending_reconfig: applying queued config\n");
-    radio_set_params(freq, bw, sf, cr);
+    // Power before params: on the SX1262 build radio_set_params reads the
+    // stored TX value when it programs the chip, so it must be stored first
+    // or the change would land one reconfig late. Safe on the LR2021 build
+    // too: its setParams re-applies the backend's stored power after tuning
+    // (P4LR2021Radio.h), so a transiently rejected setOutputPower during a
+    // band change is corrected immediately.
     radio_set_tx_power(tx);
+    radio_set_params(freq, bw, sf, cr);
     printf("radio_apply_pending_reconfig: done\n");
 }
 
