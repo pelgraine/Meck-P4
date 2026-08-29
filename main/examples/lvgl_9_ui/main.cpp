@@ -3446,14 +3446,26 @@ extern "C" void meck_screen_on()
         printf("meck_screen_on: esp_lcd_panel_init FAILED after rebuild\n");
     }
 
-    // Restart the stream cleanly now that the DMA is live. panel_init has
-    // re-enabled DPI output, but the host pattern generator is still selected
-    // from above; switching back to NONE selects real framebuffer data and
-    // toggles the bridge's DPI output off/on again, so the stream restarts from
-    // a clean frame boundary with the FIFO being fed. Brightness is 0 here (the
-    // vendor init sequence ends with 0x51=0x00 and the caller restores
-    // brightness only after this function returns), so the pattern generator
-    // output is never visible on the glass.
+    // Restart the stream with an explicit output off/on, now that the DMA is
+    // live.
+    //
+    // Read from ESP-IDF v5.4.1 esp_lcd_panel_dpi.c: esp_lcd_dpi_panel_set_pattern
+    // only clears the bridge's DPI-output enable on its non-NONE branch. The NONE
+    // branch selects real framebuffer data and then asserts enable(true) -- it
+    // never disables first. dpi_panel_init has already set enable_dpi_output true
+    // (line 452), so a bare NONE call here would swap the host from pattern
+    // generator to live pixels mid-stream with nothing synchronising it. That is
+    // where the remaining one-underrun-per-wake fires, and the driver does not
+    // recover from an underrun (its own comment: the display may already have
+    // gone blue).
+    //
+    // Calling BAR_VERTICAL again drives enable_dpi_output low with the DMA
+    // already running; the NONE that follows brings it back up. The bridge
+    // therefore restarts from a stopped state while being fed, rather than
+    // switching source mid-frame. Brightness is 0 across this window (the vendor
+    // init ends with 0x51=0x00 and the caller restores brightness only after this
+    // function returns), so the pattern generator output is never visible.
+    esp_lcd_dpi_panel_set_pattern(Screen_Mipi_Dpi_Panel, MIPI_DSI_PATTERN_BAR_VERTICAL);
     esp_lcd_dpi_panel_set_pattern(Screen_Mipi_Dpi_Panel, MIPI_DSI_PATTERN_NONE);
 
     // The rebuilt panel has no callbacks; re-register the flush-done event or
