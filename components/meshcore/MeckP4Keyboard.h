@@ -158,6 +158,33 @@ public:
         }
     }
 
+    // ---- GBC raw joypad mode (MeckGBC) ------------------------------------
+    // While on, key events update a held-key bitmask on BOTH edges instead
+    // of feeding the character ring, so nothing leaks into the UI and the
+    // emulator gets true press-and-hold input. read_key() still drains the
+    // FIFO (the 30 ms poll keeps running); it just returns nothing. The
+    // pending ring is cleared on enable so keystrokes queued before the
+    // game do not pop into the UI afterwards, and the Shift/Fn one-shots
+    // are cleared so no stale modifier survives the game.
+    void set_raw_joypad(bool on) {
+        _raw      = on;
+        _raw_mask = 0;
+        _raw_exit = false;
+        _head = _tail = 0;
+        _shift = false;
+        _fn    = false;
+    }
+    // Held-key bitmask. Bit layout matches Peanut-GB direct.joypad exactly
+    // (a 0x01, b 0x02, select 0x04, start 0x08, right 0x10, left 0x20,
+    // up 0x40, down 0x80); a set bit means held.
+    uint8_t raw_joypad() const { return _raw_mask; }
+    // Esc press-edge latch, consumed on read: the emulator's exit signal.
+    bool raw_exit_pressed() {
+        bool e = _raw_exit;
+        _raw_exit = false;
+        return e;
+    }
+
 private:
     // Custom codes assigned to the modifier keys by Tca8418_Map_Lvgl in
     // t_display_p4_keyboard_config.h.
@@ -188,14 +215,46 @@ private:
         for (size_t i = 0; i < tp.info.size(); i++) {
             if (tp.info[i].event_type !=
                 Cpp_Bus_Driver::Tca8418::Event_Type::KEYPAD) continue;
-            if (tp.info[i].press_flag == false) continue;          // key-up
             const uint8_t num = tp.info[i].num;
             if ((num == 0) || (num > kMapLen)) continue;
+            if (_raw) {
+                // Raw joypad mode: both edges matter, modifiers ignored,
+                // nothing enters the character ring.
+                raw_event(Tca8418_Map_Lvgl[num - 1], tp.info[i].press_flag);
+                continue;
+            }
+            if (tp.info[i].press_flag == false) continue;          // key-up
             const uint32_t code = translate(num);
             if (code != 0) push(code);
         }
 
         _kbd->clear_irq_flag(Cpp_Bus_Driver::Tca8418::Irq_Flag::KEY_EVENTS);
+    }
+
+    // Map a base keycode (Tca8418_Map_Lvgl entry, no modifier processing)
+    // to its GBC joypad bit and apply the edge. Esc is a press-edge exit
+    // latch rather than a joypad bit. Keys outside the mapping are ignored
+    // entirely in raw mode. Mapping: arrows = d-pad, K = A, J = B,
+    // Enter = Start, Space = Select, Esc = exit.
+    void raw_event(uint32_t base, bool pressed) {
+        uint8_t bit = 0;
+        switch (base) {
+            case 'k':          bit = 0x01; break;   // A
+            case 'j':          bit = 0x02; break;   // B
+            case ' ':          bit = 0x04; break;   // Select
+            case LV_KEY_ENTER: bit = 0x08; break;   // Start
+            case LV_KEY_RIGHT: bit = 0x10; break;
+            case LV_KEY_LEFT:  bit = 0x20; break;
+            case LV_KEY_UP:    bit = 0x40; break;
+            case LV_KEY_DOWN:  bit = 0x80; break;
+            case LV_KEY_ESC:
+                if (pressed) _raw_exit = true;
+                return;
+            default:
+                return;
+        }
+        if (pressed) _raw_mask |= bit;
+        else         _raw_mask &= (uint8_t)~bit;
     }
 
     // Map a scan number to an LVGL key code, applying modifier state.
@@ -288,6 +347,13 @@ private:
     uint32_t _ring[kRing] = {0};
     size_t   _head = 0;
     size_t   _tail = 0;
+
+    // GBC raw joypad mode state. The mask and exit latch are byte-sized
+    // and read from the emulator task on the other core while drain()
+    // writes them in the LVGL task, hence volatile.
+    bool             _raw      = false;
+    volatile uint8_t _raw_mask = 0;
+    volatile bool    _raw_exit = false;
 };
 
 #endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD

@@ -67,6 +67,7 @@ extern "C" int meck_voice_send_get_status(void);
 #include "sdkconfig.h"
 #include "MeckCardKB.h"
 #include "MeckP4Keyboard.h"
+#include "MeckGBC.h"
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "nvs.h"
@@ -1662,7 +1663,14 @@ static void goto_audio_browser(lv_event_t* e) {
 static void cb_todo_web(lv_event_t* e)      { show_not_implemented("Web"); }
 static void cb_todo_voice(lv_event_t* e)    { show_not_implemented("Voice"); }
 static void cb_todo_camera(lv_event_t* e)   { show_not_implemented("Camera"); }
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+// Games tile: opens the Games menu (MeckGBC). Keyboard builds only -- the
+// GBC emulator's controls are the K270, so the plain board keeps the
+// placeholder until touch controls land.
+static void cb_todo_games(lv_event_t* e)    { (void)e; meck_gbc_show_menu(); }
+#else
 static void cb_todo_games(lv_event_t* e)    { show_not_implemented("Games"); }
+#endif
 // Voice tile: opens the existing voice landing screen (Inbox / Record
 // picker), which previously had no entry point from the home grid.
 static void goto_voice_landing(lv_event_t* e) {
@@ -1747,6 +1755,11 @@ static void get_tile_colors(int idx, lv_color_t *bg, lv_color_t *border,
     // which stacked directly under Notes' yellow in the landscape grid.
     // (Rose #FF0055 was tried and read as a near-twin of Discover's pink.)
     if (idx == 9) *border = lv_palette_main(LV_PALETTE_DEEP_PURPLE);
+
+    // Voice (creation idx 10): the palette hands it the same deep purple
+    // as Web's idx 9 override; lighten it to a lavender so the two read
+    // as different tiles at a glance.
+    if (idx == 10) *border = lv_palette_lighten(LV_PALETTE_DEEP_PURPLE, 2);
 }
 
 // Repaint every registered tile to match the current scheme. Cheap: just
@@ -6148,14 +6161,8 @@ static void on_home_wrap_gesture(lv_event_t *e) {
     if (!g_tileview) return;
     lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
     const int page = meck_home_page_index();
-    // TEMPORARY diagnostic -- remove when the wrap behaviour is settled.
-    printf("[diag] wrap gesture: dir=%c page=%d\n",
-           (d == LV_DIR_LEFT) ? 'L' : (d == LV_DIR_RIGHT) ? 'R' :
-           (d == LV_DIR_TOP)  ? 'T' : (d == LV_DIR_BOTTOM) ? 'B' : '?',
-           page);
     if (page < 0) return;
     if ((d == LV_DIR_RIGHT) && (page == 0)) {
-        printf("[diag] wrap jump -> %d\n", MECK_HOME_PAGE_COUNT - 2);
         // LV_ANIM_OFF: an animated jump scrolls across every intermediate
         // page, and LVGL kills a scroll animation on the next touch, so an
         // interrupted flight snapped to whichever middle page it was
@@ -6164,7 +6171,6 @@ static void on_home_wrap_gesture(lv_event_t *e) {
         lv_tileview_set_tile_by_index(g_tileview,
             (uint32_t)(MECK_HOME_PAGE_COUNT - 2), 0, LV_ANIM_OFF);
     } else if ((d == LV_DIR_LEFT) && (page == MECK_HOME_PAGE_COUNT - 1)) {
-        printf("[diag] wrap jump -> 0\n");
         lv_tileview_set_tile_by_index(g_tileview, 0, 0, LV_ANIM_OFF);
     }
 }
@@ -6221,15 +6227,8 @@ static void home_apply_tile_scroll(void) {
 static void on_home_tile_scroll_gesture(lv_event_t *e) {
     if (lv_event_get_code(e) != LV_EVENT_GESTURE) return;
     if (!g_tileview) return;
-    const int diag_page = meck_home_page_index();
-    const lv_dir_t diag_d = lv_indev_get_gesture_dir(lv_indev_active());
-    // TEMPORARY diagnostic -- remove when the wrap behaviour is settled.
-    printf("[diag] tilescroll gesture: dir=%c page=%d scrolled=%d\n",
-           (diag_d == LV_DIR_LEFT) ? 'L' : (diag_d == LV_DIR_RIGHT) ? 'R' :
-           (diag_d == LV_DIR_TOP)  ? 'T' : (diag_d == LV_DIR_BOTTOM) ? 'B' : '?',
-           diag_page, (int)g_home_tile_scroll);
-    if (diag_page != 0) return;
-    const lv_dir_t d = diag_d;
+    if (meck_home_page_index() != 0) return;
+    const lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
     if (d == LV_DIR_BOTTOM) {
         if (!g_home_tile_scroll) { g_home_tile_scroll = true;  home_apply_tile_scroll(); }
     } else if (d == LV_DIR_TOP) {
@@ -20476,6 +20475,20 @@ static void meck_cardkb_init(void) {
 static MeckP4Keyboard  g_p4kbd;
 static lv_timer_t     *g_p4kbd_timer = NULL;
 
+// GBC raw joypad plumbing: MeckGBC.cpp cannot see the static keyboard
+// instance, so these thin wrappers expose the raw mode across the
+// translation-unit boundary (same extern "C" convention as
+// meck_ui_set_font). Bit layout is documented in MeckP4Keyboard.h.
+extern "C" void meck_p4kbd_set_raw_joypad(bool on) {
+    g_p4kbd.set_raw_joypad(on);
+}
+extern "C" uint8_t meck_p4kbd_raw_joypad(void) {
+    return g_p4kbd.raw_joypad();
+}
+extern "C" bool meck_p4kbd_raw_exit_pressed(void) {
+    return g_p4kbd.raw_exit_pressed();
+}
+
 // Step the home tileview one page left or right, matching what a swipe
 // does, and wrapping at the ends like the touch wrap gesture: backwards
 // from the first page lands on Timezones (the last content page, skipping
@@ -21535,8 +21548,6 @@ static void meck_ui_build_screens() {
     // tile page -- never per-render).
     lv_obj_add_event_cb(g_tileview, [](lv_event_t *e) {
         (void)e;
-        // TEMPORARY diagnostic -- remove when the wrap behaviour is settled.
-        printf("[diag] tileview page change -> %d\n", meck_home_page_index());
         if (g_home_tile_scroll && meck_home_page_index() != 0) {
             g_home_tile_scroll = false;
             home_apply_tile_scroll();

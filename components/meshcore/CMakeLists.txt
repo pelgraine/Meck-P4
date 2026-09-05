@@ -49,6 +49,7 @@ idf_component_register(
         "MeckReaderUI.cpp"
         "MeckNotes.cpp"
         "MeckNotesUI.cpp"
+        "MeckGBC.cpp"
         "es8311.cpp" 
         "meck_montserrat_14.c"
         "meck_montserrat_16.c"
@@ -181,3 +182,7 @@ string(TIMESTAMP MECK_BUILD_EPOCH "%s" UTC)
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     MECK_BUILD_EPOCH=${MECK_BUILD_EPOCH}
 )
+# GBC emulator: embed the bundled ucity ROM (GPL-3.0, 128 KB) into the app
+# image. MeckGBC copies it to /sdcard/roms/ucity.gbc on first use so every
+# user has a game without downloading anything.
+target_add_binary_data(${COMPONENT_LIB} "ucity_rom.gbc" BINARY)
