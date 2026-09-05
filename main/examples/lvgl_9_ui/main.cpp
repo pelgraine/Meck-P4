@@ -348,6 +348,14 @@ ppa_client_handle_t ppa_srm_handle = NULL;
 size_t data_cache_line_size = 0;
 ppa_client_handle_t ppa_srm_handle_2 = NULL;
 size_t data_cache_line_size_2 = 0;
+// Meck: persistent PPA rotation buffer for the flush callback. Previously
+// allocated (1.37 MB aligned DMA PSRAM) and freed on EVERY rotated flush,
+// which intermittently failed under transient PSRAM pressure (e.g. a dozen
+// map tiles decoding) and froze the display until memory freed. Allocated
+// once on the first rotated flush, kept for the life of the firmware.
+static uint8_t *meck_rot_buffer = NULL;
+// Meck: screen-off framebuffer reservation (see meck_screen_off).
+static void *meck_fb_guard = NULL;
 void *lcd_buffer[CONFIG_EXAMPLE_CAM_BUF_COUNT];
 int32_t fps_count;
 int64_t start_time;
@@ -3370,6 +3378,23 @@ extern "C" void meck_screen_off()
         esp_lcd_panel_del(Screen_Mipi_Dpi_Panel);
         Screen_Mipi_Dpi_Panel = NULL;
     }
+    // Reserve the framebuffer's contiguous region while the screen is off.
+    // esp_lcd_panel_del just freed the DPI frame buffer (568x1232x2 bytes,
+    // cache-line aligned, MALLOC_CAP_SPIRAM|8BIT -- read from ESP-IDF
+    // v5.4.1 esp_lcd_panel_dpi.c line 225). If anything else claims that
+    // hole while the screen is off, the wake-time rebuild fails with "no
+    // memory for frame buffer" and the screen cannot come back until the
+    // memory frees (seen on hardware). Grabbing an identically-sized block
+    // with identical alignment and caps immediately after the free keeps
+    // the region ours; meck_screen_on releases it just before the rebuild.
+    if (meck_fb_guard == NULL) {
+        meck_fb_guard = heap_caps_aligned_alloc(data_cache_line_size_2,
+            (size_t)SCREEN_WIDTH * SCREEN_HEIGHT * (SCREEN_BITS_PER_PIXEL / 8),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (meck_fb_guard == NULL) {
+            printf("meck_screen_off: fb guard alloc failed -- next wake unprotected\n");
+        }
+    }
     meck_screen_state_off = true;
     printf("meck_screen_off: panel deleted, dsi_dpi lock released (CPU can drop to DFS min)\n");
     // TEMP DIAG (2026-08-28): dump PM locks + CPU frequency mode stats so the
@@ -3413,8 +3438,20 @@ extern "C" void meck_screen_on()
     if (s_wake_freq_lock) esp_pm_lock_acquire(s_wake_freq_lock);
 #endif
     printf("meck_screen_on: [diag] wake begin -- freq lock held, rebuilding panel\n");   // TEMP DIAG 2026-08-28
+    // Release the framebuffer guard taken in meck_screen_off so the DPI
+    // driver's identically-sized, identically-aligned framebuffer alloc
+    // drops into the reserved hole.
+    if (meck_fb_guard != NULL) {
+        heap_caps_free(meck_fb_guard);
+        meck_fb_guard = NULL;
+    }
     if (!Screen_Rebuild_Panel(&Screen_Mipi_Dpi_Panel)) {
         printf("meck_screen_on: Screen_Rebuild_Panel FAILED, aborting\n");
+        // Try to re-take the reservation so the NEXT wake attempt is no
+        // worse off than this one.
+        meck_fb_guard = heap_caps_aligned_alloc(data_cache_line_size_2,
+            (size_t)SCREEN_WIDTH * SCREEN_HEIGHT * (SCREEN_BITS_PER_PIXEL / 8),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #if CONFIG_PM_ENABLE
         if (s_wake_freq_lock) esp_pm_lock_release(s_wake_freq_lock);
 #endif
@@ -4271,9 +4308,18 @@ void Lvgl_Init(void)
                                     // PSRAM cache line (and at least the aligned size handed to it
                                     // below). A plain heap_caps_malloc address is not guaranteed
                                     // aligned, which is what made ppa_do_scale_rotate_mirror return
-                                    // ESP_ERR_INVALID_ARG. Allocate aligned, at the aligned size.
-                                    size_t output_buffer_alloc = ALIGN_UP(output_buffer_size, data_cache_line_size_2);
-                                    uint8_t *output_buffer = (uint8_t *)heap_caps_aligned_alloc(data_cache_line_size_2, output_buffer_alloc, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+                                    // ESP_ERR_INVALID_ARG.
+                                    //
+                                    // Allocated ONCE, worst-case full-screen sized, and kept: the
+                                    // previous per-flush alloc/free failed intermittently under
+                                    // transient PSRAM pressure and froze the display for as long
+                                    // as the pressure lasted.
+                                    if (meck_rot_buffer == NULL)
+                                    {
+                                        size_t rot_alloc = ALIGN_UP((size_t)SCREEN_WIDTH * SCREEN_HEIGHT * (SCREEN_BITS_PER_PIXEL / 8), data_cache_line_size_2);
+                                        meck_rot_buffer = (uint8_t *)heap_caps_aligned_alloc(data_cache_line_size_2, rot_alloc, MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM);
+                                    }
+                                    uint8_t *output_buffer = meck_rot_buffer;
                                     if (output_buffer == NULL)
                                     {
                                         printf("failed to allocate rotated buffer\n");
@@ -4347,7 +4393,6 @@ void Lvgl_Init(void)
                                     if (ret != ESP_OK)
                                     {
                                         printf("ppa_do_scale_rotate_mirror fail (error code: 0x%X)\n", ret);
-                                        heap_caps_free(output_buffer);
                                         lv_display_flush_ready(disp);   // Meck: never leave LVGL waiting
                                         return;
                                     }
@@ -4407,8 +4452,6 @@ void Lvgl_Init(void)
 
                                     esp_lcd_panel_draw_bitmap(panel_handle, rotated_offsetx1, rotated_offsety1,
                                                               rotated_offsetx2 + 1, rotated_offsety2 + 1, output_buffer);
-
-                                    heap_caps_free(output_buffer);
 
 #else
                                     lv_area_t rotated_area;
