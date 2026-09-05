@@ -31,6 +31,8 @@ elseif(CONFIG_EXAMPLE_BUILD_CMDMODE_TEST)
     set(project_path "examples/cmdmode_test/")
 elseif(CONFIG_EXAMPLE_BUILD_WARMHANDOFF_TEST)
     set(project_path "examples/warmhandoff_test/")
+elseif(CONFIG_EXAMPLE_BUILD_GBC_BENCH_TEST)
+    set(project_path "examples/gbc_bench_test/")
 elseif(CONFIG_EXAMPLE_BUILD_PCF8563)
     set(project_path "examples/pcf8563/")
 elseif(CONFIG_EXAMPLE_BUILD_SGM38121)
@@ -97,3 +99,9 @@ target_compile_options(
     ${COMPONENT_LIB}
     PRIVATE -Wno-error=unused-const-variable -Wno-error=delete-non-virtual-dtor
             -Wno-error=implicit-function-declaration -fpermissive)
+
+# gbc_bench_test embeds its benchmark ROM (ucity.gbc, GPL-3.0) into the app
+# binary. Conditional so no other example build carries the blob.
+if(CONFIG_EXAMPLE_BUILD_GBC_BENCH_TEST)
+    target_add_binary_data(${COMPONENT_LIB} "examples/gbc_bench_test/ucity_rom.gbc" BINARY)
+endif()

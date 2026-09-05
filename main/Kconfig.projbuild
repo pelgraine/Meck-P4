@@ -187,6 +187,9 @@ menu "Example Configuration"
             config EXAMPLE_BUILD_WARMHANDOFF_TEST
                 bool "warmhandoff_test (RM69A10 warm-handoff/self-refresh probe)"
                 depends on BOARD_TYPE_T_DISPLAY_P4 || BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+            config EXAMPLE_BUILD_GBC_BENCH_TEST
+                bool "gbc_bench_test (Game Boy Color emulator CPU feasibility probe)"
+                depends on BOARD_TYPE_T_DISPLAY_P4 || BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
             config EXAMPLE_BUILD_PCF8563
                 bool "pcf8563"
                 depends on BOARD_TYPE_T_DISPLAY_P4
