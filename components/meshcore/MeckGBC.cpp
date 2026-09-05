@@ -181,8 +181,15 @@ static lv_obj_t *g_gbc_status    = NULL;   // load-error label on the emu screen
 static struct gb_s     *s_gb   = NULL;
 static uint16_t        *s_gbfb = NULL;             // GB_H*GB_W RGB555
 static uint16_t        *s_outfb   = NULL;          // 480x432 RGB565, PSRAM
-static uint8_t         *s_rom     = NULL;          // PSRAM copy of the ROM
-static size_t           s_rom_size = 0;
+// ROM arena: PSRAM, grow-only, RETAINED across sessions (never freed on
+// exit). Freeing a 2 MB ROM buffer per session left a hole that the
+// screen-off framebuffer guard could be carved out of, after which no
+// 2 MB contiguous block existed and the next launch failed ("ROM alloc
+// failed" after a screen off/on cycle, seen on hardware). Allocated once
+// at the first launch, when PSRAM is least fragmented, and reused.
+static uint8_t         *s_rom     = NULL;
+static size_t           s_rom_cap = 0;             // arena capacity
+static size_t           s_rom_size = 0;            // bytes of the loaded ROM
 static uint8_t         *s_cram    = NULL;          // 128 KB, PSRAM
 static bool             s_audio_on  = false;  // codec taken for this session
 static int16_t         *s_audio_buf = NULL;   // one frame of stereo s16
@@ -443,7 +450,7 @@ static void gbc_stop_and_leave(void)
     }
     meck_p4kbd_set_raw_joypad(false);
     if (s_timer) { lv_timer_delete(s_timer); s_timer = NULL; }
-    if (s_rom)   { heap_caps_free(s_rom); s_rom = NULL; s_rom_size = 0; }
+    s_rom_size = 0;                   // arena retained (see s_rom comment)
     s_task    = NULL;
     s_running = false;
     g_gbc_canvas = NULL;
@@ -487,16 +494,30 @@ static void gbc_launch(const char *path)
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz < 0x8000) { fclose(f); printf("[GBC] file too small\n"); return; }
-    uint8_t *rom = (uint8_t*)heap_caps_malloc((size_t)sz, MALLOC_CAP_SPIRAM);
-    if (!rom) { fclose(f); printf("[GBC] ROM alloc failed (%ld bytes)\n", sz); return; }
-    size_t got = fread(rom, 1, (size_t)sz, f);
+    if (s_rom && s_rom_cap < (size_t)sz) {
+        // Larger ROM than the arena has held so far: grow (rare).
+        heap_caps_free(s_rom);
+        s_rom = NULL;
+        s_rom_cap = 0;
+    }
+    if (!s_rom) {
+        s_rom = (uint8_t*)heap_caps_malloc((size_t)sz, MALLOC_CAP_SPIRAM);
+        if (!s_rom) {
+            fclose(f);
+            printf("[GBC] ROM alloc failed (%ld bytes; largest free PSRAM block %u, free %u)\n",
+                   sz,
+                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            return;
+        }
+        s_rom_cap = (size_t)sz;
+    }
+    size_t got = fread(s_rom, 1, (size_t)sz, f);
     fclose(f);
     if (got != (size_t)sz) {
-        heap_caps_free(rom);
         printf("[GBC] short read (%u/%ld)\n", (unsigned)got, sz);
         return;
     }
-    s_rom = rom;
     s_rom_size = (size_t)sz;
     memset(s_cram, 0, GBC_CRAM_SIZE);
 
@@ -510,7 +531,7 @@ static void gbc_launch(const char *path)
     // boot until MBC3 RTC persistence is added.
     {
         static const size_t ram_sz[6] = { 0, 2048, 8192, 32768, 131072, 65536 };
-        const uint8_t code = rom[0x149];
+        const uint8_t code = s_rom[0x149];
         s_save_size = (code < 6) ? ram_sz[code] : 0;
         if (s_save_size > GBC_CRAM_SIZE) s_save_size = GBC_CRAM_SIZE;
         snprintf(s_save_path, sizeof(s_save_path), "%s", path);
@@ -523,8 +544,7 @@ static void gbc_launch(const char *path)
                                      gb_error_cb, NULL);
     if (e != GB_INIT_NO_ERROR) {
         printf("[GBC] gb_init failed: %d\n", (int)e);
-        heap_caps_free(s_rom);
-        s_rom = NULL;
+        s_rom_size = 0;               // arena retained
         return;
     }
     if (s_gb->mbc == 2 && s_save_size == 0) s_save_size = 512;
