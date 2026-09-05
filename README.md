@@ -52,6 +52,7 @@ with a `meshcore` ESP-IDF component added on top.
 - [Notes](#notes)
 - [Web Reader](#web-reader)
 - [Maps](#maps)
+- [Games](#games)
 - [Config Export](#config-export)
 - [Config Import](#config-import)
 - [Debug Logs](#debug-logs)
@@ -182,6 +183,10 @@ navigate between pages. The Home page (page 0) shows node name, unread
 message count, battery percentage and clock in the top-right corner, and
 a ten-tile navigation grid (2 columns x 5 rows) linking to Messages,
 Contacts, Settings, Reader, Notes, Discover, Trace, Maps, Audio, and Web.
+A sixth row — **Voice** and **Games** — is hidden by default: swipe down on
+the grid to reveal it and swipe up to hide it again. Voice opens the voice
+message screens (experimental); Games opens the Game Boy emulator. See
+[Games](#games).
 
 |Page           |Purpose                                                                                            |
 |---------------|---------------------------------------------------------------------------------------------------|
@@ -245,7 +250,7 @@ needed.
 |Gesture       |Description                                                                                                   |
 |--------------|--------------------------------------------------------------------------------------------------------------|
 |**Tap**       |Touch and release quickly. Opens tiles, selects items, advances pages.                                        |
-|**Swipe**     |Touch, drag, release. Direction determines action (scroll, page turn, switch tile/filter). Home paging wraps at both ends.|
+|**Swipe**     |Touch, drag, release. Direction determines action (scroll, page turn, switch tile/filter). Home paging wraps at both ends. Swipe down on the home grid to reveal the hidden Voice and Games tiles, up to hide them.|
 |**Long press**|Touch and hold. Context-dependent: send advert, toggle GPS, delete contacts, retry failed messages, view incoming message path, power off.|
 
 -----
@@ -272,7 +277,7 @@ Meck-P4 can run in **portrait** (the default) or **landscape**. The orientation 
 
 Changing it applies live. The display rotation is switched (0 degrees for portrait, 90 degrees for landscape), every screen is torn down and rebuilt at the new logical resolution, and you are returned to the home screen. The choice persists via NVS and is re-applied on the next boot before any screen is drawn.
 
-The main screens adapt to the orientation: the home navigation grid is 2 columns by 5 rows in portrait and 5 columns by 2 rows in landscape, and the on-screen keyboard height scales with the panel so it stays usable either way. A few secondary screens (the audio player, maps, and the reader) are still laid out at the fixed portrait dimensions and do not yet re-flow in landscape.
+The main screens adapt to the orientation: the home navigation grid is 2 columns by 5 rows in portrait and 5 columns by 2 rows in landscape, and the on-screen keyboard height scales with the panel so it stays usable either way. A few secondary screens (the audio player, maps, and the reader) are still laid out at the fixed portrait dimensions and do not yet re-flow in landscape. As of v0.8 the audio player's Now Playing screen scrolls in landscape, so its transport, volume and sleep-timer controls are reachable there. The Game Boy emulator lays itself out for either orientation.
 
 -----
 
@@ -1131,6 +1136,49 @@ Meck-P4 works with SD cards up to 1 TB. Very large tile folders (tens of GB) can
 
 -----
 
+## Games
+
+Tap **Games** (swipe down on the home grid to reveal the hidden row) to open the games menu. As of v0.8 it holds one entry, a **Game Boy / Game Boy Color emulator**, built on the [Peanut-GB](https://github.com/deltabeard/Peanut-GB) core. It runs original Game Boy (`.gb`) and Game Boy Color (`.gbc`) ROMs at full speed with sound. Game Boy Advance (`.gba`) is a different machine entirely and is not supported.
+
+### ROMs
+
+Put ROM files in a folder named **`roms`** at the top level of the SD card (`/sdcard/roms/`). The browser lists `.gb` and `.gbc` files in that folder (no subfolders), up to 64 of them, and skips the `._` metadata files macOS leaves on FAT cards. Original Game Boy titles are shown with the colourisation a real Game Boy Color would apply to them.
+
+One game is bundled: **[µCity](https://github.com/AntonioND/ucity)** (GPL-3.0, by Antonio Niño Díaz), a city-building game written for the Game Boy Color. It is copied to `/sdcard/roms/ucity.gbc` the first time you open the games menu with an SD card inserted, so there is something to play before you copy anything over. If you are looking for more, [Halo Combat Devolved](https://sofaswordsman.itch.io/halo-combat-devolved) is a free 2 MB Game Boy Color homebrew that runs well on the P4 (it is not bundled).
+
+### Controls
+
+With the **K270 keyboard** detected at boot, the keys are the controls and nothing is drawn over the game:
+
+|Key           |Game Boy button|
+|--------------|---------------|
+|Arrow keys    |D-pad          |
+|**K**         |A              |
+|**J**         |B              |
+|**Enter**     |Start          |
+|**Space**     |Select         |
+|**Mic key**   |Mute / unmute  |
+|**Esc**       |Quit to the ROM list|
+
+Without a keyboard, **on-screen controls** are drawn: a d-pad, A and B, SELECT and START, and a MUTE button. Several can be held at once — a direction and A together, for example — because the touch controller's fingers are read directly rather than through the single-point UI pointer. Held controls light up. In portrait the game sits at the top with the controls below; in landscape the game is centred with the d-pad on the left and the buttons on the right. The **back chevron** top-left quits to the ROM list in either mode.
+
+In-game button meanings are the game's own. µCity's manual (in its repository) covers its controls; on the Game Boy convention, A confirms menu choices, so use **K** (or the on-screen A) on its start menu.
+
+### Saves and sound
+
+Games that save to cartridge RAM keep their saves: the emulator writes a **`.sav` file next to the ROM** when you quit (`ucity.gbc` → `ucity.sav`) and loads it on the next launch. The format is the standard raw cart-RAM dump every desktop emulator uses, so saves can be copied between the P4 and a PC in either direction. Saves are written on quit, not continuously — power off mid-game and that session's progress is lost. Real-time-clock state (Pokémon Crystal's day/night cycle) is not yet persisted; the in-game clock restarts each boot.
+
+Sound plays through the speaker at the **volume set in the audio player**. Launching a game stops any audiobook or music that is playing; the audiobook's resume position is kept. Mute (mic key or the MUTE button) silences the game without changing the saved volume and is cleared when you quit.
+
+### Limitations in v0.8
+
+- **2 MB games and memory.** The P4's PSRAM is heavily used by the mesh message history, and a 2 MB ROM needs 2 MB of it in one contiguous block. The emulator reserves that block on the first game you launch after boot and keeps it for the rest of the session, so launching *any* game early guarantees the big ones work later. If a 2 MB game refuses to launch late in a long session (serial shows `ROM alloc failed` with the largest free block), reboot and launch it first. A structural fix (allocating message rings only for channels that exist) is on the road-map.
+- The games menu and ROM list are navigated by touch (or Esc to go back on the keyboard); keyboard-only row selection is not yet wired.
+- One ROM folder, no subfolders; 64 ROMs maximum.
+- Single frame buffer: fast horizontal motion may show a brief tear line.
+
+-----
+
 ## Config Export
 
 Tap **Export Config** in Settings to open a modal with four section checkboxes:
@@ -1401,6 +1449,10 @@ Files of particular note:
 - `MeckPicture.h` — picture over LoRa infrastructure (not yet enabled)
 - `MeckAudio.cpp` / `MeckAudio.h` — audio backend wrapping `chmorgan/esp-audio-player` for WAV + MP3 playback
 - `MeckAudioUI.cpp` / `MeckAudioUI.h` — audio browser and Now Playing screens
+- `MeckGBC.cpp` / `MeckGBC.h` — Game Boy / Game Boy Color emulator: games menu, ROM browser, render, input, saves, sound
+- `peanut_gb.h` — vendored Peanut-GB core (tvecera gbc-rtc-fix branch) with two marked Meck patches for upstream bugs
+- `minigb_apu.c` / `minigb_apu.h` — vendored Game Boy APU (sound) with the sample rate patched for the ES8311
+- `ucity_rom.gbc` — the bundled µCity ROM, embedded and copied to SD on first use
 - `NotifSounds.h` — per-channel notification tone config, SD scanning, and playback request queue
 - `BundledSounds.h` — 7 default notification MP3s embedded as byte arrays, copied to SD on first boot
 - `es8311.cpp` — codec write-fn / clock reconfig / volume control routed through LilyGo’s `Cpp_Bus_Driver::Es8311`
@@ -1520,6 +1572,10 @@ no particular timeframes attached.
 - [x] **Emoji set expanded** (v0.7.3) — 195 emoji plus the AU and EE flags, adding the Meck Watch's set (including the red heart); regenerable with `tools/bake_p4_emoji.py`. See [Emoji](#emoji).
 - [x] **SX1262 receive handling aligned with MeshCore v1.17.x** (v0.7.3) — the receiver now sees a packet from its preamble and a stalled preamble or header no longer holds up sending until the next packet (upstream PRs #3036 and #2977, re-implemented for the P4's own radio driver).
 - [x] **MeshCore core sync** (v0.7.3) — malformed `PAYLOAD_TYPE_PATH` packets are rejected (MeshCore v1.17.0).
+- [x] **Game Boy / Game Boy Color emulator** (v0.8) — Peanut-GB core, full speed with sound, keyboard or multi-touch on-screen controls, `.sav` battery saves, µCity bundled. See [Games](#games).
+- [x] **Home grid hidden row** (v0.8) — Voice and Games tiles revealed by swiping down on the grid; touch paging wrap-around now works (it had never fired by touch); KBD battery gauge readable at larger font sizes.
+- [x] **Display memory fixes** (v0.8) — the landscape rotation buffer is allocated once instead of per frame (map screen no longer freezes under tile-decode pressure); the screen-off path reserves the framebuffer's memory so waking the screen cannot fail for lack of it.
+- [x] **Audio player in landscape** (v0.8) — Now Playing scrolls so all controls are reachable.
 - [x] **LR2021 radio support** (v0.7.4) — LilyGo's LR2021 variant of the T-Display P4 runs its own build of the firmware, verified working, adding 2.4 GHz LoRa alongside sub-GHz (2.4 GHz on the internal antenna only for now). See [Supported Devices](#supported-devices).
 
 **Pending:**
@@ -1528,7 +1584,8 @@ no particular timeframes attached.
 
 - [ ] Voice over LoRa — enable Codec2 voice messaging end-to-end (infrastructure is complete, UI and protocol are in place, pending final integration and testing)
 - [ ] Picture over LoRa — enable image transfer end-to-end (infrastructure is complete, pending final integration)
-- [ ] Voice and Camera home tiles — currently placeholders, will activate when voice/picture features are enabled
+- [ ] Voice tile is live but experimental (it warns on entry); Camera stays disabled
+- [ ] Games follow-ups — allocate message rings only for channels that exist so 2 MB ROMs load at any point in a session; persist MBC3 real-time-clock state (Pokémon Crystal's clock); keyboard row selection in the games menu and ROM list; Snake and Minesweeper as further Games entries; optional haptic tick on the touch buttons
 - [ ] ESP32-C6 BLE companion firmware (WiFi companion is complete as of v0.4)
 - [ ] Mentions-only notification filtering — the "Mentions" preference currently behaves the same as "All"; filtering to trigger only on @nodename is planned
 - [ ] Serial CLI commands on the P4 — local serial settings require a serial terminal, which is not yet implemented. Remote CLI via Repeater Admin works normally
@@ -1556,3 +1613,5 @@ licensing including GPL-3.0 (GxEPD2, esp32-audioI2S) and LGPL-2.1
 (Codec2); the combined firmware binary is effectively GPL-3.0 when
 distributed. See the upstream Meck README for the full dependency
 license matrix.
+
+The Game Boy emulator adds [Peanut-GB](https://github.com/deltabeard/Peanut-GB) (MIT) and [minigb_apu](https://github.com/deltabeard/minigb_apu) (MIT), both vendored under `components/meshcore/`, and bundles the [µCity](https://github.com/AntonioND/ucity) ROM by Antonio Niño Díaz under GPL-3.0; its source is available at that repository. No commercial Game Boy software is included.
