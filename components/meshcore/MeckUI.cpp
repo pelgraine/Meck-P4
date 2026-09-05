@@ -1667,14 +1667,10 @@ static void goto_audio_browser(lv_event_t* e) {
 static void cb_todo_web(lv_event_t* e)      { show_not_implemented("Web"); }
 static void cb_todo_voice(lv_event_t* e)    { show_not_implemented("Voice"); }
 static void cb_todo_camera(lv_event_t* e)   { show_not_implemented("Camera"); }
-#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
-// Games tile: opens the Games menu (MeckGBC). Keyboard builds only -- the
-// GBC emulator's controls are the K270, so the plain board keeps the
-// placeholder until touch controls land.
+// Games tile: opens the Games menu (MeckGBC) on every board type. Input is
+// the K270 when one was detected at boot, on-screen touch controls when
+// not (MeckGBC decides per launch via meck_p4kbd_present()).
 static void cb_todo_games(lv_event_t* e)    { (void)e; meck_gbc_show_menu(); }
-#else
-static void cb_todo_games(lv_event_t* e)    { show_not_implemented("Games"); }
-#endif
 // Voice tile: opens the existing voice landing screen (Inbox / Record
 // picker), which previously had no entry point from the home grid.
 static void voice_wip_toast_hide_cb(lv_timer_t *t) {
@@ -20523,6 +20519,9 @@ extern "C" uint8_t meck_p4kbd_raw_joypad(void) {
 extern "C" bool meck_p4kbd_raw_exit_pressed(void) {
     return g_p4kbd.raw_exit_pressed();
 }
+extern "C" bool meck_p4kbd_raw_mute_pressed(void) {
+    return g_p4kbd.raw_mute_pressed();
+}
 
 // Step the home tileview one page left or right, matching what a swipe
 // does, and wrapping at the ends like the touch wrap gesture: backwards
@@ -21536,6 +21535,22 @@ static void meck_p4kbd_init(void) {
 }
 
 #endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD
+
+#if !defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+// Plain-board stubs so MeckGBC.cpp (compiled on every board type) links
+// against the same raw-joypad symbols: no keyboard code here, so never any
+// held keys and never a keyboard exit. The real wrappers live beside
+// g_p4kbd inside the keyboard block above.
+extern "C" void    meck_p4kbd_set_raw_joypad(bool on) { (void)on; }
+extern "C" uint8_t meck_p4kbd_raw_joypad(void)        { return 0; }
+extern "C" bool    meck_p4kbd_raw_exit_pressed(void)  { return false; }
+extern "C" bool    meck_p4kbd_raw_mute_pressed(void)  { return false; }
+#endif
+
+// Keyboard presence at boot, for MeckGBC to choose between the K270 and
+// on-screen touch controls per launch. g_p4kbd_present is unguarded (false
+// on plain boards), so this wrapper is unconditional.
+extern "C" bool meck_p4kbd_present(void) { return meck_hw_keyboard_active(); }
 
 // Build every screen: the home tileview and its pages, all sub-screens, and
 // the audio/map/reader modules. Split out of meck_ui_init so the live

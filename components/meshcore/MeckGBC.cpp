@@ -1,10 +1,13 @@
 /*
  * MeckGBC.cpp -- Game Boy Color emulator (Peanut-GB gbc-rtc-fix core)
  * ----------------------------------------------------------------------------
- * v1 scope (as agreed):
- *   - Keyboard (K270) builds only. Controls come from MeckP4Keyboard's raw
- *     joypad mode (arrows = d-pad, K = A, J = B, Enter = Start,
- *     Space = Select, Esc = exit to the browser).
+ * Scope:
+ *   - Compiled on every board type. Input: the K270 (MeckP4Keyboard's raw
+ *     joypad mode: arrows = d-pad, K = A, J = B, Enter = Start,
+ *     Space = Select, Esc = exit) when a keyboard was detected at boot,
+ *     otherwise on-screen touch controls (see "Touch controls" below).
+ *     Both are OR'd into the joypad, so a docked keyboard and a thumb
+ *     both work when the controls are shown.
  *   - Sound via minigb_apu (MIT, vendored): the core's audio_read/
  *     audio_write hooks feed the APU, and once per emulated frame the task
  *     renders 16-bit stereo at 32768 Hz and writes it to the ES8311 through
@@ -71,8 +74,6 @@
 
 #include "sdkconfig.h"
 
-#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
-
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -137,6 +138,8 @@ extern "C" void lock_screen_scroll(lv_obj_t *scr);
 extern "C" void    meck_p4kbd_set_raw_joypad(bool on);
 extern "C" uint8_t meck_p4kbd_raw_joypad(void);
 extern "C" bool    meck_p4kbd_raw_exit_pressed(void);
+extern "C" bool    meck_p4kbd_raw_mute_pressed(void); // mic key, press edge
+extern "C" bool    meck_p4kbd_present(void);       // detected at boot
 
 // Embedded bundled ROM (see components/meshcore/CMakeLists.txt).
 extern const uint8_t ucity_rom_start[] asm("_binary_ucity_rom_gbc_start");
@@ -168,6 +171,240 @@ static lv_obj_t *scr_gbc         = NULL;
 static lv_obj_t *g_return_screen = NULL;   // screen active before the menu
 static lv_obj_t *g_gbc_canvas    = NULL;
 static lv_obj_t *g_gbc_status    = NULL;   // load-error label on the emu screen
+
+// ---- Touch controls ---------------------------------------------------------
+// main.cpp's touch read callback publishes EVERY finger (raw panel
+// coordinates, before LVGL's rotation) on each poll, including "no
+// fingers", via meck_touch_publish(). The emulator task snapshots that per
+// frame, applies LVGL's own rotation transform (lv_indev.c
+// indev_pointer_proc: 180/270 mirror both axes, 90/270 swap with
+// x = ver_res - y - 1) so zones are defined in screen coordinates, and
+// hit-tests the fingers against the control zones into a held-key mask.
+// Because the fingers are read from the controller directly, several can
+// be held at once (d-pad + A), which LVGL's single-point pointer could not
+// deliver. LVGL still receives the single-finger case exactly as before,
+// so the back chevron keeps working; the drawn controls are non-clickable
+// so LVGL ignores them. While a game runs the touch poll period is lowered
+// from the UI's 50 ms to 16 ms so short taps are never missed, and
+// restored on exit.
+#define GBC_TOUCH_MAX 5
+static portMUX_TYPE     s_touch_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t          s_touch_n   = 0;
+static uint16_t         s_touch_x[GBC_TOUCH_MAX];
+static uint16_t         s_touch_y[GBC_TOUCH_MAX];
+static bool             s_touch_ui  = false;   // controls shown this session
+static volatile uint8_t s_touch_mask = 0;      // last mask, for highlighting
+static uint32_t         s_touch_period_restore = 50;   // UI poll period (ms)
+
+// Zone geometry in screen coordinates, chosen per orientation at launch.
+static struct {
+    int16_t dpad_cx, dpad_cy, dpad_half, dpad_dead;
+    int16_t arm_len, arm_thick, arm_gap;     // drawn cross: arm size, gap from hub
+    int16_t a_cx, a_cy, b_cx, b_cy, btn_r;
+    int16_t sel_cx, sel_cy, start_cx, start_cy, pill_w, pill_h;
+    int16_t mute_cx, mute_cy;                // MUTE pill (toggle, press edge)
+} s_zone;
+
+// Overlay widgets (children of scr_gbc), by joypad bit for highlighting.
+static lv_obj_t *s_ov_dpad[4] = { NULL, NULL, NULL, NULL };   // R, L, U, D arms
+static lv_obj_t *s_ov_a = NULL, *s_ov_b = NULL, *s_ov_sel = NULL, *s_ov_start = NULL;
+static lv_obj_t *s_ov_mute = NULL;
+
+// Mute: toggled by the MUTE pill (touch, press edge) or the K270 microphone
+// key (raw mode, press edge). Both paths land in the LVGL timer, which owns
+// the codec call (meck_audio_set_dac_mute). The emulator task only reports
+// the touch press edge through s_touch_mute_req.
+static bool             s_muted = false;
+static volatile uint8_t s_touch_mute_req = 0;    // incremented on press edge
+static uint8_t          s_touch_mute_ack = 0;
+
+extern "C" void meck_touch_publish(uint8_t count, const uint16_t *xs, const uint16_t *ys)
+{
+    if (count > GBC_TOUCH_MAX) count = GBC_TOUCH_MAX;
+    taskENTER_CRITICAL(&s_touch_mux);
+    s_touch_n = count;
+    for (uint8_t i = 0; i < count; i++) { s_touch_x[i] = xs[i]; s_touch_y[i] = ys[i]; }
+    taskEXIT_CRITICAL(&s_touch_mux);
+}
+
+// Held-key mask from the current fingers (emulator task, per frame).
+static uint8_t touch_joypad_mask(void)
+{
+    uint16_t xs[GBC_TOUCH_MAX], ys[GBC_TOUCH_MAX];
+    uint8_t n;
+    taskENTER_CRITICAL(&s_touch_mux);
+    n = s_touch_n;
+    for (uint8_t i = 0; i < n; i++) { xs[i] = s_touch_x[i]; ys[i] = s_touch_y[i]; }
+    taskEXIT_CRITICAL(&s_touch_mux);
+
+    const lv_display_rotation_t rot = lv_display_get_rotation(NULL);
+    const int32_t phys_w = lv_display_get_physical_horizontal_resolution(NULL);
+    const int32_t phys_h = lv_display_get_physical_vertical_resolution(NULL);
+
+    static bool s_mute_prev = false;
+    bool mute_hit = false;
+    uint8_t mask = 0;
+    for (uint8_t i = 0; i < n; i++) {
+        int32_t x = xs[i], y = ys[i];
+        if (rot == LV_DISPLAY_ROTATION_180 || rot == LV_DISPLAY_ROTATION_270) {
+            x = phys_w - x - 1;
+            y = phys_h - y - 1;
+        }
+        if (rot == LV_DISPLAY_ROTATION_90 || rot == LV_DISPLAY_ROTATION_270) {
+            const int32_t t = y;
+            y = x;
+            x = phys_h - t - 1;
+        }
+        // D-pad: square zone, dead centre, diagonals allowed.
+        {
+            const int32_t dx = x - s_zone.dpad_cx, dy = y - s_zone.dpad_cy;
+            if (dx >= -s_zone.dpad_half && dx <= s_zone.dpad_half &&
+                dy >= -s_zone.dpad_half && dy <= s_zone.dpad_half) {
+                if (dx >  s_zone.dpad_dead) mask |= 0x10;   // right
+                if (dx < -s_zone.dpad_dead) mask |= 0x20;   // left
+                if (dy < -s_zone.dpad_dead) mask |= 0x40;   // up
+                if (dy >  s_zone.dpad_dead) mask |= 0x80;   // down
+            }
+        }
+        // A / B: circles.
+        {
+            const int32_t r2 = (int32_t)s_zone.btn_r * s_zone.btn_r;
+            int32_t dx = x - s_zone.a_cx, dy = y - s_zone.a_cy;
+            if (dx * dx + dy * dy <= r2) mask |= 0x01;
+            dx = x - s_zone.b_cx; dy = y - s_zone.b_cy;
+            if (dx * dx + dy * dy <= r2) mask |= 0x02;
+        }
+        // Select / Start / Mute: pills (rect test with a little slack).
+        {
+            const int32_t hw = s_zone.pill_w / 2 + 10, hh = s_zone.pill_h / 2 + 10;
+            if (x >= s_zone.sel_cx - hw && x <= s_zone.sel_cx + hw &&
+                y >= s_zone.sel_cy - hh && y <= s_zone.sel_cy + hh) mask |= 0x04;
+            if (x >= s_zone.start_cx - hw && x <= s_zone.start_cx + hw &&
+                y >= s_zone.start_cy - hh && y <= s_zone.start_cy + hh) mask |= 0x08;
+            if (x >= s_zone.mute_cx - hw && x <= s_zone.mute_cx + hw &&
+                y >= s_zone.mute_cy - hh && y <= s_zone.mute_cy + hh) mute_hit = true;
+        }
+    }
+    // Mute is a toggle: report the press edge only.
+    if (mute_hit && !s_mute_prev) s_touch_mute_req = (uint8_t)(s_touch_mute_req + 1);
+    s_mute_prev = mute_hit;
+    return mask;
+}
+
+// Choose zone geometry for the current orientation.
+static void touch_layout(int32_t w, int32_t h, bool portrait)
+{
+    // The drawn cross: each arm starts arm_gap from the hub centre and is
+    // arm_len long by arm_thick wide. arm_gap > arm_thick / 2 keeps the
+    // arms from overlapping at the hub (the first version overlapped).
+    if (portrait) {
+        // Game at the top; thumbs below. 568 x 1232 reference.
+        s_zone.dpad_cx = 160;      s_zone.dpad_cy = h - 430;
+        s_zone.dpad_half = 150;    s_zone.dpad_dead = 30;
+        s_zone.arm_len = 100;      s_zone.arm_thick = 80;   s_zone.arm_gap = 48;
+        s_zone.btn_r = 66;
+        s_zone.a_cx = w - 100;     s_zone.a_cy = h - 470;
+        s_zone.b_cx = w - 205;     s_zone.b_cy = h - 345;
+        s_zone.pill_w = 110;       s_zone.pill_h = 48;
+        s_zone.sel_cx = w / 2 - 85;   s_zone.sel_cy = h - 170;
+        s_zone.start_cx = w / 2 + 85; s_zone.start_cy = h - 170;
+        s_zone.mute_cx = w - 70;      s_zone.mute_cy = 50;   // top-right, opposite Back
+    } else {
+        // Game centred; d-pad in the left margin, buttons in the right.
+        s_zone.dpad_cx = 188;      s_zone.dpad_cy = h / 2;
+        s_zone.dpad_half = 150;    s_zone.dpad_dead = 30;
+        s_zone.arm_len = 90;       s_zone.arm_thick = 72;   s_zone.arm_gap = 44;
+        s_zone.btn_r = 60;
+        s_zone.a_cx = w - 100;     s_zone.a_cy = h / 2 - 70;
+        s_zone.b_cx = w - 235;     s_zone.b_cy = h / 2 + 50;
+        s_zone.pill_w = 100;       s_zone.pill_h = 40;
+        s_zone.sel_cx = w / 2 - 100;  s_zone.sel_cy = h - 34;
+        s_zone.start_cx = w / 2 + 100; s_zone.start_cy = h - 34;
+        s_zone.mute_cx = w - 70;      s_zone.mute_cy = 34;
+    }
+}
+
+static lv_obj_t* touch_make_shape(lv_obj_t *parent, int32_t cx, int32_t cy,
+                                  int32_t wdt, int32_t hgt, int32_t radius,
+                                  const char *label)
+{
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);     // LVGL ignores it
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(o, wdt, hgt);
+    lv_obj_set_pos(o, cx - wdt / 2, cy - hgt / 2);
+    lv_obj_set_style_radius(o, radius, 0);
+    lv_obj_set_style_bg_color(o, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_20, 0);
+    lv_obj_set_style_border_width(o, 2, 0);
+    lv_obj_set_style_border_color(o, lv_color_white(), 0);
+    lv_obj_set_style_border_opa(o, LV_OPA_40, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    if (label) {
+        lv_obj_t *l = lv_label_create(o);
+        lv_label_set_text(l, label);
+        lv_obj_set_style_text_color(l, lv_color_white(), 0);
+        lv_obj_set_style_text_opa(l, LV_OPA_70, 0);
+        meck_ui_set_font(l, &meck_montserrat_24, 0);
+        lv_obj_center(l);
+    }
+    return o;
+}
+
+// Draw the controls on the emulator screen from the chosen zones.
+static void touch_build_overlay(lv_obj_t *scr)
+{
+    const int32_t L = s_zone.arm_len, T = s_zone.arm_thick;
+    const int32_t off = s_zone.arm_gap + L / 2;     // arm centre from hub
+    // D-pad arms: right, left, up, down (index = bit order 0x10..0x80).
+    s_ov_dpad[0] = touch_make_shape(scr, s_zone.dpad_cx + off, s_zone.dpad_cy, L, T, 14, NULL);
+    s_ov_dpad[1] = touch_make_shape(scr, s_zone.dpad_cx - off, s_zone.dpad_cy, L, T, 14, NULL);
+    s_ov_dpad[2] = touch_make_shape(scr, s_zone.dpad_cx, s_zone.dpad_cy - off, T, L, 14, NULL);
+    s_ov_dpad[3] = touch_make_shape(scr, s_zone.dpad_cx, s_zone.dpad_cy + off, T, L, 14, NULL);
+    s_ov_mute  = touch_make_shape(scr, s_zone.mute_cx, s_zone.mute_cy, s_zone.pill_w, s_zone.pill_h, LV_RADIUS_CIRCLE, "MUTE");
+    s_ov_a     = touch_make_shape(scr, s_zone.a_cx, s_zone.a_cy, s_zone.btn_r * 2, s_zone.btn_r * 2, LV_RADIUS_CIRCLE, "A");
+    s_ov_b     = touch_make_shape(scr, s_zone.b_cx, s_zone.b_cy, s_zone.btn_r * 2, s_zone.btn_r * 2, LV_RADIUS_CIRCLE, "B");
+    s_ov_sel   = touch_make_shape(scr, s_zone.sel_cx, s_zone.sel_cy, s_zone.pill_w, s_zone.pill_h, LV_RADIUS_CIRCLE, "SELECT");
+    s_ov_start = touch_make_shape(scr, s_zone.start_cx, s_zone.start_cy, s_zone.pill_w, s_zone.pill_h, LV_RADIUS_CIRCLE, "START");
+}
+
+static void touch_set_highlight(lv_obj_t *o, bool held)
+{
+    if (o) lv_obj_set_style_bg_opa(o, held ? LV_OPA_60 : LV_OPA_20, 0);
+}
+
+// Reflect the held mask in the overlay (LVGL timer context).
+static void touch_update_overlay(void)
+{
+    const uint8_t m = s_touch_mask;
+    touch_set_highlight(s_ov_dpad[0], m & 0x10);
+    touch_set_highlight(s_ov_dpad[1], m & 0x20);
+    touch_set_highlight(s_ov_dpad[2], m & 0x40);
+    touch_set_highlight(s_ov_dpad[3], m & 0x80);
+    touch_set_highlight(s_ov_a,     m & 0x01);
+    touch_set_highlight(s_ov_b,     m & 0x02);
+    touch_set_highlight(s_ov_sel,   m & 0x04);
+    touch_set_highlight(s_ov_start, m & 0x08);
+    touch_set_highlight(s_ov_mute,  s_muted);    // lit while muted
+}
+
+static void touch_clear_overlay_refs(void)
+{
+    for (int i = 0; i < 4; i++) s_ov_dpad[i] = NULL;
+    s_ov_a = s_ov_b = s_ov_sel = s_ov_start = s_ov_mute = NULL;
+}
+
+
+// Pointer indev read period: 16 ms while a game runs, UI value on exit.
+static void touch_set_poll_period(uint32_t ms)
+{
+    lv_indev_t *ind = NULL;
+    while ((ind = lv_indev_get_next(ind)) != NULL) {
+        if (lv_indev_get_type(ind) != LV_INDEV_TYPE_POINTER) continue;
+        lv_timer_t *t = lv_indev_get_read_timer(ind);
+        if (t) lv_timer_set_period(t, ms);
+    }
+}
 
 // ---- Emulator state ---------------------------------------------------------
 // The core context (49952 bytes on-target) and the 160x144 RGB555 scanline
@@ -202,6 +439,16 @@ static bool             s_running      = false;
 static TaskHandle_t     s_task    = NULL;
 static esp_timer_handle_t s_pace_timer = NULL;   // one-shot frame pacer
 static SemaphoreHandle_t  s_pace_sem   = NULL;   // given by the pacer
+
+// Flip mute (LVGL timer context). DAC volume 0 <-> the user's level.
+static void gbc_toggle_mute(void)
+{
+    if (!s_audio_on) return;
+    s_muted = !s_muted;
+    meck_audio_set_dac_mute(s_muted);
+    printf("[GBC] %s\n", s_muted ? "muted" : "unmuted");
+}
+
 static lv_timer_t      *s_timer   = NULL;
 
 // ---- Core callbacks (validated natively and on-target in the bench) ---------
@@ -280,8 +527,17 @@ static void gbc_task(void *arg)
     printf("[GBC] task start (core %d)\n", (int)xPortGetCoreID());
     int64_t next = esp_timer_get_time();
     while (!s_stop) {
-        // Held keys -> joypad. Peanut-GB's register is active-low.
-        s_gb->direct.joypad = (uint8_t)~meck_p4kbd_raw_joypad();
+        // Held keys (keyboard raw mode) OR touch zones -> joypad. Peanut-GB's
+        // register is active-low.
+        {
+            uint8_t m = meck_p4kbd_raw_joypad();
+            if (s_touch_ui) {
+                const uint8_t t = touch_joypad_mask();
+                s_touch_mask = t;
+                m |= t;
+            }
+            s_gb->direct.joypad = (uint8_t)~m;
+        }
         gb_run_frame(s_gb);
         blit_scaled();
         if (s_audio_on) {
@@ -431,6 +687,7 @@ static void gbc_stop_and_leave(void)
     // Hand the codec back: audiobook clock, then sleep (the player wakes
     // it again on its own next play).
     if (s_audio_on) {
+        if (s_muted) { meck_audio_set_dac_mute(false); s_muted = false; }
         meck_audio_i2s_reconfig(44100, 16, I2S_SLOT_MODE_STEREO);
         meck_audio_codec_sleep();
         s_audio_on = false;
@@ -455,6 +712,11 @@ static void gbc_stop_and_leave(void)
     s_running = false;
     g_gbc_canvas = NULL;
     g_gbc_status = NULL;
+    if (s_touch_ui) {
+        touch_set_poll_period(s_touch_period_restore);
+        touch_clear_overlay_refs();
+        s_touch_ui = false;
+    }
     gbc_show_browser();               // rebuild fresh and load it
     gbc_delete_screen(&scr_gbc);
 }
@@ -470,6 +732,14 @@ static void gbc_frame_timer_cb(lv_timer_t *t)
         return;                          // wait for the task to confirm
     }
     if (g_gbc_canvas) lv_obj_invalidate(g_gbc_canvas);
+    // Mute toggles: touch pill press edges (counted by the emulator task)
+    // and the K270 microphone key latch.
+    {
+        const uint8_t req = s_touch_mute_req;
+        if (req != s_touch_mute_ack) { s_touch_mute_ack = req; gbc_toggle_mute(); }
+        if (meck_p4kbd_raw_mute_pressed()) gbc_toggle_mute();
+    }
+    if (s_touch_ui) touch_update_overlay();
 }
 
 static void on_gbc_back(lv_event_t *e)
@@ -501,7 +771,17 @@ static void gbc_launch(const char *path)
         s_rom_cap = 0;
     }
     if (!s_rom) {
-        s_rom = (uint8_t*)heap_caps_malloc((size_t)sz, MALLOC_CAP_SPIRAM);
+        // First allocation: reserve 2 MB (the largest common GB/GBC ROM
+        // size) even for a smaller game, so a later 2 MB title never has
+        // to grow the arena in a fragmented pool -- growing means freeing
+        // this block and hoping a bigger one exists. Fall back to exactly
+        // the needed size if 2 MB is not available right now.
+        size_t want = (size_t)sz > 0x200000 ? (size_t)sz : 0x200000;
+        s_rom = (uint8_t*)heap_caps_malloc(want, MALLOC_CAP_SPIRAM);
+        if (!s_rom && want > (size_t)sz) {
+            want = (size_t)sz;
+            s_rom = (uint8_t*)heap_caps_malloc(want, MALLOC_CAP_SPIRAM);
+        }
         if (!s_rom) {
             fclose(f);
             printf("[GBC] ROM alloc failed (%ld bytes; largest free PSRAM block %u, free %u)\n",
@@ -510,7 +790,8 @@ static void gbc_launch(const char *path)
                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
             return;
         }
-        s_rom_cap = (size_t)sz;
+        s_rom_cap = want;
+        printf("[GBC] ROM arena reserved: %u bytes\n", (unsigned)want);
     }
     size_t got = fread(s_rom, 1, (size_t)sz, f);
     fclose(f);
@@ -570,7 +851,29 @@ static void gbc_launch(const char *path)
     g_gbc_canvas = lv_canvas_create(scr_gbc);
     lv_canvas_set_buffer(g_gbc_canvas, s_outfb, OUT_W, OUT_H,
                          LV_COLOR_FORMAT_RGB565);
-    lv_obj_center(g_gbc_canvas);
+    // Touch controls when no keyboard was detected at boot. Portrait: game
+    // anchored near the top, controls in the space below. Landscape: game
+    // centred, controls in the side margins. Keyboard present: game
+    // centred, no overlay.
+    {
+        const int32_t w = lv_display_get_horizontal_resolution(NULL);
+        const int32_t h = lv_display_get_vertical_resolution(NULL);
+        const bool portrait = h > w;
+        s_touch_ui = !meck_p4kbd_present();
+        s_touch_mask = 0;
+        s_muted = false;
+        s_touch_mute_req = s_touch_mute_ack = 0;
+        if (s_touch_ui) {
+            touch_layout(w, h, portrait);
+            if (portrait) lv_obj_align(g_gbc_canvas, LV_ALIGN_TOP_MID, 0, 80);
+            else          lv_obj_center(g_gbc_canvas);
+            touch_build_overlay(scr_gbc);
+            touch_set_poll_period(16);
+            printf("[GBC] touch controls on (%s)\n", portrait ? "portrait" : "landscape");
+        } else {
+            lv_obj_center(g_gbc_canvas);
+        }
+    }
     lv_screen_load(scr_gbc);
 
     // Sound: initialise the audio stack if nothing has yet (it is lazy --
@@ -623,6 +926,7 @@ static void gbc_launch(const char *path)
                                         MALLOC_CAP_SPIRAM) != pdPASS) {
         printf("[GBC] task create failed\n");
         s_running = false;
+        if (s_touch_ui) { touch_set_poll_period(s_touch_period_restore); touch_clear_overlay_refs(); s_touch_ui = false; }
         if (s_pace_timer) { esp_timer_delete(s_pace_timer); s_pace_timer = NULL; }
         if (s_pace_sem)   { vSemaphoreDelete(s_pace_sem); s_pace_sem = NULL; }
         if (s_audio_on) {
@@ -754,13 +1058,3 @@ extern "C" bool meck_gbc_running(void)
 {
     return s_running;
 }
-
-#else  // not CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD ------------------------
-
-// Plain-board stubs: the Games tile keeps its placeholder on this build
-// (see cb_todo_games in MeckUI.cpp), so these are never reached, but they
-// keep the link happy if that ever changes.
-extern "C" void meck_gbc_show_menu(void) {}
-extern "C" bool meck_gbc_running(void) { return false; }
-
-#endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD

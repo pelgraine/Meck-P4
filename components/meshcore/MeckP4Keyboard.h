@@ -170,6 +170,7 @@ public:
         _raw      = on;
         _raw_mask = 0;
         _raw_exit = false;
+        _raw_mute = false;
         _head = _tail = 0;
         _shift = false;
         _fn    = false;
@@ -183,6 +184,13 @@ public:
         bool e = _raw_exit;
         _raw_exit = false;
         return e;
+    }
+    // Microphone (Record) key press-edge latch, consumed on read: the
+    // emulator's mute toggle.
+    bool raw_mute_pressed() {
+        bool m = _raw_mute;
+        _raw_mute = false;
+        return m;
     }
 
 private:
@@ -249,6 +257,9 @@ private:
             case LV_KEY_DOWN:  bit = 0x80; break;
             case LV_KEY_ESC:
                 if (pressed) _raw_exit = true;
+                return;
+            case kKeyRecord:                        // microphone key
+                if (pressed) _raw_mute = true;
                 return;
             default:
                 return;
@@ -354,6 +365,7 @@ private:
     bool             _raw      = false;
     volatile uint8_t _raw_mask = 0;
     volatile bool    _raw_exit = false;
+    volatile bool    _raw_mute = false;
 };
 
 #endif // CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD

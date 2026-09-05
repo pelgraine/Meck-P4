@@ -2835,6 +2835,12 @@ void bsp_init_refresh_monitor_io(void)
     // ESP_ERROR_CHECK(gpio_config(&monitor_io_conf));
 }
 
+// Meck GBC touch controls: every touch read publishes ALL fingers (raw
+// panel coordinates, before LVGL's rotation) to MeckGBC.cpp, including
+// the no-finger case so releases are seen. LVGL itself keeps consuming
+// only the single-finger case exactly as before.
+extern "C" void meck_touch_publish(uint8_t count, const uint16_t *xs, const uint16_t *ys);
+
 void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
 {
     static size_t edge_touch_scheduled_shutdown_time = 0;
@@ -2900,10 +2906,24 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
 
         System_Ui->_touch_point = tp;
 
+        {   // Meck GBC: publish every valid finger for the touch controls.
+            uint16_t xs[5], ys[5];
+            uint8_t n = 0;
+            for (size_t k = 0; k < tp.info.size() && n < 5; k++) {
+                if ((tp.info[k].x == static_cast<uint16_t>(-1)) ||
+                    (tp.info[k].y == static_cast<uint16_t>(-1))) continue;
+                xs[n] = tp.info[k].x;
+                ys[n] = tp.info[k].y;
+                n++;
+            }
+            meck_touch_publish(n, xs, ys);
+        }
+
         tp.info.clear();
     }
     else
     {
+        meck_touch_publish(0, NULL, NULL);   // Meck GBC: no fingers
         data->state = LV_INDEV_STATE_REL;
     }
 
@@ -2962,10 +2982,24 @@ void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data)
 
         System_Ui->_touch_point = tp;
 
+        {   // Meck GBC: publish every valid finger for the touch controls.
+            uint16_t xs[5], ys[5];
+            uint8_t n = 0;
+            for (size_t k = 0; k < tp.info.size() && n < 5; k++) {
+                if ((tp.info[k].x == static_cast<uint16_t>(-1)) ||
+                    (tp.info[k].y == static_cast<uint16_t>(-1))) continue;
+                xs[n] = tp.info[k].x;
+                ys[n] = tp.info[k].y;
+                n++;
+            }
+            meck_touch_publish(n, xs, ys);
+        }
+
         tp.info.clear();
     }
     else
     {
+        meck_touch_publish(0, NULL, NULL);   // Meck GBC: no fingers
         data->state = LV_INDEV_STATE_REL;
     }
 
