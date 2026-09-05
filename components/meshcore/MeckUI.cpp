@@ -1662,6 +1662,13 @@ static void goto_audio_browser(lv_event_t* e) {
 static void cb_todo_web(lv_event_t* e)      { show_not_implemented("Web"); }
 static void cb_todo_voice(lv_event_t* e)    { show_not_implemented("Voice"); }
 static void cb_todo_camera(lv_event_t* e)   { show_not_implemented("Camera"); }
+static void cb_todo_games(lv_event_t* e)    { show_not_implemented("Games"); }
+// Voice tile: opens the existing voice landing screen (Inbox / Record
+// picker), which previously had no entry point from the home grid.
+static void goto_voice_landing(lv_event_t* e) {
+    (void)e;
+    if (scr_voice_landing) lv_screen_load(scr_voice_landing);
+}
 
 // ============================================================================
 // Home tile colour scheme: NVS persistence + style application.
@@ -6130,20 +6137,103 @@ static int meck_home_page_index(void) {
 // past either end produces no scroll -- it arrives as a plain gesture.
 // Catch it and jump: backwards from the first page lands on Timezones
 // (the last content page, skipping Hibernate), forwards from Hibernate
-// returns to the first page. Mid-run swipes are unaffected: the page
-// check only matches at the ends, and tile_act still reports the old
-// page while a normal swipe's scroll animation is in flight.
+// returns to the first page. Mid-run swipes never reach this handler at
+// all: a swipe the tileview CAN scroll is captured as a scroll, and LVGL
+// suppresses gestures entirely while a scroll object is held
+// (indev_gesture, lv_indev.c). Registered on scr_home, where LVGL
+// delivers gesture events -- see the registration comment in
+// meck_ui_build_screens.
 static void on_home_wrap_gesture(lv_event_t *e) {
     if (lv_event_get_code(e) != LV_EVENT_GESTURE) return;
     if (!g_tileview) return;
     lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
     const int page = meck_home_page_index();
+    // TEMPORARY diagnostic -- remove when the wrap behaviour is settled.
+    printf("[diag] wrap gesture: dir=%c page=%d\n",
+           (d == LV_DIR_LEFT) ? 'L' : (d == LV_DIR_RIGHT) ? 'R' :
+           (d == LV_DIR_TOP)  ? 'T' : (d == LV_DIR_BOTTOM) ? 'B' : '?',
+           page);
     if (page < 0) return;
     if ((d == LV_DIR_RIGHT) && (page == 0)) {
+        printf("[diag] wrap jump -> %d\n", MECK_HOME_PAGE_COUNT - 2);
+        // LV_ANIM_OFF: an animated jump scrolls across every intermediate
+        // page, and LVGL kills a scroll animation on the next touch, so an
+        // interrupted flight snapped to whichever middle page it was
+        // passing (confirmed in the serial diag: jump -> 0 from Hibernate
+        // landing on page 4). Instant snap cannot be interrupted.
         lv_tileview_set_tile_by_index(g_tileview,
-            (uint32_t)(MECK_HOME_PAGE_COUNT - 2), 0, LV_ANIM_ON);
+            (uint32_t)(MECK_HOME_PAGE_COUNT - 2), 0, LV_ANIM_OFF);
     } else if ((d == LV_DIR_LEFT) && (page == MECK_HOME_PAGE_COUNT - 1)) {
-        lv_tileview_set_tile_by_index(g_tileview, 0, 0, LV_ANIM_ON);
+        printf("[diag] wrap jump -> 0\n");
+        lv_tileview_set_tile_by_index(g_tileview, 0, 0, LV_ANIM_OFF);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Home tile grid hidden row (Voice, Games) -- ported from the Meck Watch's
+// tile-page scroll. A swipe DOWN on the tile-grid page reveals the extra
+// row at the bottom; a swipe UP tucks it away; paging off the grid resets
+// it (and only that -- the watch's v1.5 lesson: never clear per-render).
+// LVGL adaptation: instead of the watch's manual draw-skip and tap
+// dispatch, the buttons are repositioned one row-pitch up and the row that
+// leaves the viewport gets LV_OBJ_FLAG_HIDDEN, so hit-testing follows the
+// visuals automatically.
+// ----------------------------------------------------------------------------
+static bool g_home_tile_scroll = false;
+
+// Reposition every registered grid button for the current scroll state.
+// Geometry mirrors create_tile_button exactly (same constants, same
+// orientation fold), so the buttons land back on their creation grid.
+// Unscrolled: the last row (row 5 portrait, row 2 landscape) is hidden --
+// in portrait it would otherwise be visible, as the panel has spare height
+// the watch lacks. Scrolled: everything shifts up one pitch and row 0 is
+// hidden instead (the analogue of the watch's ty < gridTop skip).
+static void home_apply_tile_scroll(void) {
+    const int  gapX      = 10;
+    const int  gapY      = 10;
+    const int  gridX     = 20;
+    const bool landscape = (SCREEN_WIDTH > SCREEN_HEIGHT);
+    const int  gridY     = landscape ? 110 : 140;
+    const int  cols      = landscape ? 5 : 2;
+    const int  tileW     = (SCREEN_WIDTH - 2 * gridX - (cols - 1) * gapX) / cols;
+    const int  tileH     = landscape ? ((SCREEN_HEIGHT - gridY - 55 - gapY) / 2) : 168;
+    const int  pitch     = tileH + gapY;
+    const int  vis_rows  = landscape ? 2 : 5;
+    for (int i = 0; i < tile_button_count; i++) {
+        if (!tile_buttons[i]) continue;
+        const int c = i % cols;
+        const int r = i / cols;
+        const int x = gridX + c * (tileW + gapX);
+        const int y = gridY + r * pitch - (g_home_tile_scroll ? pitch : 0);
+        lv_obj_set_pos(tile_buttons[i], x, y);
+        const bool hidden = g_home_tile_scroll ? (r == 0) : (r >= vis_rows);
+        if (hidden) lv_obj_add_flag(tile_buttons[i], LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_clear_flag(tile_buttons[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// Vertical swipes on the tile-grid page drive the hidden row. Watch
+// semantics preserved: swipe down (gesture toward the bottom) reveals,
+// swipe up hides. Registered on scr_home (see meck_ui_build_screens):
+// LVGL walks gesture delivery up past every GESTURE_BUBBLE-flagged object
+// and hands the event to the screen, so a tileview registration would
+// never fire.
+static void on_home_tile_scroll_gesture(lv_event_t *e) {
+    if (lv_event_get_code(e) != LV_EVENT_GESTURE) return;
+    if (!g_tileview) return;
+    const int diag_page = meck_home_page_index();
+    const lv_dir_t diag_d = lv_indev_get_gesture_dir(lv_indev_active());
+    // TEMPORARY diagnostic -- remove when the wrap behaviour is settled.
+    printf("[diag] tilescroll gesture: dir=%c page=%d scrolled=%d\n",
+           (diag_d == LV_DIR_LEFT) ? 'L' : (diag_d == LV_DIR_RIGHT) ? 'R' :
+           (diag_d == LV_DIR_TOP)  ? 'T' : (diag_d == LV_DIR_BOTTOM) ? 'B' : '?',
+           diag_page, (int)g_home_tile_scroll);
+    if (diag_page != 0) return;
+    const lv_dir_t d = diag_d;
+    if (d == LV_DIR_BOTTOM) {
+        if (!g_home_tile_scroll) { g_home_tile_scroll = true;  home_apply_tile_scroll(); }
+    } else if (d == LV_DIR_TOP) {
+        if (g_home_tile_scroll)  { g_home_tile_scroll = false; home_apply_tile_scroll(); }
     }
 }
 
@@ -6325,11 +6415,12 @@ static void create_page_home(lv_obj_t *page) {
     }
     lv_obj_add_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
 
-    // Navigation grid: 10 tiles in 2 columns × 5 rows. First two rows are
-    // the high-traffic items; placeholder tiles for Trace, Maps, Audio, and
-    // Web are at the bottom as visual markers for future work. Tap any
+    // Navigation grid: 12 tiles in 2 columns x 6 rows (portrait). First two
+    // rows are the high-traffic items; the sixth row (Voice, Games) is
+    // hidden until a swipe-down on the tile page reveals it. Tap any
     // placeholder to print a TODO line to serial. The Web tile will host
     // the text-based browser + IRC client ported from other Meck builds.
+    g_home_tile_scroll = false;   // fresh build (incl. orientation rebuild) starts unscrolled
     create_tile_button(page, LV_SYMBOL_ENVELOPE "\nMessages", goto_channel_picker, 0, 0);
     create_tile_button(page, LV_SYMBOL_LIST     "\nContacts", goto_contacts,       1, 0);
     create_tile_button(page, LV_SYMBOL_SETTINGS "\nSettings", goto_settings,       0, 1);
@@ -6340,8 +6431,18 @@ static void create_page_home(lv_obj_t *page) {
     create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
     create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    goto_audio_browser,  0, 4);
     create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_open_web,         1, 4);
-    // Voice and Camera tiles hidden until implementation is ready
-    // create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    cb_todo_voice,       0, 5);
+    // Hidden sixth row: Voice (left) opens the voice landing screen, Games
+    // (right) is a placeholder until the emulator lands. Parked off-view by
+    // home_apply_tile_scroll() until revealed by swipe.
+    create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    goto_voice_landing,  0, 5);
+    // Games icon: LV_SYMBOL_KEYBOARD, not LV_SYMBOL_PLAY -- the custom
+    // Montserrat fonts embed only a subset of the Font Awesome symbols and
+    // 0xF04B (play) is not among them (renders as a missing-glyph box);
+    // 0xF11C (keyboard) is embedded.
+    create_tile_button(page, LV_SYMBOL_KEYBOARD "\nGames",    cb_todo_games,       1, 5);
+    home_apply_tile_scroll();
+    // Camera tile stays disabled: nothing camera-related is to be booted,
+    // powered, or accessible on this device.
     // lv_obj_t *cam_btn = create_tile_button(page, LV_SYMBOL_IMAGE "\nCamera", cb_todo_camera, 1, 5);
     // if (cam_btn && g_home_color_scheme == HOME_COLOR_MULTI) {
     //     lv_obj_set_style_border_color(cam_btn, lv_palette_main(LV_PALETTE_PURPLE), 0);
@@ -15789,6 +15890,16 @@ static void ui_update_timer_cb(lv_timer_t *t) {
             lv_label_set_text(lbl_battery_detail, buf);
             if (lbl_kbd_batt_detail) lv_label_set_text(lbl_kbd_batt_detail, kbuf);
             if (lbl_kbd_batt_cap)    lv_label_set_text(lbl_kbd_batt_cap, capbuf);
+            // Re-anchor the capacity line under the pack detail block. The
+            // creation-time position was a fixed y sized for the 18 px font;
+            // with the Larger / Extra Large font preference the scaled
+            // detail block grows past it and the two overlap. update_layout
+            // first so the label's height reflects the text just set.
+            if (lbl_kbd_batt_detail && lbl_kbd_batt_cap) {
+                lv_obj_update_layout(lbl_kbd_batt_detail);
+                lv_obj_align_to(lbl_kbd_batt_cap, lbl_kbd_batt_detail,
+                                LV_ALIGN_OUT_BOTTOM_LEFT, 0, 10);
+            }
 #else
             const char* current_label_full;
             if (current_abs < 5)      current_label_full = "idle";
@@ -21408,8 +21519,29 @@ static void meck_ui_build_screens() {
     g_home_tiles[5] = t_battery;
     g_home_tiles[6] = t_clocks;
     g_home_tiles[7] = t_shutdown;
-    lv_obj_add_event_cb(g_tileview, on_home_wrap_gesture,
+    // LVGL delivers LV_EVENT_GESTURE to the first ancestor of the pressed
+    // object WITHOUT LV_OBJ_FLAG_GESTURE_BUBBLE (indev_gesture, lv_indev.c).
+    // Every object with a parent carries that flag by default, so delivery
+    // lands on the screen itself -- register BOTH gesture handlers there,
+    // not on the tileview. The wrap handler sat on the tileview from
+    // v0.7.2 onward and never received a gesture: keyboard wrap worked
+    // (direct call path), touch wrap did not.
+    lv_obj_add_event_cb(scr_home, on_home_wrap_gesture,
                         LV_EVENT_GESTURE, NULL);
+    lv_obj_add_event_cb(scr_home, on_home_tile_scroll_gesture,
+                        LV_EVENT_GESTURE, NULL);
+    // Paging off the tile-grid page tucks the hidden row away again (watch
+    // parity: the scroll state clears only when the home view leaves the
+    // tile page -- never per-render).
+    lv_obj_add_event_cb(g_tileview, [](lv_event_t *e) {
+        (void)e;
+        // TEMPORARY diagnostic -- remove when the wrap behaviour is settled.
+        printf("[diag] tileview page change -> %d\n", meck_home_page_index());
+        if (g_home_tile_scroll && meck_home_page_index() != 0) {
+            g_home_tile_scroll = false;
+            home_apply_tile_scroll();
+        }
+    }, LV_EVENT_VALUE_CHANGED, NULL);
 
 #if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
     // Keyboard tile-selection ring: clear it whenever the home screen is
