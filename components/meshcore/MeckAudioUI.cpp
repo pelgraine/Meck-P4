@@ -520,6 +520,7 @@ static lv_obj_t* btn_seek_back        = NULL;
 static lv_obj_t* btn_play_pause       = NULL;
 static lv_obj_t* lbl_play_pause_icon  = NULL;
 static lv_obj_t* btn_seek_fwd         = NULL;
+static lv_obj_t* obj_player_scroll    = NULL;   /* scrollable content layer */
 static lv_obj_t* slider_volume        = NULL;
 static lv_obj_t* lbl_volume           = NULL;
 static lv_obj_t* btn_sleep            = NULL;   /* audiobook-only */
@@ -984,6 +985,30 @@ static void create_player_screen() {
     lock_screen_scroll(scr_audio_player);
     lv_obj_set_style_bg_color(scr_audio_player, lv_color_black(), 0);
 
+    /* Scrollable content layer. The layout below uses fixed y positions
+     * down to ~870 px, sized for the 1232 px axis; on the 568 px axis the
+     * transport row, volume and sleep timer fell off the bottom with
+     * screen scrolling locked and could not be reached. Parenting the
+     * content to a full-screen, zero-padding scrollable container keeps
+     * the tall layout pixel-identical and lets the short one scroll. The
+     * Back button and header are created after it, on the screen itself,
+     * so they stay fixed above the scrolling content. Sized from the LIVE
+     * display resolution, not SCREEN_WIDTH/SCREEN_HEIGHT: in this
+     * translation unit those are the fixed physical panel constants
+     * (568x1232), which in the wide orientation produced a container
+     * taller than the display -- nothing to scroll, overflow clipped. */
+    obj_player_scroll = lv_obj_create(scr_audio_player);
+    lv_obj_set_size(obj_player_scroll,
+                    lv_display_get_horizontal_resolution(NULL),
+                    lv_display_get_vertical_resolution(NULL));
+    lv_obj_set_pos(obj_player_scroll, 0, 0);
+    lv_obj_set_style_bg_opa(obj_player_scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(obj_player_scroll, 0, 0);
+    lv_obj_set_style_pad_all(obj_player_scroll, 0, 0);
+    lv_obj_set_style_radius(obj_player_scroll, 0, 0);
+    lv_obj_set_scroll_dir(obj_player_scroll, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(obj_player_scroll, LV_SCROLLBAR_MODE_AUTO);
+
     /* Back button */
     lv_obj_t* btn_back = lv_button_create(scr_audio_player);
     lv_obj_set_size(btn_back, 100, 70);
@@ -1009,7 +1034,7 @@ static void create_player_screen() {
      * Centered horizontally, near the top of content area. */
     const int COVER_W = 280;
     const int COVER_H = 280;
-    obj_cover_slot = lv_obj_create(scr_audio_player);
+    obj_cover_slot = lv_obj_create(obj_player_scroll);
     lv_obj_set_size(obj_cover_slot, COVER_W, COVER_H);
     lv_obj_align(obj_cover_slot, LV_ALIGN_TOP_MID, 0, 80);
     lv_obj_set_style_bg_color(obj_cover_slot, lv_color_make(20, 20, 20), 0);
@@ -1030,7 +1055,7 @@ static void create_player_screen() {
     lv_obj_center(obj_cover_icon);
 
     /* Title label */
-    lbl_player_title = lv_label_create(scr_audio_player);
+    lbl_player_title = lv_label_create(obj_player_scroll);
     lv_label_set_text(lbl_player_title, "");
     lv_label_set_long_mode(lbl_player_title, LV_LABEL_LONG_DOT);
     lv_obj_set_width(lbl_player_title, SCREEN_WIDTH - 40);
@@ -1040,7 +1065,7 @@ static void create_player_screen() {
     lv_obj_align(lbl_player_title, LV_ALIGN_TOP_MID, 0, 380);
 
     /* Subtitle: folder · MODE */
-    lbl_player_subtitle = lv_label_create(scr_audio_player);
+    lbl_player_subtitle = lv_label_create(obj_player_scroll);
     lv_label_set_text(lbl_player_subtitle, "");
     lv_label_set_long_mode(lbl_player_subtitle, LV_LABEL_LONG_DOT);
     lv_obj_set_width(lbl_player_subtitle, SCREEN_WIDTH - 40);
@@ -1051,7 +1076,7 @@ static void create_player_screen() {
     lv_obj_align(lbl_player_subtitle, LV_ALIGN_TOP_MID, 0, 420);
 
     /* Progress slider */
-    slider_progress = lv_slider_create(scr_audio_player);
+    slider_progress = lv_slider_create(obj_player_scroll);
     lv_obj_set_size(slider_progress, SCREEN_WIDTH - 80, 8);
     lv_obj_align(slider_progress, LV_ALIGN_TOP_MID, 0, 470);
     lv_slider_set_range(slider_progress, 0, 1);
@@ -1062,14 +1087,14 @@ static void create_player_screen() {
                         LV_EVENT_RELEASED, NULL);
 
     /* Time labels */
-    lbl_time_current = lv_label_create(scr_audio_player);
+    lbl_time_current = lv_label_create(obj_player_scroll);
     lv_label_set_text(lbl_time_current, "0:00");
     lv_obj_set_style_text_color(lbl_time_current,
                                 lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_set_style_text_font(lbl_time_current, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_time_current, LV_ALIGN_TOP_LEFT, 40, 490);
 
-    lbl_time_total = lv_label_create(scr_audio_player);
+    lbl_time_total = lv_label_create(obj_player_scroll);
     lv_label_set_text(lbl_time_total, "--:--");
     lv_obj_set_style_text_color(lbl_time_total,
                                 lv_palette_main(LV_PALETTE_GREY), 0);
@@ -1078,27 +1103,27 @@ static void create_player_screen() {
 
     /* Transport row: -30, play/pause, +30 — large tap targets, centered */
     const int TRANSPORT_Y = 550;
-    btn_seek_back  = make_round_button(scr_audio_player, LV_SYMBOL_LEFT,   80,
+    btn_seek_back  = make_round_button(obj_player_scroll, LV_SYMBOL_LEFT,   80,
                                        on_seek_back_clicked);
     lv_obj_align(btn_seek_back, LV_ALIGN_TOP_MID, -130, TRANSPORT_Y);
 
-    btn_play_pause = make_round_button(scr_audio_player, LV_SYMBOL_PLAY, 120,
+    btn_play_pause = make_round_button(obj_player_scroll, LV_SYMBOL_PLAY, 120,
                                        on_play_pause_clicked,
                                        &lbl_play_pause_icon);
     lv_obj_align(btn_play_pause, LV_ALIGN_TOP_MID, 0, TRANSPORT_Y - 20);
 
-    btn_seek_fwd   = make_round_button(scr_audio_player, LV_SYMBOL_RIGHT,  80,
+    btn_seek_fwd   = make_round_button(obj_player_scroll, LV_SYMBOL_RIGHT,  80,
                                        on_seek_fwd_clicked);
     lv_obj_align(btn_seek_fwd, LV_ALIGN_TOP_MID, 130, TRANSPORT_Y);
 
     /* Tiny "-30s" / "+30s" labels under the seek buttons */
-    lv_obj_t* lbl_b = lv_label_create(scr_audio_player);
+    lv_obj_t* lbl_b = lv_label_create(obj_player_scroll);
     lv_label_set_text(lbl_b, "-30s");
     lv_obj_set_style_text_color(lbl_b, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_set_style_text_font(lbl_b, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_b, LV_ALIGN_TOP_MID, -130, TRANSPORT_Y + 90);
 
-    lv_obj_t* lbl_f = lv_label_create(scr_audio_player);
+    lv_obj_t* lbl_f = lv_label_create(obj_player_scroll);
     lv_label_set_text(lbl_f, "+30s");
     lv_obj_set_style_text_color(lbl_f, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_set_style_text_font(lbl_f, &lv_font_montserrat_14, 0);
@@ -1106,13 +1131,13 @@ static void create_player_screen() {
 
     /* Volume row */
     const int VOL_Y = 730;
-    lv_obj_t* vol_icon = lv_label_create(scr_audio_player);
+    lv_obj_t* vol_icon = lv_label_create(obj_player_scroll);
     lv_label_set_text(vol_icon, LV_SYMBOL_VOLUME_MAX);
     lv_obj_set_style_text_color(vol_icon, lv_color_white(), 0);
     lv_obj_set_style_text_font(vol_icon, &lv_font_montserrat_18, 0);
     lv_obj_align(vol_icon, LV_ALIGN_TOP_LEFT, 30, VOL_Y);
 
-    slider_volume = lv_slider_create(scr_audio_player);
+    slider_volume = lv_slider_create(obj_player_scroll);
     lv_obj_set_size(slider_volume, SCREEN_WIDTH - 160, 8);
     lv_obj_align(slider_volume, LV_ALIGN_TOP_LEFT, 70, VOL_Y + 8);
     lv_slider_set_range(slider_volume, 0, 100);
@@ -1120,14 +1145,14 @@ static void create_player_screen() {
     lv_obj_add_event_cb(slider_volume, on_volume_changed,
                         LV_EVENT_VALUE_CHANGED, NULL);
 
-    lbl_volume = lv_label_create(scr_audio_player);
+    lbl_volume = lv_label_create(obj_player_scroll);
     lv_label_set_text(lbl_volume, "50%");
     lv_obj_set_style_text_color(lbl_volume, lv_color_white(), 0);
     lv_obj_set_style_text_font(lbl_volume, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_volume, LV_ALIGN_TOP_RIGHT, -30, VOL_Y);
 
     /* Sleep-timer chip (visible only in audiobook mode) */
-    btn_sleep = lv_button_create(scr_audio_player);
+    btn_sleep = lv_button_create(obj_player_scroll);
     lv_obj_set_size(btn_sleep, SCREEN_WIDTH - 80, 50);
     lv_obj_align(btn_sleep, LV_ALIGN_TOP_MID, 0, 800);
     lv_obj_set_style_bg_color(btn_sleep, lv_color_make(40, 40, 40), 0);
@@ -1190,6 +1215,7 @@ extern "C" void meck_audio_ui_teardown(void) {
     if (player_refresh_timer) { lv_timer_delete(player_refresh_timer); player_refresh_timer = NULL; }
     if (scr_audio_browser) { lv_obj_delete(scr_audio_browser); scr_audio_browser = NULL; }
     if (scr_audio_player)  { lv_obj_delete(scr_audio_player);  scr_audio_player  = NULL; }
+    obj_player_scroll = NULL;   /* child of scr_audio_player, freed above */
     g_audio_ui_inited = false;
 }
 

@@ -50,6 +50,7 @@ idf_component_register(
         "MeckNotes.cpp"
         "MeckNotesUI.cpp"
         "MeckGBC.cpp"
+        "minigb_apu.c"
         "es8311.cpp" 
         "meck_montserrat_14.c"
         "meck_montserrat_16.c"

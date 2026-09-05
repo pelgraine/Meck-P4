@@ -504,6 +504,10 @@ static lv_obj_t   *lbl_web_toast       = NULL;
 static lv_timer_t *g_web_toast_timer   = NULL;
 static lv_obj_t   *lbl_web_wip_toast   = NULL;
 static lv_timer_t *g_web_wip_timer     = NULL;
+// Voice tile: same work-in-progress toast as the web reader, shown on tile
+// entry only (not on back-navigation from the inbox/recorder screens).
+static lv_obj_t   *lbl_voice_wip_toast = NULL;
+static lv_timer_t *g_voice_wip_timer   = NULL;
 
 // Web form fill (Stage 5): a "Forms (N)" button, a selection panel for pages
 // with more than one form, and a fill overlay with one editable textarea per
@@ -1673,9 +1677,24 @@ static void cb_todo_games(lv_event_t* e)    { show_not_implemented("Games"); }
 #endif
 // Voice tile: opens the existing voice landing screen (Inbox / Record
 // picker), which previously had no entry point from the home grid.
+static void voice_wip_toast_hide_cb(lv_timer_t *t) {
+    (void)t;
+    if (lbl_voice_wip_toast) lv_obj_add_flag(lbl_voice_wip_toast, LV_OBJ_FLAG_HIDDEN);
+    if (g_voice_wip_timer) { lv_timer_delete(g_voice_wip_timer); g_voice_wip_timer = NULL; }
+}
+
+static void voice_wip_toast_show() {
+    if (!lbl_voice_wip_toast) return;
+    lv_obj_remove_flag(lbl_voice_wip_toast, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(lbl_voice_wip_toast);
+    if (g_voice_wip_timer) lv_timer_delete(g_voice_wip_timer);
+    g_voice_wip_timer = lv_timer_create(voice_wip_toast_hide_cb, 3500, NULL);
+}
+
 static void goto_voice_landing(lv_event_t* e) {
     (void)e;
     if (scr_voice_landing) lv_screen_load(scr_voice_landing);
+    voice_wip_toast_show();
 }
 
 // ============================================================================
@@ -12797,6 +12816,22 @@ static void create_voice_landing_screen(void) {
         voice_prev_refresh();
         if (scr_voice) lv_screen_load(scr_voice);
     }, LV_EVENT_CLICKED, NULL);
+
+    // Work-in-progress toast (mirrors lbl_web_wip_toast): amber, centred,
+    // hidden until goto_voice_landing shows it for 3.5 s on tile entry.
+    lbl_voice_wip_toast = lv_label_create(scr_voice_landing);
+    lv_label_set_text(lbl_voice_wip_toast,
+                      "Voice over LoRa is a work in progress. Some features may not work reliably yet.");
+    lv_obj_set_style_bg_color(lbl_voice_wip_toast, lv_palette_main(LV_PALETTE_AMBER), 0);
+    lv_obj_set_style_bg_opa(lbl_voice_wip_toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(lbl_voice_wip_toast, lv_color_black(), 0);
+    lv_obj_set_style_pad_all(lbl_voice_wip_toast, 12, 0);
+    lv_obj_set_style_radius(lbl_voice_wip_toast, 10, 0);
+    meck_set_font(lbl_voice_wip_toast, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_voice_wip_toast, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_voice_wip_toast, SCREEN_WIDTH - 60);
+    lv_obj_align(lbl_voice_wip_toast, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(lbl_voice_wip_toast, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ============================================================================

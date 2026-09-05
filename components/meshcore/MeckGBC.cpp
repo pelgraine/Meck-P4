@@ -5,7 +5,17 @@
  *   - Keyboard (K270) builds only. Controls come from MeckP4Keyboard's raw
  *     joypad mode (arrows = d-pad, K = A, J = B, Enter = Start,
  *     Space = Select, Esc = exit to the browser).
- *   - Silent: ENABLE_SOUND 0. Sound is a later stage.
+ *   - Sound via minigb_apu (MIT, vendored): the core's audio_read/
+ *     audio_write hooks feed the APU, and once per emulated frame the task
+ *     renders 16-bit stereo at 32768 Hz and writes it to the ES8311 through
+ *     the firmware's existing I2S helpers (meck_audio_i2s_write). The codec
+ *     is woken and reclocked to 32768 Hz on launch and restored to the
+ *     audiobook player's 44100 Hz and put back to sleep on exit. If the
+ *     audiobook player is playing or paused, it is stopped first (a game
+ *     launch is foreground intent; its resume position is kept by the
+ *     player). Frame pacing stays on the esp_timer deadline: the APU
+ *     produces exactly one frame's worth of samples per frame, so the two
+ *     rates balance by construction whether or not the I2S write blocks.
  *   - No battery saves yet: cart RAM starts zeroed each launch and is
  *     discarded on exit. Saves/resume are a later stage.
  *   - Menu and browser are touch-navigated in v1; in-game input is fully
@@ -25,8 +35,12 @@
  *     must not plain-self-delete (the caps-allocated stack would leak), so
  *     on stop it parks in vTaskSuspend and the LVGL timer reaps it with
  *     vTaskDeleteWithCaps. The task paces gb_run_frame() to the GBC's
- *     59.73 Hz (16742 us/frame) against esp_timer, yielding in 1-tick
- *     slices so the idle task is always fed.
+ *     59.73 Hz (16742 us/frame): each frame arms a one-shot esp_timer
+ *     for the remaining time to the accumulated deadline and blocks on a
+ *     semaphore the timer gives. esp_timer is microsecond-resolution, so
+ *     pacing is exact regardless of the 10 ms FreeRTOS tick -- the
+ *     earlier vTaskDelay(1) loop rounded every wait up to a tick and ran
+ *     ~57 fps, audibly slow in tempo-critical titles (Halo).
  *   - Per scanline the core hands 160 palette indices; the draw callback
  *     resolves them through gb->cgb.fixPalette (RGB555, red high -- the
  *     core swaps the GBC's native red/blue when latching palette writes)
@@ -44,10 +58,6 @@
  *   - Single framebuffer in v1: the emulator task may be writing while
  *     LVGL copies, worst case a brief horizontal shear on fast motion. If
  *     visible on glass, the follow-up is a double buffer + pointer swap.
- *   - Frame timing note: FreeRTOS ticks are 10 ms on this build, so the
- *     pacing loop has up to one tick of per-frame jitter; the accumulated
- *     deadline keeps the average rate exact. Fine for silent operation;
- *     the audio clock becomes the pacer when sound lands.
  *
  * The bundled ROM is ucity v1.3 (GPL-3.0, github.com/AntonioND/ucity),
  * 128 KB, CGB-only, MBC5. It is embedded in the app image and copied to
@@ -69,6 +79,7 @@
 #include "freertos/idf_additions.h"   // xTaskCreatePinnedToCoreWithCaps
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "freertos/semphr.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -83,14 +94,31 @@
 // auto-increment lines (well-defined under the C++17-and-later sequencing
 // this build uses, gnu++2b) and -Wmisleading-indentation. Both are cosmetic
 // here, and suppressing them keeps peanut_gb.h byte-identical to upstream.
+// The APU declarations must precede the core: with ENABLE_SOUND the core
+// calls audio_read/audio_write directly. minigb_apu.h has no C++ linkage
+// guard of its own, and minigb_apu.c is compiled as C.
+extern "C" {
+#include "minigb_apu.h"
+}
 #define PEANUT_FULL_GBC_SUPPORT 1
 #define ENABLE_LCD 1
-#define ENABLE_SOUND 0
+#define ENABLE_SOUND 1
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsequence-point"
 #pragma GCC diagnostic ignored "-Wmisleading-indentation"
 #include "peanut_gb.h"
 #pragma GCC diagnostic pop
+
+#include "MeckAudio.h"       // meck_audio_get_state / meck_audio_stop / meck_audio_ready
+#include "driver/i2s_std.h"  // i2s_slot_mode_t for the reconfig helper
+
+// ---- Audio path (es8311.cpp + main.cpp, all extern "C") --------------------
+extern "C" esp_err_t meck_audio_i2s_write(void *audio_buffer, size_t len,
+                                          size_t *bytes_written, uint32_t timeout_ticks);
+extern "C" esp_err_t meck_audio_i2s_reconfig(uint32_t rate, uint32_t bps,
+                                             i2s_slot_mode_t channels);
+extern "C" void meck_audio_codec_wake(void);
+extern "C" void meck_audio_codec_sleep(void);
 
 // ---- Shared helpers from MeckUI.cpp ----------------------------------------
 extern "C" void meck_ui_set_font(lv_obj_t* obj, const lv_font_t* base,
@@ -156,12 +184,17 @@ static uint16_t        *s_outfb   = NULL;          // 480x432 RGB565, PSRAM
 static uint8_t         *s_rom     = NULL;          // PSRAM copy of the ROM
 static size_t           s_rom_size = 0;
 static uint8_t         *s_cram    = NULL;          // 128 KB, PSRAM
+static bool             s_audio_on  = false;  // codec taken for this session
+static int16_t         *s_audio_buf = NULL;   // one frame of stereo s16
+#define GBC_AUDIO_FRAME_BYTES (AUDIO_SAMPLES * 2 * sizeof(int16_t))
 static size_t           s_save_size = 0;      // battery-save bytes (0 = none)
 static char             s_save_path[192];
 static volatile bool    s_stop         = false;
 static volatile bool    s_task_stopped = false;
 static bool             s_running      = false;
 static TaskHandle_t     s_task    = NULL;
+static esp_timer_handle_t s_pace_timer = NULL;   // one-shot frame pacer
+static SemaphoreHandle_t  s_pace_sem   = NULL;   // given by the pacer
 static lv_timer_t      *s_timer   = NULL;
 
 // ---- Core callbacks (validated natively and on-target in the bench) ---------
@@ -226,6 +259,14 @@ static void blit_scaled(void)
 }
 
 // ---- Emulator task ----------------------------------------------------------
+static void gbc_pace_cb(void *arg)
+{
+    (void)arg;
+    // esp_timer dispatches from its own task on this build, so a plain give
+    // is correct (not the FromISR variant).
+    if (s_pace_sem) xSemaphoreGive(s_pace_sem);
+}
+
 static void gbc_task(void *arg)
 {
     (void)arg;
@@ -236,10 +277,23 @@ static void gbc_task(void *arg)
         s_gb->direct.joypad = (uint8_t)~meck_p4kbd_raw_joypad();
         gb_run_frame(s_gb);
         blit_scaled();
+        if (s_audio_on) {
+            // Render this frame's APU output and hand it to the codec.
+            audio_callback(NULL, (uint8_t*)s_audio_buf, (int)GBC_AUDIO_FRAME_BYTES);
+            size_t put = 0;
+            meck_audio_i2s_write(s_audio_buf, GBC_AUDIO_FRAME_BYTES, &put, 100);
+        }
         next += GBC_FRAME_US;
         int64_t now = esp_timer_get_time();
-        if (next < now) next = now;   // fell behind: resync, don't spiral
-        while (!s_stop && esp_timer_get_time() < next) vTaskDelay(1);
+        if (next <= now) {
+            next = now;               // fell behind: resync, don't spiral
+            continue;
+        }
+        // Sleep precisely until the deadline: arm the one-shot pacer for the
+        // remaining microseconds and block on its semaphore. The take has a
+        // bounded timeout so a lost give can never wedge the task.
+        esp_timer_start_once(s_pace_timer, (uint64_t)(next - now));
+        xSemaphoreTake(s_pace_sem, pdMS_TO_TICKS(50));
     }
     printf("[GBC] task stop\n");
     s_task_stopped = true;
@@ -263,13 +317,16 @@ static bool gbc_alloc_buffers(void)
                                              MALLOC_CAP_SPIRAM);
     if (!s_cram)
         s_cram = (uint8_t*)heap_caps_malloc(GBC_CRAM_SIZE, MALLOC_CAP_SPIRAM);
+    if (!s_audio_buf)
+        s_audio_buf = (int16_t*)heap_caps_malloc(GBC_AUDIO_FRAME_BYTES, MALLOC_CAP_SPIRAM);
     // Name the failing buffer: "buffer allocation failed" alone cost a
     // debugging round trip when the old internal-RAM LUT was the culprit.
     if (!s_outfb) printf("[GBC] outfb alloc failed\n");
     if (!s_gb)    printf("[GBC] gb_s alloc failed\n");
     if (!s_gbfb)  printf("[GBC] gbfb alloc failed\n");
     if (!s_cram)  printf("[GBC] cram alloc failed\n");
-    return s_outfb && s_cram && s_gb && s_gbfb;
+    if (!s_audio_buf) printf("[GBC] audio buf alloc failed\n");
+    return s_outfb && s_cram && s_gb && s_gbfb && s_audio_buf;
 }
 
 // ---- Screen plumbing --------------------------------------------------------
@@ -362,6 +419,15 @@ static void gbc_stop_and_leave(void)
     // Called from the LVGL timer once the task has confirmed it stopped
     // (parked in vTaskSuspend). Reap it: frees the PSRAM stack and TCB.
     if (s_task) vTaskDeleteWithCaps(s_task);
+    if (s_pace_timer) { esp_timer_stop(s_pace_timer); esp_timer_delete(s_pace_timer); s_pace_timer = NULL; }
+    if (s_pace_sem)   { vSemaphoreDelete(s_pace_sem); s_pace_sem = NULL; }
+    // Hand the codec back: audiobook clock, then sleep (the player wakes
+    // it again on its own next play).
+    if (s_audio_on) {
+        meck_audio_i2s_reconfig(44100, 16, I2S_SLOT_MODE_STEREO);
+        meck_audio_codec_sleep();
+        s_audio_on = false;
+    }
     // Flush the battery save now that the emulator task is gone and cart
     // RAM is stable.
     if (s_save_size > 0) {
@@ -487,17 +553,63 @@ static void gbc_launch(const char *path)
     lv_obj_center(g_gbc_canvas);
     lv_screen_load(scr_gbc);
 
+    // Sound: initialise the audio stack if nothing has yet (it is lazy --
+    // MeckAudio brings itself up on the first play, so a game launched
+    // before the audiobook player has ever run finds it "not ready"),
+    // stop the player if it holds the codec, wake the codec, reclock to
+    // the APU's rate, unmute, reset the APU. Only if init itself fails
+    // does the game run silent.
+    s_audio_on = false;
+    if (meck_audio_ready() || meck_audio_init()) {
+        MeckAudioState st = meck_audio_get_state();
+        if (st == MECK_AUDIO_STATE_PLAYING || st == MECK_AUDIO_STATE_PAUSED ||
+            st == MECK_AUDIO_STATE_LOADING) {
+            printf("[GBC] stopping audiobook player for game audio\n");
+            meck_audio_stop();
+        }
+        meck_audio_codec_wake();
+        if (meck_audio_i2s_reconfig(AUDIO_SAMPLE_RATE, 16, I2S_SLOT_MODE_STEREO) == ESP_OK) {
+            // The player's stop path runs its mute callback, which sets
+            // the DAC volume register to ZERO; only the player's next play
+            // would restore it. Unmute here (re-applies the user's volume).
+            meck_audio_set_dac_mute(false);
+            audio_init();
+            s_audio_on = true;
+            printf("[GBC] audio on (%u Hz, %u samples/frame)\n",
+                   (unsigned)AUDIO_SAMPLE_RATE, (unsigned)AUDIO_SAMPLES);
+        } else {
+            meck_audio_codec_sleep();
+            printf("[GBC] audio reconfig failed -- running silent\n");
+        }
+    } else {
+        printf("[GBC] audio stack init failed -- running silent\n");
+    }
+
     // Input over to the joypad, then start the machinery.
     meck_p4kbd_set_raw_joypad(true);
     s_stop = false;
     s_task_stopped = false;
     s_running = true;
+    s_pace_sem = xSemaphoreCreateBinary();
+    {
+        esp_timer_create_args_t pa = {};
+        pa.callback = gbc_pace_cb;
+        pa.name     = "gbc_pace";
+        esp_timer_create(&pa, &s_pace_timer);
+    }
     s_timer = lv_timer_create(gbc_frame_timer_cb, 20, NULL);
     if (xTaskCreatePinnedToCoreWithCaps(gbc_task, "meck_gbc", 16 * 1024,
                                         NULL, 2, &s_task, 1,
                                         MALLOC_CAP_SPIRAM) != pdPASS) {
         printf("[GBC] task create failed\n");
         s_running = false;
+        if (s_pace_timer) { esp_timer_delete(s_pace_timer); s_pace_timer = NULL; }
+        if (s_pace_sem)   { vSemaphoreDelete(s_pace_sem); s_pace_sem = NULL; }
+        if (s_audio_on) {
+            meck_audio_i2s_reconfig(44100, 16, I2S_SLOT_MODE_STEREO);
+            meck_audio_codec_sleep();
+            s_audio_on = false;
+        }
         meck_p4kbd_set_raw_joypad(false);
         lv_timer_delete(s_timer);
         s_timer = NULL;
