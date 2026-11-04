@@ -344,6 +344,12 @@ void BaseChatMesh::handleReturnPathRetry(const ContactInfo& contact, const uint8
 int BaseChatMesh::searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel dest[], int max_matches) {
   int n = 0;
   for (int i = 0; i < MAX_GROUP_CHANNELS && n < max_matches; i++) {
+    // Skip empty/unconfigured slots. An empty slot has an all-zero secret and
+    // therefore matches null-key group traffic (a node transmitting with an
+    // unset PSK): the zero-key MAC validates against the empty slot and the
+    // foreign message is delivered as if it belonged to that channel. Any node
+    // with a free channel slot would otherwise act as a null-key sink.
+    if (channels[i].name[0] == 0) continue;
     if (channels[i].channel.hash[0] == hash[0]) {
       dest[n++] = channels[i].channel;
     }
@@ -407,13 +413,13 @@ int  BaseChatMesh::sendMessage(const ContactInfo& recipient, uint32_t timestamp,
   return rc;
 }
 
-int  BaseChatMesh::sendCommandData(const ContactInfo& recipient, uint32_t timestamp, uint8_t attempt, const char* text, uint32_t& est_timeout) {
+int  BaseChatMesh::sendCommandData(const ContactInfo& recipient, uint32_t timestamp, uint8_t attempt, uint8_t txt_type, const char* text, uint32_t& est_timeout) {
   int text_len = strlen(text);
   if (text_len > MAX_TEXT_LEN) return MSG_SEND_FAILED;
 
   uint8_t temp[5+MAX_TEXT_LEN+1];
   memcpy(temp, &timestamp, 4);   // mostly an extra blob to help make packet_hash unique
-  temp[4] = (attempt & 3) | (TXT_TYPE_CLI_DATA << 2);
+  temp[4] = (attempt & 3) | (txt_type << 2);
   memcpy(&temp[5], text, text_len + 1);
 
   auto pkt = createDatagram(PAYLOAD_TYPE_TXT_MSG, recipient.id, recipient.getSharedSecret(self_id), temp, 5 + text_len);

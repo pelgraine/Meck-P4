@@ -36,12 +36,32 @@
 #include "SerialC6BLEInterface.h"
 #include "MeckCompanion.h"
 #include "esp_random.h"
+#include "esp_attr.h"     // RTC_NOINIT_ATTR
+#include "esp_system.h"   // esp_reset_reason()
 
 // ---- Static instances ----
 static P4DataStore g_dataStore;
 static P4NodePrefs g_node_prefs;
 static P4RNG g_rng;
 static P4RTCClock g_rtc;
+
+// Last known clock time for P4RTCClock (MeckMesh.h), kept in RTC no-init
+// memory so it survives a reset other than power-on (MeshCore PR #1896).
+RTC_NOINIT_ATTR uint32_t g_rtc_backup_time;
+RTC_NOINIT_ATTR uint32_t g_rtc_backup_magic;
+
+// After a software restart, crash or watchdog reset, carry on from the last
+// saved clock time instead of falling back to the build time. Not on a
+// power-on (no-init memory is not valid then, and a time saved before a
+// power-off would be stale), and only if the saved time is later than this
+// firmware's build time.
+static void meck_rtc_restore_after_reset() {
+    esp_reset_reason_t reason = esp_reset_reason();
+    if (reason == ESP_RST_POWERON || reason == ESP_RST_DEEPSLEEP) return;
+    if (g_rtc_backup_magic != P4_RTC_BACKUP_MAGIC) return;
+    if (g_rtc_backup_time <= P4RTCClock::compileTimeEpoch()) return;
+    g_rtc.setCurrentTime(g_rtc_backup_time);
+}
 // P4MeshTables replaces upstream SimpleMeshTables so that flood-relayed
 // copies of our own outgoing packets aren't filtered before reaching
 // onChannelMessageRecv. Without this swap the upstream Mesh.cpp pre-
@@ -674,6 +694,9 @@ extern "C" void meck_app_rtc_set(uint32_t epoch) {
 // ---- App init ----
 extern "C" bool meck_app_init() {
     printf("meck_app_init: starting\n");
+
+    // 0. Keep the clock across resets (MeshCore PR #1896).
+    meck_rtc_restore_after_reset();
 
     // 0. BQ27220 fuel gauge calibration. LilyGo's main.cpp already wrote
     //    design_capacity=1000 via the wrapper's minimal path; this runs

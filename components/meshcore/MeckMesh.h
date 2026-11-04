@@ -208,10 +208,27 @@ public:
     unsigned long getMillis() override { return millis(); }
 };
 
+// Keep the clock across resets (MeshCore PR #1896). The last known clock
+// time is kept in RTC no-init memory, which survives software restarts,
+// crashes and watchdog resets but not a power-on. Defined once in
+// meck_app.cpp (next to g_rtc); P4RTCClock below writes it, and
+// meck_app_init() reads it back after a reset. Valid only while the magic
+// value matches.
+extern uint32_t g_rtc_backup_time;
+extern uint32_t g_rtc_backup_magic;
+#define P4_RTC_BACKUP_MAGIC  0xAA55CC33
+
 class P4RTCClock : public mesh::RTCClock {
     uint32_t base_time;
     uint64_t accumulator;
     unsigned long prev_millis;
+
+    void saveBackup(uint32_t time) {
+        if (time != g_rtc_backup_time || g_rtc_backup_magic != P4_RTC_BACKUP_MAGIC) {
+            g_rtc_backup_time = time;
+            g_rtc_backup_magic = P4_RTC_BACKUP_MAGIC;
+        }
+    }
 
     // Compile-time fallback epoch. Used as the boot-time clock value
     // until something more authoritative (advert, GPS, or explicit
@@ -288,11 +305,13 @@ public:
         base_time = time;
         accumulator = 0;
         prev_millis = millis();
+        saveBackup(time);
     }
     void tick() override {
         unsigned long now = millis();
         accumulator += (now - prev_millis);
         prev_millis = now;
+        saveBackup(getCurrentTime());
     }
 };
 
@@ -1146,7 +1165,7 @@ public:
 
         uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
         est_timeout_ms = 0;
-        int result = sendCommandData(*recipient, timestamp, 0, command, est_timeout_ms);
+        int result = sendCommandData(*recipient, timestamp, 0, TXT_TYPE_CLI_DATA, command, est_timeout_ms);
         if (result == MSG_SEND_FAILED) {
             printf("Meck: uiCli to %s FAILED: %s\n", recipient->name, command);
             est_timeout_ms = 0;
@@ -2627,7 +2646,8 @@ public:
     //      via sendDirect(adv, nullptr, 0) — this asks for replies from any
     //      neighbour with zero-hop response enabled.
     //   4. Sets _discovery_active for P4_DISCOVERY_WINDOW_MS; during that
-    //      window onAdvertRecv writes incoming adverts to _discovered[].
+    //      window onControlDataRecv adds tag-validated DISCOVER_RESP
+    //      replies to _discovered[]. Passive adverts are not listed.
     //
     // Per the MeshCore wiki "set advert.interval {minutes}" CLI command,
     // a repeater only sends a zero-hop response advert if its operator has
@@ -3340,6 +3360,11 @@ protected:
         uint32_t tag;
         memcpy(&tag, data, 4);
 
+        // Set by any companion branch below that forwards this response to
+        // the app, so the unmatched-response push at the end of this
+        // function doesn't send it a second time.
+        bool companion_handled = false;
+
         // ---- Companion (app) admin path ----
         //
         // These branches run before the device branches and deliberately
@@ -3376,6 +3401,7 @@ protected:
                 meck_companion_push_login_fail(contact.id.pub_key);
                 printf("Meck: companion login FAIL from %s\n", contact.name);
             }
+            companion_handled = true;
             // fall through to device branches below
         }
 
@@ -3391,6 +3417,7 @@ protected:
                                                 payload_len);
             printf("Meck: companion status response from %s (%u bytes)\n",
                    contact.name, (unsigned)payload_len);
+            companion_handled = true;
             // fall through to device branches below
         }
 
@@ -3408,6 +3435,7 @@ protected:
                                                 payload_len);
             printf("Meck: companion binary response from %s tag=0x%08X (%u bytes)\n",
                    contact.name, (unsigned)tag, (unsigned)payload_len);
+            companion_handled = true;
             // fall through to device branches below
         }
 
@@ -3644,10 +3672,19 @@ protected:
         }
 
         // Unmatched response. Could be a late reply from a torn-down
-        // session, or a response type we don't handle yet (ACL list,
-        // owner info). Log and ignore.
+        // session, a response type we don't handle yet (ACL list, owner
+        // info), or telemetry a node pushes on its own. Unless a companion
+        // branch above already forwarded it, pass it to the app as
+        // PUSH_CODE_BINARY_RESPONSE, as upstream MeshCore does (PR #3497):
+        // [0x8C][0 reserved][4-byte tag][payload].
         printf("Meck: unmatched contact response from %s, tag=0x%08X, len=%u\n",
                contact.name, (unsigned)tag, (unsigned)len);
+        if (!companion_handled) {
+            uint8_t payload_len = (len > 4) ? (uint8_t)(len - 4) : 0;
+            meck_companion_push_binary_response(tag,
+                                                payload_len > 0 ? &data[4] : nullptr,
+                                                payload_len);
+        }
     }
 
     // ---- Advert handling (update recent heard + clock sync) ----
@@ -3790,81 +3827,9 @@ protected:
             slot->path_len = mesh::Packet::copyPath(slot->path, packet->path, packet->path_len);
         }
 
-        // Secondary capture path: while a discovery scan is open, any
-        // flood advert from a repeater that happens to land in the
-        // window is also tracked. The PRIMARY discovery signal is
-        // DISCOVER_RESP control packets (see onControlDataRecv below);
-        // this branch is a fallback for older repeater firmware that
-        // doesn't yet implement zero-hop discovery responses but does
-        // periodically flood-advert. Filtered to ADV_TYPE_REPEATER (2)
-        // — Discover is for finding repeaters specifically. Other
-        // types still hit _recent[] above; they just don't appear in
-        // the Discover screen.
-        //
-        // snr_x4 is signed int8; clamp to that range. We dedup by
-        // full pub_key so a node that re-adverts mid-window updates
-        // in place rather than appearing twice — and so DISCOVER_RESP
-        // and advert capture for the same node converge on one entry
-        // (the more recent of the two wins on the SNR/name fields).
-        if (_discovery_active &&
-            (adv_type == 2 /* ADV_TYPE_REPEATER */ ||
-             adv_type == 3 /* ADV_TYPE_ROOM */)) {
-            int snr_clamped = (int)(snr * 4.0f);
-            if (snr_clamped > 127) snr_clamped = 127;
-            if (snr_clamped < -128) snr_clamped = -128;
-            // Sentinel: 0 means "cached, no live read". If a live read
-            // happens to round to 0, nudge by 1 so the UI still treats
-            // it as live data.
-            int8_t snr_x4 = (snr_clamped == 0) ? 1 : (int8_t)snr_clamped;
-
-            int slot = -1;
-            for (int i = 0; i < _discovered_count; i++) {
-                if (_discovered[i].valid &&
-                    memcmp(_discovered[i].pub_key, id.pub_key, 32) == 0) {
-                    slot = i;
-                    break;
-                }
-            }
-            if (slot < 0) {
-                if (_discovered_count < P4_DISCOVERED_SIZE) {
-                    slot = _discovered_count++;
-                } else {
-                    // Full — evict. Prefer a cached entry (heard_ms == 0)
-                    // if any exist, since those are stale; otherwise evict
-                    // the oldest live entry. P4_DISCOVERED_SIZE is 32 so
-                    // we should rarely hit this in practice.
-                    slot = 0;
-                    for (int i = 0; i < P4_DISCOVERED_SIZE; i++) {
-                        if (_discovered[i].heard_ms == 0) { slot = i; break; }
-                    }
-                    if (_discovered[slot].heard_ms != 0) {
-                        // No cached entries to evict — find the oldest live one.
-                        unsigned long oldest = _discovered[0].heard_ms;
-                        for (int i = 1; i < P4_DISCOVERED_SIZE; i++) {
-                            if (_discovered[i].heard_ms < oldest) {
-                                slot = i;
-                                oldest = _discovered[i].heard_ms;
-                            }
-                        }
-                    }
-                }
-            }
-
-            DiscoveredNode& d = _discovered[slot];
-            d.valid = true;
-            strncpy(d.name, name, sizeof(d.name) - 1);
-            d.name[sizeof(d.name) - 1] = '\0';
-            memcpy(d.pub_key, id.pub_key, 32);
-            d.adv_type  = adv_type;
-            d.snr_x4    = snr_x4;
-            // path_len here is 0xFF for non-flood (direct/zero-hop) in our
-            // capture above; normalise that to 0 so the UI can read it as
-            // "zero hops" cleanly.
-            d.path_len  = (path_len == 0xFF) ? 0 : path_len;
-            d.heard_ms  = millis();
-            d.already_in_contacts = hasContactWithPubKey(id.pub_key);
-            _discovery_dirty = true;
-        }
+        // Discovery list is strictly tag-validated DISCOVER_RESP entries
+        // (see onControlDataRecv). Passive adverts heard during the scan
+        // window are not listed.
         xSemaphoreGive(_mutex);
     }
 

@@ -356,15 +356,15 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         memcpy(&msg_timestamp, &_cmd[i], 4); i += 4;
         uint8_t* pub_key_prefix = &_cmd[i]; i += 6;
         ContactInfo* recipient = _mesh->lookupContactByPubKey(pub_key_prefix, 6);
-        if (recipient && (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_CLI_DATA)) {
+        if (recipient && (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_CLI_DATA || txt_type == TXT_TYPE_CLI_COMMAND)) {
             char* text = (char*)&_cmd[i];
             _cmd[len] = 0;  // ensure NUL
             uint32_t est_timeout = 0;
             uint32_t expected_ack = 0;
             int result;
-            if (txt_type == TXT_TYPE_CLI_DATA) {
+            if (txt_type == TXT_TYPE_CLI_DATA || txt_type == TXT_TYPE_CLI_COMMAND) {
                 msg_timestamp = _mesh->getRTCClock()->getCurrentTimeUnique();
-                result = _mesh->sendCommandData(*recipient, msg_timestamp, attempt, text, est_timeout);
+                result = _mesh->sendCommandData(*recipient, msg_timestamp, attempt, txt_type, text, est_timeout);
                 expected_ack = 0;
             } else {
                 result = _mesh->sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout);
