@@ -188,6 +188,20 @@ public:
         return SimpleMeshTables::hasSeen(pkt);
     }
 
+    // True if this packet is one of our own recent channel sends (the same
+    // ring hasSeen() lets through for the "Heard N repeats" count). Client
+    // repeat mode uses it so those echoes are counted but never forwarded:
+    // hasSeen() returns false for them every time, so without this check a
+    // node with repeat on would re-forward its own channel messages.
+    bool isOurOutgoing(const mesh::Packet* pkt) const {
+        uint8_t h[MAX_HASH_SIZE];
+        pkt->calculatePacketHash(h);
+        for (int i = 0; i < OUR_OUTGOING_RING; i++) {
+            if (memcmp(_outgoing[i], h, MAX_HASH_SIZE) == 0) return true;
+        }
+        return false;
+    }
+
 private:
     static const int OUR_OUTGOING_RING = 8;
     uint8_t _outgoing[OUR_OUTGOING_RING][MAX_HASH_SIZE] = {{0}};
@@ -201,6 +215,8 @@ private:
 // globally-instantiated tables.
 extern "C" void meck_tables_begin_outgoing();
 extern "C" void meck_tables_end_outgoing();
+// P4MeshTables::isOurOutgoing() on the active tables (client repeat mode).
+extern "C" bool meck_tables_is_our_outgoing(const mesh::Packet* pkt);
 
 
 class P4MillisecondClock : public mesh::MillisecondClock {
@@ -3308,6 +3324,54 @@ protected:
     uint32_t calcDirectTimeoutMillisFor(uint32_t pkt_airtime_millis, uint8_t path_len) const override {
         uint8_t hops = path_len & 63;
         return 10000 + ((pkt_airtime_millis * 4 + 1000) * (hops + 1));
+    }
+
+    // ---- Radio tuning from saved settings (companion CLI, MeshCore v1.18) ----
+    // The same overrides upstream's companion (and Meck Watch) use, reading
+    // the values the Companion CLI and the app's Command Line set. Defaults
+    // keep P4's behaviour from before these existed: airtime factor 1.0 (the
+    // Dispatcher's old fixed value), RX delay base 10 (the Dispatcher's old
+    // pow(10, ...)), interference check and AGC reset off.
+    float getAirtimeBudgetFactor() const override {
+        return _prefs ? _prefs->airtime_factor : 1.0f;
+    }
+
+    int calcRxDelay(float score, uint32_t air_time) const override {
+        float base = _prefs ? _prefs->rx_delay_base : 10.0f;
+        if (base <= 0.0f) return 0;
+        return (int)((pow(base, 0.85f - score) - 1.0) * air_time);
+    }
+
+    // Forwarding delays (client repeat mode). Upstream's companion formulas.
+    uint32_t getRetransmitDelay(const mesh::Packet* packet) override {
+        float f = _prefs ? _prefs->tx_delay_factor : 0.5f;
+        uint32_t t = (uint32_t)(_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * f);
+        return getRNG()->nextInt(0, 5*t + 1);
+    }
+    uint32_t getDirectRetransmitDelay(const mesh::Packet* packet) override {
+        float f = _prefs ? _prefs->direct_tx_delay_factor : 0.2f;
+        uint32_t t = (uint32_t)(_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * f);
+        return getRNG()->nextInt(0, 5*t + 1);
+    }
+
+    uint8_t getExtraAckTransmitCount() const override {
+        return _prefs ? _prefs->multi_acks : 0;
+    }
+
+    int getInterferenceThreshold() const override {
+        return _prefs ? _prefs->interference_threshold : 0;
+    }
+
+    int getAGCResetInterval() const override {
+        return _prefs ? ((int)_prefs->agc_reset_interval) * 4000 : 0;   // stored as seconds / 4
+    }
+
+    // Client repeat mode (upstream MeshCore v9; the Meck Watch's version):
+    // forward floods while the app has switched it on. Echoes of our own
+    // channel sends are never forwarded (see P4MeshTables::isOurOutgoing).
+    bool allowPacketForward(const mesh::Packet* packet) override {
+        if (!_prefs || !_prefs->client_repeat) return false;
+        return !meck_tables_is_our_outgoing(packet);
     }
 
     void onSendTimeout() override {

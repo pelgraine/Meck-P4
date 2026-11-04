@@ -57,6 +57,7 @@ extern "C" int meck_voice_send_get_status(void);
 #define VOICE_SEND_NO_PATH        4
 #include "NotifSounds.h"
 #include "MeckMapScreen.h"
+#include "MeckCli.h"
 
 #include <sys/lock.h>
 #include <algorithm>
@@ -1016,6 +1017,15 @@ static lv_obj_t *lbl_purge_restart = NULL;   // large restart notice above the b
 static lv_obj_t *btn_purge_yes     = NULL;
 static lv_obj_t *btn_purge_no      = NULL;
 static bool      g_purge_busy      = false;   // set from Yes until the restart
+// Settings > Experimental Features > Companion CLI: the companion's own
+// command line (MeshCore v1.18 companion command set, MeckCli.cpp). Same
+// layout as the repeater admin Cmd Line screen: scrollback of command/reply
+// pairs, one-line input, Send button, on-screen keyboard.
+static lv_obj_t *scr_companion_cli  = NULL;
+static lv_obj_t *obj_cli_scroll     = NULL;
+static lv_obj_t *ta_cli_input       = NULL;
+static lv_obj_t *kb_cli_input       = NULL;
+static lv_obj_t *btn_cli_send       = NULL;
 static lv_obj_t *lbl_set_contact_mode         = NULL;
 static lv_obj_t *lbl_set_autoadd_chat         = NULL;
 static lv_obj_t *lbl_set_autoadd_repeater     = NULL;
@@ -1569,6 +1579,8 @@ static void goto_settings_from_contacts(lv_event_t *e);
 static void create_settings_experimental_screen();
 static void goto_settings_experimental(lv_event_t *e);
 static void goto_settings_from_experimental(lv_event_t *e);
+static void create_companion_cli_screen();
+static void on_experimental_cli_tap(lv_event_t *e);
 static void on_purge_no(lv_event_t *e);
 static void settings_contacts_update_labels();
 static int  settings_contacts_get_mode();
@@ -2714,6 +2726,7 @@ static void meck_kb_restyle_all() {
     if (kb_region_edit)     meck_style_keyboard(kb_region_edit);
     if (kb_ch_scope_edit)   meck_style_keyboard(kb_ch_scope_edit);
     if (kb_ch_settings_add) meck_style_keyboard(kb_ch_settings_add);
+    if (kb_cli_input)       meck_style_keyboard(kb_cli_input);
 }
 
 // ============================================================================
@@ -10454,7 +10467,223 @@ static void create_settings_experimental_screen() {
     }
     y += 65;
 
+    lv_obj_t *cli_value_lbl = NULL;
+    create_settings_row(scroll, "Companion CLI",
+        &cli_value_lbl, on_experimental_cli_tap, y);
+    if (cli_value_lbl) {
+        lv_label_set_text(cli_value_lbl, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(cli_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
     create_purge_prompt();
+}
+
+// ============================================================================
+// Settings > Experimental Features > Companion CLI
+// ----------------------------------------------------------------------------
+// The companion's own command line: the MeshCore v1.18 companion command set
+// (get/set radio, af, dutycycle, int.thresh, tx, rxdelay, agc.reset.interval,
+// path.hash.mode, multi.acks, txdelay, direct.txdelay, name, pin, wifi.*,
+// tz.offset, board, ver, reboot). The same handler answers the app's Command
+// Line over WiFi (command 66). Commands run at once on this device; the reply
+// is shown under the command, red when it reads as an error.
+// ============================================================================
+#define CLI_CMD_MAX_LEN     100
+#define CLI_CMD_MAX_ENTRIES 50
+
+static void cli_add_entry(const char* cmd, const char* response, bool is_error) {
+    if (!obj_cli_scroll) return;
+
+    while (lv_obj_get_child_count(obj_cli_scroll) >= CLI_CMD_MAX_ENTRIES) {
+        lv_obj_t* oldest = lv_obj_get_child(obj_cli_scroll, 0);
+        if (!oldest) break;
+        lv_obj_delete(oldest);
+    }
+
+    lv_obj_t* row = lv_obj_create(obj_cli_scroll);
+    lv_obj_set_size(row, SCREEN_WIDTH - 60, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(row, lv_color_make(15, 15, 22), 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_radius(row, 8, 0);
+    lv_obj_set_style_pad_all(row, 12, 0);
+    lv_obj_set_style_margin_bottom(row, 10, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(row, 6, 0);
+    lock_screen_scroll(row);
+
+    if (cmd && cmd[0]) {
+        lv_obj_t* cmd_lbl = lv_label_create(row);
+        char buf[CLI_CMD_MAX_LEN + 8];
+        snprintf(buf, sizeof(buf), "> %s", cmd);
+        lv_label_set_text(cmd_lbl, buf);
+        lv_obj_set_style_text_color(cmd_lbl, lv_palette_main(LV_PALETTE_CYAN), 0);
+        meck_set_font(cmd_lbl, &meck_montserrat_18, 0);
+        lv_label_set_long_mode(cmd_lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(cmd_lbl, SCREEN_WIDTH - 90);
+    }
+
+    if (response && response[0]) {
+        lv_obj_t* resp_lbl = lv_label_create(row);
+        lv_label_set_text(resp_lbl, response);
+        lv_obj_set_style_text_color(resp_lbl,
+            is_error ? lv_palette_main(LV_PALETTE_RED) : lv_color_white(), 0);
+        meck_set_font(resp_lbl, &meck_montserrat_18, 0);
+        lv_label_set_long_mode(resp_lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(resp_lbl, SCREEN_WIDTH - 90);
+    }
+
+    lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+}
+
+// Run the command in the textarea and show its reply.
+static void cli_send_current() {
+    if (!ta_cli_input) return;
+    const char* text = lv_textarea_get_text(ta_cli_input);
+    if (!text || !text[0]) return;
+
+    char cmd_buf[CLI_CMD_MAX_LEN + 1];
+    strncpy(cmd_buf, text, CLI_CMD_MAX_LEN);
+    cmd_buf[CLI_CMD_MAX_LEN] = '\0';
+
+    char reply[MECK_CLI_REPLY_SIZE];
+    reply[0] = 0;
+    if (!meck_cli_handle(cmd_buf, reply)) {
+        strcat(reply, "Unknown command");   // reply may hold a reflected "xx|" prefix
+    }
+    bool is_error = (strncmp(reply, "Error", 5) == 0 || strncmp(reply, "ERROR", 5) == 0 ||
+                     strstr(reply, "Unknown command") != NULL);
+    printf("Companion CLI: \"%s\" -> \"%s\"\n", cmd_buf, reply);
+    cli_add_entry(cmd_buf, reply[0] ? reply : "OK", is_error);
+
+    lv_textarea_set_text(ta_cli_input, "");
+}
+
+static void on_cli_send_tap(lv_event_t *e) {
+    (void)e;
+    cli_send_current();
+}
+
+// Textarea focus -> show the keyboard and lift the input above it (same as
+// the admin Cmd Line screen).
+static void on_cli_input_focused(lv_event_t *e) {
+    (void)e;
+    if (!kb_cli_input) return;
+    lv_keyboard_set_textarea(kb_cli_input, ta_cli_input);
+    // Hardware keyboard: keep the on-screen keyboard down and the input in
+    // its resting position; the binding above stays for Enter/Esc routing.
+    if (meck_hw_keyboard_active()) return;
+    lv_obj_remove_flag(kb_cli_input, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(kb_cli_input);
+    if (ta_cli_input)
+        lv_obj_align(ta_cli_input, LV_ALIGN_BOTTOM_LEFT, 10, -(15 + MECK_KB_HEIGHT));
+    if (btn_cli_send)
+        lv_obj_align(btn_cli_send, LV_ALIGN_BOTTOM_RIGHT, -10, -(15 + MECK_KB_HEIGHT));
+    if (obj_cli_scroll)
+        lv_obj_set_height(obj_cli_scroll, SCREEN_HEIGHT - 110 - 90 - MECK_KB_HEIGHT);
+}
+
+static void on_cli_input_defocused(lv_event_t *e) {
+    (void)e;
+    if (!kb_cli_input) return;
+    lv_obj_add_flag(kb_cli_input, LV_OBJ_FLAG_HIDDEN);
+    if (ta_cli_input)
+        lv_obj_align(ta_cli_input, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    if (btn_cli_send)
+        lv_obj_align(btn_cli_send, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    if (obj_cli_scroll)
+        lv_obj_set_height(obj_cli_scroll, SCREEN_HEIGHT - 200);
+}
+
+// Keyboard OK -> run the command (the keyboard stays up for the next one);
+// keyboard close -> hide it.
+static void on_cli_kb_event(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY) {
+        cli_send_current();
+    } else if (code == LV_EVENT_CANCEL) {
+        on_cli_input_defocused(e);
+    }
+}
+
+static void on_experimental_cli_tap(lv_event_t *e) {
+    (void)e;
+    if (scr_companion_cli) lv_screen_load(scr_companion_cli);
+}
+
+static void goto_experimental_from_cli(lv_event_t *e) {
+    (void)e;
+    if (kb_cli_input) on_cli_input_defocused(NULL);
+    if (scr_settings_experimental) lv_screen_load(scr_settings_experimental);
+}
+
+static void create_companion_cli_screen() {
+    scr_companion_cli = lv_obj_create(NULL);
+    lock_screen_scroll(scr_companion_cli);
+    lv_obj_set_style_bg_color(scr_companion_cli, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_companion_cli, 1, &meck_montserrat_24, 30);
+
+    // Back button -> Experimental Features.
+    lv_obj_t *btn_back = lv_button_create(scr_companion_cli);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, goto_experimental_from_cli, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(scr_companion_cli);
+    lv_label_set_text(title, "Companion CLI");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(title, &meck_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Bottom row: textarea (left) + Send button (right).
+    btn_cli_send = lv_button_create(scr_companion_cli);
+    lv_obj_set_size(btn_cli_send, 130, 70);
+    lv_obj_align(btn_cli_send, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(btn_cli_send, lv_palette_darken(LV_PALETTE_INDIGO, 1), 0);
+    lv_obj_set_style_radius(btn_cli_send, 8, 0);
+    lv_obj_t* send_lbl = lv_label_create(btn_cli_send);
+    lv_label_set_text(send_lbl, "Send");
+    lv_obj_set_style_text_color(send_lbl, lv_color_white(), 0);
+    meck_set_font(send_lbl, &meck_montserrat_18, 0);
+    lv_obj_center(send_lbl);
+    lv_obj_add_event_cb(btn_cli_send, on_cli_send_tap, LV_EVENT_CLICKED, NULL);
+
+    ta_cli_input = lv_textarea_create(scr_companion_cli);
+    lv_obj_set_size(ta_cli_input, SCREEN_WIDTH - 170, 70);
+    lv_obj_align(ta_cli_input, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_textarea_set_placeholder_text(ta_cli_input, "Command (e.g. get radio, ver)");
+    lv_textarea_set_one_line(ta_cli_input, true);
+    lv_textarea_set_max_length(ta_cli_input, CLI_CMD_MAX_LEN);
+    meck_set_font(ta_cli_input, &meck_montserrat_18, 0);
+    lv_obj_add_event_cb(ta_cli_input, on_cli_input_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(ta_cli_input, on_cli_input_defocused, LV_EVENT_DEFOCUSED, NULL);
+
+    // Keyboard -- hidden by default, shown when the textarea is focused.
+    kb_cli_input = lv_keyboard_create(scr_companion_cli);
+    lv_obj_set_size(kb_cli_input, SCREEN_WIDTH, MECK_KB_HEIGHT);
+    lv_obj_align(kb_cli_input, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(kb_cli_input, LV_OBJ_FLAG_HIDDEN);
+    meck_style_keyboard(kb_cli_input);
+    lv_obj_add_event_cb(kb_cli_input, on_cli_kb_event, LV_EVENT_ALL, NULL);
+
+    // Scrollback between the title (y=110) and the input row (bottom 90 px).
+    obj_cli_scroll = lv_obj_create(scr_companion_cli);
+    lv_obj_set_size(obj_cli_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 200);
+    lv_obj_set_pos(obj_cli_scroll, 10, 110);
+    lv_obj_set_style_bg_color(obj_cli_scroll, lv_color_make(8, 8, 12), 0);
+    lv_obj_set_style_border_width(obj_cli_scroll, 0, 0);
+    lv_obj_set_style_radius(obj_cli_scroll, 8, 0);
+    lv_obj_set_style_pad_all(obj_cli_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_cli_scroll, LV_DIR_VER);
+    lv_obj_set_flex_flow(obj_cli_scroll, LV_FLEX_FLOW_COLUMN);
 }
 
 // ============================================================================
@@ -21638,6 +21867,7 @@ static void meck_ui_build_screens() {
     create_debug_logs_screen();
     create_settings_contacts_screen();
     create_settings_experimental_screen();
+    create_companion_cli_screen();
     create_settings_wifi_screen();
     create_web_screen();
 #if MECK_BLE_KEYBOARD_ENABLED
@@ -21740,7 +21970,7 @@ static void meck_ui_teardown_screens() {
         &scr_voice_landing, &scr_voice_inbox, &scr_voice,
         &scr_radio_picker, &scr_channel_picker, &scr_dm_inbox, &scr_messages,
         &scr_contacts, &scr_contact_detail, &scr_trace, &scr_path_editor,
-        &scr_settings_contacts, &scr_settings_experimental,
+        &scr_settings_contacts, &scr_settings_experimental, &scr_companion_cli,
         &scr_discover, &scr_admin_login, &scr_admin_home,
         &scr_room_messages, &scr_admin_status, &scr_admin_cmd, &scr_admin_settings,
         &scr_admin_send_advert, &scr_admin_setting_placeholder, &scr_admin_fw_info,

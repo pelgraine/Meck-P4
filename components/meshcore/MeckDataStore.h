@@ -218,6 +218,32 @@ struct P4NodePrefs {
     int8_t clock_slot_a;             // Zone 1 UTC offset, default 0
     int8_t clock_slot_b;             // Zone 2 UTC offset, default 0
 
+    // MeshCore v1.18 companion CLI settings (Settings > Experimental Features
+    // > Companion CLI, and the app's Command Line) and client repeat mode.
+    // Appended at the end for NVS compatibility. Older blobs short-read these
+    // as zero, but zero is not the right default for every one of them (the
+    // RX delay base and the two TX delay factors), so radio_cli_init marks
+    // whether they have been set: loadPrefs calls applyRadioCliDefaults(),
+    // which fills them in once when it is 0.
+    uint8_t radio_cli_init;          // 0 = fields below not set yet, 1 = set
+    uint8_t interference_threshold;  // int.thresh: dB above noise floor, 0 = off
+    uint8_t agc_reset_interval;      // agc.reset.interval: seconds / 4, 0 = off
+    float   rx_delay_base;           // rxdelay: 0 = none, default 10 (P4's previous fixed value)
+    float   tx_delay_factor;         // txdelay: flood retransmit delay factor, default 0.5
+    float   direct_tx_delay_factor;  // direct.txdelay: direct retransmit delay factor, default 0.2
+    uint8_t client_repeat;           // client repeat mode: 0 = off, 1 = forward floods
+
+    void applyRadioCliDefaults() {
+        if (radio_cli_init == 1) return;
+        interference_threshold = 0;
+        agc_reset_interval = 0;
+        rx_delay_base = 10.0f;
+        tx_delay_factor = 0.5f;
+        direct_tx_delay_factor = 0.2f;
+        client_repeat = 0;
+        radio_cli_init = 1;
+    }
+
     // Initialize with defaults from variant.h
     void setDefaults() {
         freq = LORA_FREQ_DEFAULT;
@@ -262,6 +288,8 @@ struct P4NodePrefs {
         memset(canned_msgs, 0, sizeof(canned_msgs));  // all slots empty
         clock_slot_a = 0;       // Zone 1 UTC+0
         clock_slot_b = 0;       // Zone 2 UTC+0
+        radio_cli_init = 0;
+        applyRadioCliDefaults();
     }
 };
 
@@ -558,6 +586,9 @@ public:
                 for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
                     prefs.canned_msgs[i][CANNED_MSG_LEN - 1] = '\0';
                 }
+                // A blob saved before the companion CLI settings existed
+                // short-reads them as zero: give them their defaults.
+                prefs.applyRadioCliDefaults();
                 return true;
             }
         }
@@ -587,6 +618,7 @@ public:
                     for (int i = 0; i < CANNED_MSG_SLOTS; i++) {
                         prefs.canned_msgs[i][CANNED_MSG_LEN - 1] = '\0';
                     }
+                    prefs.applyRadioCliDefaults();
                     // Save to NVS with current version
                     savePrefs(prefs);
                     ESP_LOGI(TAG, "loadPrefs: restored from SD (name=%s)", prefs.node_name);

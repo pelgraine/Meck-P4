@@ -86,12 +86,14 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
     }
 
     if (self_id.isHashMatch(pkt->path, pkt->getPathHashSize()) && allowPacketForward(pkt)) {
+      // MeshCore #3573: forwarded ACKs wait the direct retransmit delay too (was 0)
+      uint32_t d = getDirectRetransmitDelay(pkt);
       if (pkt->getPayloadType() == PAYLOAD_TYPE_MULTIPART) {
-        return forwardMultipartDirect(pkt);
+        return forwardMultipartDirect(pkt, d);
       } else if (pkt->getPayloadType() == PAYLOAD_TYPE_ACK) {
         if (!_tables->hasSeen(pkt)) {  // don't retransmit!
           removeSelfFromPath(pkt);
-          routeDirectRecvAcks(pkt, 0);
+          routeDirectRecvAcks(pkt, d);
         }
         return ACTION_RELEASE;
       }
@@ -99,8 +101,7 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
       if (!_tables->hasSeen(pkt)) {
         removeSelfFromPath(pkt);
 
-        uint32_t d = getDirectRetransmitDelay(pkt);
-        return ACTION_RETRANSMIT_DELAYED(0, d);  // Routed traffic is HIGHEST priority 
+        return ACTION_RETRANSMIT_DELAYED(0, d);  // Routed traffic is HIGHEST priority
       }
     }
     return ACTION_RELEASE;   // this node is NOT the next hop (OR this packet has already been forwarded), so discard.
@@ -346,7 +347,7 @@ DispatcherAction Mesh::routeRecvPacket(Packet* packet) {
   return ACTION_RELEASE;
 }
 
-DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt) {
+DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt, uint32_t delay_millis) {
   uint8_t remaining = pkt->payload[0] >> 4;  // num of packets in this multipart sequence still to be sent
   uint8_t type = pkt->payload[0] & 0x0F;
 
@@ -359,7 +360,7 @@ DispatcherAction Mesh::forwardMultipartDirect(Packet* pkt) {
 
     if (!_tables->hasSeen(&tmp)) {   // don't retransmit!
       removeSelfFromPath(&tmp);
-      routeDirectRecvAcks(&tmp, ((uint32_t)remaining + 1) * 300);  // expect multipart ACKs 300ms apart (x2)
+      routeDirectRecvAcks(&tmp, delay_millis + ((uint32_t)remaining + 1) * 300);  // expect multipart ACKs 300ms apart (x2)
     }
   }
   return ACTION_RELEASE;
@@ -372,13 +373,13 @@ void Mesh::routeDirectRecvAcks(Packet* packet, uint32_t delay_millis) {
 
     uint8_t extra = getExtraAckTransmitCount();
     while (extra > 0) {
-      delay_millis += getDirectRetransmitDelay(packet) + 300;
       auto a1 = createMultiAck(crc, extra);
       if (a1) {
         a1->path_len = Packet::copyPath(a1->path, packet->path, packet->path_len);
         a1->header &= ~PH_ROUTE_MASK;
         a1->header |= ROUTE_TYPE_DIRECT;
         sendPacket(a1, 0, delay_millis);
+        delay_millis += 300;   // MeshCore #3573: extra ACKs 300 ms apart after the initial delay
       }
       extra--;
     }

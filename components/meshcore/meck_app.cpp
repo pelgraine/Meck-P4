@@ -679,6 +679,12 @@ Meck* meck_get_instance() { return g_the_mesh; }
 // doesn't need to know which P4MeshTables instance is the active one.
 extern "C" void meck_tables_begin_outgoing() { g_mesh_tables.beginMarkingOurOutgoing(); }
 extern "C" void meck_tables_end_outgoing()   { g_mesh_tables.endMarkingOurOutgoing(); }
+extern "C" bool meck_tables_is_our_outgoing(const mesh::Packet* pkt) { return g_mesh_tables.isOurOutgoing(pkt); }
+
+// Companion CLI (MeckCli.cpp): the saved settings it reads and changes, and
+// the save that persists them (NVS + SD backup, as every Settings change).
+P4NodePrefs* meck_cli_prefs() { return &g_node_prefs; }
+void meck_cli_save_prefs()    { g_dataStore.savePrefs(g_node_prefs); }
 
 // Push a UTC epoch into the MeshCore P4RTCClock. Called from
 // meck_globals.cpp's meck_clock_set_utc bridge so that GPS-sourced time

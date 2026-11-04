@@ -248,7 +248,17 @@ public:
     // _preambleMillis, or header without RX_DONE within _maxPayloadMillis --
     // so a stuck flag cannot hold the radio "busy" until the next packet.
     // The previous BUSY-pin reading is kept as an additional signal only.
+    //
+    // The Dispatcher's "channel busy, wait" check calls isReceiving(), which
+    // (as upstream RadioLibWrapper::isReceiving) is a packet arriving OR the
+    // channel reading busy (int.thresh, isChannelActive). The duty-cycle
+    // code calls isReceivingPacket() directly, as before.
     bool isReceiving() override {
+        if (isReceivingPacket()) return true;
+        return isChannelActive();
+    }
+
+    bool isReceivingPacket() {
         if (!_inReceiveMode) return false;
 #if defined(MECK_RX_DUTY_CYCLE)
         // Asleep between listen windows: nothing can be arriving, and an SPI
@@ -332,10 +342,29 @@ public:
         if (_noiseFloor < -120) _noiseFloor = -120;
     }
 
+    // int.thresh (MeshCore companion CLI): the Dispatcher passes the saved
+    // threshold here every noise-floor calibration tick. 0 = off.
+    void triggerNoiseFloorCalibrate(int threshold) override {
+        _threshold = threshold;
+    }
+
+    // agc.reset.interval (MeshCore companion CLI): the Dispatcher calls this
+    // every interval while the setting is non-zero (default off). Same steps
+    // as upstream's sx126xResetAGC(): warm sleep to reset the analog front
+    // end, standby, calibrate all blocks, image calibration for the current
+    // band (set_frequency does that), then back to RX. Skipped while a packet
+    // is arriving or a TX is in progress, as upstream. Not done when the MCU
+    // RX duty cycle is compiled in: that code sleeps and wakes the chip itself.
     void resetAGC() override {
-        // SX1262 RX boosted gain mode for better sensitivity
-        // cpp_bus_driver may not expose this directly; 
-        // can be implemented via raw register write if needed
+#if !defined(MECK_RX_DUTY_CYCLE)
+        if (!_inReceiveMode) return;
+        if (isReceivingPacket()) return;
+        SX1262->set_sleep(Cpp_Bus_Driver::Sx126x::Sleep_Mode::WARM_START);
+        SX1262->set_standby(Cpp_Bus_Driver::Sx126x::Stdby_Config::STDBY_RC);
+        SX1262->calibrate(0x7F);   // all blocks (SX126x Calibrate, RADIOLIB_SX126X_CALIBRATE_ALL)
+        SX1262->set_frequency(_currentFreq);
+        clearAndResetRx();
+#endif
     }
 
     // ---- Additional accessors for stats ----
@@ -406,6 +435,24 @@ private:
     uint32_t _maxPayloadMillis = 3934;
     uint64_t _activityAtUs     = 0;
     bool     _headerSeen       = false;
+
+    // int.thresh in dB above the noise floor, 0 = off (triggerNoiseFloorCalibrate).
+    int      _threshold        = 0;
+
+    // Interference check (upstream RadioLibWrapper::isChannelActive, the
+    // int.thresh half): the channel reads busy when the instantaneous RSSI is
+    // more than the threshold above the noise floor. Off when the threshold
+    // is 0. get_rssi_inst() returns 0 on a read failure, treated as not busy.
+    bool isChannelActive() {
+        if (_threshold == 0) return false;
+        if (!_inReceiveMode) return false;
+#if defined(MECK_RX_DUTY_CYCLE)
+        if (_dutyState == DutyState::ASLEEP) return false;   // an SPI read would wake it
+#endif
+        int8_t inst = SX1262->get_rssi_inst();
+        if (inst == 0) return false;
+        return (int)inst > _noiseFloor + _threshold;
+    }
 
     void clearRxActivity() { _activityAtUs = 0; _headerSeen = false; }
 
@@ -496,7 +543,7 @@ private:
         if (_sleepWindowUs == 0) return;   // disabled for current params
         uint64_t now = esp_timer_get_time();
         if (_dutyState == DutyState::LISTEN) {
-            if (isReceiving()) {           // packet in flight (BUSY high): hold RX
+            if (isReceivingPacket()) {     // packet in flight (BUSY high): hold RX
                 _dutyWindowStartUs = now;
                 return;
             }

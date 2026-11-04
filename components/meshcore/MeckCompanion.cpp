@@ -7,6 +7,7 @@
  */
 
 #include "MeckCompanion.h"
+#include "MeckCli.h"
 #include "meck.h"
 #include <cstdio>
 #include <cstring>
@@ -16,6 +17,32 @@
 static void strzcpy(char* dest, const char* src, size_t n) {
     strncpy(dest, src, n - 1);
     dest[n - 1] = '\0';
+}
+
+// ---- Client repeat mode (upstream MeshCore v9), as the Meck Watch has it ----
+// Frequencies (kHz ranges) on which the app may switch client repeat on.
+// Upstream's three exact rows, plus the Meck Watch's band rows so it can be
+// switched on at the preset frequencies, including the 2.4 GHz ISM band
+// (LR2021 build).
+struct FreqRange {
+    uint32_t lower_freq, upper_freq;
+};
+
+static const FreqRange repeat_freq_ranges[] = {
+    { 433000, 433000 },
+    { 869495, 869495 },
+    { 918000, 918000 },
+    { 433050, 434790 },    // 433 MHz ISM -- covers the 433.375 / 433.650 presets
+    { 863000, 870000 },    // EU 863-870 SRD -- covers 869.432 / 869.525 / 869.618
+    { 902000, 928000 },    // 902-928 MHz ISM (AU/NZ/US) -- covers 910.525 through 923.125, incl. Sydney 916.575 / 915.075
+    { 2400000, 2500000 }   // 2.4 GHz ISM band (LR2021 build)
+};
+
+static bool isValidClientRepeatFreq(uint32_t f) {
+    for (size_t i = 0; i < sizeof(repeat_freq_ranges) / sizeof(repeat_freq_ranges[0]); i++) {
+        if (f >= repeat_freq_ranges[i].lower_freq && f <= repeat_freq_ranges[i].upper_freq) return true;
+    }
+    return false;
 }
 
 // ---- Command codes (from upstream MyMesh.cpp) ----
@@ -47,9 +74,11 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define CMD_GET_CHANNEL               31
 #define CMD_SET_CHANNEL               32
 #define CMD_GET_AUTOADD_CONFIG        59
+#define CMD_GET_ALLOWED_REPEAT_FREQ   60   // v9+, client repeat frequency whitelist
 #define CMD_SET_PATH_HASH_MODE        61
 #define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
+#define CMD_RUN_CLI_COMMAND           66   // v14+, the app's Command Line
 
 // ---- Response codes ----
 #define RESP_CODE_OK                  0
@@ -69,7 +98,9 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 #define RESP_CODE_ADVERT_PATH         22
 #define RESP_CODE_CHANNEL_INFO        18
 #define RESP_CODE_AUTOADD_CONFIG      25
+#define RESP_ALLOWED_REPEAT_FREQ      26
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
+#define RESP_CODE_CLI_REPLY           29   // v14+, a reply to CMD_RUN_CLI_COMMAND
 
 // ---- Error codes ----
 #define ERR_CODE_UNSUPPORTED_CMD      1
@@ -112,7 +143,7 @@ static void strzcpy(char* dest, const char* src, size_t n) {
 // Must match MeckMesh.h / upstream FIRMWARE_VER_CODE so the app
 // negotiates the right protocol level.
 #ifndef FIRMWARE_VER_CODE
-#define FIRMWARE_VER_CODE 12
+#define FIRMWARE_VER_CODE 14   // v14: the app's Command Line (CMD_RUN_CLI_COMMAND)
 #endif
 #ifndef FIRMWARE_BUILD_DATE
 #define FIRMWARE_BUILD_DATE __DATE__
@@ -209,7 +240,7 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         strncpy((char*)&_out[i], FIRMWARE_BUILD_DATE, 12); i += 12;
         strzcpy((char*)&_out[i], "T-Display P4", 40); i += 40;
         strzcpy((char*)&_out[i], FIRMWARE_VERSION, 20); i += 20;
-        _out[i++] = 0;  // client_repeat (v9+)
+        _out[i++] = prefs->client_repeat ? 1 : 0;  // client_repeat (v9+)
         _out[i++] = prefs->path_hash_mode;  // v10+
         _serial->writeFrame(_out, i);
         printf("Companion: DEVICE_QUERY from app ver %d\n", _app_target_ver);
@@ -493,17 +524,24 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         memcpy(&bw_hz, &_cmd[i], 4); i += 4;
         uint8_t sf = _cmd[i++];
         uint8_t cr = _cmd[i++];
+        uint8_t repeat = 0;  // default - false
+        if ((int)len > i) {
+            repeat = _cmd[i++];   // FIRMWARE_VER_CODE 9+ (client repeat toggle)
+        }
 
-        if (freq_khz >= 150000 && freq_khz <= 2500000 &&
+        if (repeat && !isValidClientRepeatFreq(freq_khz)) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        } else if (freq_khz >= 150000 && freq_khz <= 2500000 &&
             sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 &&
             bw_hz >= 7000 && bw_hz <= 500000) {
             prefs->freq = (float)freq_khz / 1000.0f;
             prefs->bw   = (float)bw_hz / 1000.0f;
             prefs->sf    = sf;
             prefs->cr    = cr;
+            prefs->client_repeat = repeat ? 1 : 0;   // takes effect at once
             _mesh->savePrefs();
-            printf("Companion: SET_RADIO_PARAMS freq=%.3f bw=%.1f sf=%d cr=%d (reboot to apply)\n",
-                   prefs->freq, prefs->bw, (int)sf, (int)cr);
+            printf("Companion: SET_RADIO_PARAMS freq=%.3f bw=%.1f sf=%d cr=%d repeat=%d (radio: reboot to apply)\n",
+                   prefs->freq, prefs->bw, (int)sf, (int)cr, (int)prefs->client_repeat);
             writeOKFrame();
         } else {
             writeErrFrame(ERR_CODE_ILLEGAL_ARG);
@@ -913,6 +951,37 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         } else {
             writeErrFrame(ERR_CODE_NOT_FOUND);
         }
+        return;
+    }
+
+    // ---- CMD_GET_ALLOWED_REPEAT_FREQ (60) ---- client repeat frequency list
+    if (cmd == CMD_GET_ALLOWED_REPEAT_FREQ) {
+        int i = 0;
+        _out[i++] = RESP_ALLOWED_REPEAT_FREQ;
+        for (size_t k = 0; k < sizeof(repeat_freq_ranges) / sizeof(repeat_freq_ranges[0]) &&
+                           i + 8 <= MAX_FRAME_SIZE; k++) {
+            memcpy(&_out[i], &repeat_freq_ranges[k].lower_freq, 4); i += 4;
+            memcpy(&_out[i], &repeat_freq_ranges[k].upper_freq, 4); i += 4;
+        }
+        _serial->writeFrame(_out, i);
+        return;
+    }
+
+    // ---- CMD_RUN_CLI_COMMAND (66) ---- the app's Command Line (v14+).
+    // Same handler as Settings > Experimental Features > Companion CLI.
+    if (cmd == CMD_RUN_CLI_COMMAND && len >= 3) {
+        char* text = (char*)&_cmd[1];
+        _cmd[len] = 0;  // ensure NUL
+        char reply[MECK_CLI_REPLY_SIZE];
+        reply[0] = 0;
+        if (!meck_cli_handle(text, reply)) {
+            strcat(reply, "Unknown command");   // reply may hold the prefix reflected from 'text'
+        }
+        int rlen = (int)strlen(reply);
+        if (rlen > MAX_FRAME_SIZE - 1) rlen = MAX_FRAME_SIZE - 1;
+        _out[0] = RESP_CODE_CLI_REPLY;
+        memcpy(&_out[1], reply, rlen);
+        _serial->writeFrame(_out, 1 + rlen);
         return;
     }
 

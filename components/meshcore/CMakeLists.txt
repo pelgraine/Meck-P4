@@ -43,6 +43,7 @@ idf_component_register(
         "SerialC6WiFiInterface.cpp"
         "MeckWebFetch.cpp"
         "MeckCompanion.cpp"
+        "MeckCli.cpp"
         "MeckEmoji.cpp"
         "MeckEmojiPicker.cpp"
         "MeckReader.cpp"

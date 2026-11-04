@@ -318,7 +318,16 @@ public:
     // Ported from upstream CustomLR2021::isReceiving() (v1.17.1): preamble
     // without a header within _preambleMillis, or a header without RX_DONE
     // within _maxPayloadMillis, is treated as a stuck flag and cleared.
+    //
+    // The Dispatcher's "channel busy, wait" check calls isReceiving(), which
+    // (as upstream RadioLibWrapper::isReceiving) is a packet arriving OR the
+    // channel reading busy (int.thresh, isChannelActive).
     bool isReceiving() override {
+        if (isReceivingPacket()) return true;
+        return isChannelActive();
+    }
+
+    bool isReceivingPacket() {
         if (!_initOk || !_inReceiveMode) return false;
         const uint32_t irq = _radio.getIrqFlags();
         const bool preamble = (irq & RADIOLIB_LR2021_IRQ_PREAMBLE_DETECTED) != 0;
@@ -364,7 +373,24 @@ public:
     float getLastRSSI() const override { return _lastRSSI; }
     float getLastSNR() const override { return _lastSNR; }
     int getNoiseFloor() const override { return _noiseFloor; }
-    void resetAGC() override { }   // not implemented on this backend
+
+    // int.thresh (MeshCore companion CLI): the Dispatcher passes the saved
+    // threshold here every noise-floor calibration tick. 0 = off.
+    void triggerNoiseFloorCalibrate(int threshold) override { _threshold = threshold; }
+
+    // agc.reset.interval (MeshCore companion CLI): the Dispatcher calls this
+    // every interval while the setting is non-zero (default off). Upstream's
+    // RadioLibWrapper::doResetAGC() for this radio: a warm sleep resets the
+    // analog front end; recvRaw() then re-arms RX on its next call, as it
+    // does after a TX. Skipped while a packet is arriving or a TX is in
+    // progress, as upstream.
+    void resetAGC() override {
+        if (!_initOk || _sending || !_inReceiveMode) return;
+        if (isReceivingPacket()) return;
+        chk("sleep", _radio.sleep());   // warm sleep (retains configuration)
+        clearRxActivity();
+        _inReceiveMode = false;          // recvRaw() re-arms via startRx()
+    }
 
     // ---- Meck-side accessors (same names as P4SX1262Radio) ----
     uint32_t getPacketsRecv() const { return _pktRecv; }
@@ -431,6 +457,21 @@ private:
     uint32_t _maxPayloadMillis;
     uint64_t _activityAtUs;
     bool     _headerSeen;
+
+    // int.thresh in dB above the noise floor, 0 = off (triggerNoiseFloorCalibrate).
+    int      _threshold = 0;
+
+    // Interference check (upstream RadioLibWrapper::isChannelActive, the
+    // int.thresh half): busy when the instantaneous RSSI is more than the
+    // threshold above the noise floor. Off when the threshold is 0. Same
+    // instantaneous read as sampleNoiseFloor() (does not re-arm RX).
+    bool isChannelActive() {
+        if (_threshold == 0) return false;
+        if (!_initOk || !_inReceiveMode) return false;
+        float inst = _radio.getRSSI(false, true);
+        if (inst == 0.0f) return false;
+        return (int)inst > _noiseFloor + _threshold;
+    }
 
     // Consecutive startReceive() refusals since the last accepted one; also
     // gates the failure print to once per outage (recvRaw retries every loop).
