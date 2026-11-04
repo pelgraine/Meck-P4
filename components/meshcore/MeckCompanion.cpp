@@ -79,6 +79,9 @@ static bool isValidClientRepeatFreq(uint32_t f) {
 #define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 #define CMD_RUN_CLI_COMMAND           66   // v14+, the app's Command Line
+#define CMD_SHARE_CONTACT             16   // re-send a contact's advert zero-hop
+#define CMD_SET_TUNING_PARAMS         21   // rx delay base + airtime factor (x1000)
+#define CMD_GET_TUNING_PARAMS         43
 
 // ---- Response codes ----
 #define RESP_CODE_OK                  0
@@ -101,6 +104,7 @@ static bool isValidClientRepeatFreq(uint32_t f) {
 #define RESP_ALLOWED_REPEAT_FREQ      26
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
 #define RESP_CODE_CLI_REPLY           29   // v14+, a reply to CMD_RUN_CLI_COMMAND
+#define RESP_CODE_TUNING_PARAMS       23   // reply to CMD_GET_TUNING_PARAMS
 
 // ---- Error codes ----
 #define ERR_CODE_UNSUPPORTED_CMD      1
@@ -125,6 +129,9 @@ static bool isValidClientRepeatFreq(uint32_t f) {
 
 // ---- Additional commands ----
 #define CMD_SET_FLOOD_SCOPE_KEY       54
+#define CMD_SEND_CONTROL_DATA         55   // v8+, e.g. the app's Discover nodes
+#define CMD_SEND_ANON_REQ             57   // v13+, requests to nodes that aren't contacts
+#define PUSH_CODE_CONTROL_DATA        0x8E // v8+, received control packet
 
 // ---- Repeater admin commands (over-the-mesh login + status + session) ----
 #define CMD_SEND_LOGIN                26
@@ -529,16 +536,28 @@ void MeckCompanion::handleCmdFrame(size_t len) {
             repeat = _cmd[i++];   // FIRMWARE_VER_CODE 9+ (client repeat toggle)
         }
 
+        // meck_radio_bw_allowed: on the LR2021 only its own bandwidth steps
+        // pass, and bw_khz becomes the exact step; SX1262 unchanged.
+        float bw_khz = (float)bw_hz / 1000.0f;
         if (repeat && !isValidClientRepeatFreq(freq_khz)) {
             writeErrFrame(ERR_CODE_ILLEGAL_ARG);
         } else if (freq_khz >= 150000 && freq_khz <= 2500000 &&
             sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 &&
-            bw_hz >= 7000 && bw_hz <= 500000) {
+            bw_hz >= 7000 && bw_hz <= (uint32_t)(meck_radio_max_bw_khz() * 1000.0f) &&
+            meck_radio_bw_allowed(bw_khz, &bw_khz)) {
             prefs->freq = (float)freq_khz / 1000.0f;
-            prefs->bw   = (float)bw_hz / 1000.0f;
+            prefs->bw   = bw_khz;
             prefs->sf    = sf;
             prefs->cr    = cr;
             prefs->client_repeat = repeat ? 1 : 0;   // takes effect at once
+            // LR2021 on 2.4 GHz: lower a stored TX above the band's limit
+            // (as Settings does on the device) so the radio never gets a
+            // power it refuses. TX is stored unsigned; compare it signed.
+            int8_t max_tx = meck_radio_max_tx_dbm(prefs->freq);
+            if ((int8_t)prefs->tx_power_dbm > max_tx) {
+                prefs->tx_power_dbm = (uint8_t)max_tx;
+                printf("Companion: TX lowered to %d dBm for this band\n", (int)max_tx);
+            }
             _mesh->savePrefs();
             printf("Companion: SET_RADIO_PARAMS freq=%.3f bw=%.1f sf=%d cr=%d repeat=%d (radio: reboot to apply)\n",
                    prefs->freq, prefs->bw, (int)sf, (int)cr, (int)prefs->client_repeat);
@@ -552,7 +571,9 @@ void MeckCompanion::handleCmdFrame(size_t len) {
     // ---- CMD_SET_RADIO_TX_POWER (12) ----
     if (cmd == CMD_SET_RADIO_TX_POWER && len >= 2) {
         int8_t power = (int8_t)_cmd[1];
-        if (power >= -9 && power <= 22) {
+        // Upper limit follows the radio and band: 22, or 12 on the LR2021
+        // at 2.4 GHz (the radio refuses more there).
+        if (power >= -9 && power <= meck_radio_max_tx_dbm(prefs->freq)) {
             prefs->tx_power_dbm = power;
             _mesh->savePrefs();
             printf("Companion: SET_RADIO_TX_POWER %d dBm (reboot to apply)\n", (int)power);
@@ -647,6 +668,24 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         if (r && _mesh->removeContact(*r)) {
             _mesh->scheduleLazyContactSave();
             writeOKFrame();
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);
+        }
+        return;
+    }
+
+    // ---- CMD_SHARE_CONTACT (16) ---- re-send a contact's last advert
+    // zero-hop, from the copy kept on SD (P4DataStore::putAdvertBlob).
+    // As upstream: NOT_FOUND if not a contact, TABLE_FULL if it can't be
+    // sent (no stored advert, e.g. no SD card, or no free packet).
+    if (cmd == CMD_SHARE_CONTACT && len >= 1 + PUB_KEY_SIZE) {
+        ContactInfo* r = _mesh->lookupContactByPubKey(&_cmd[1], PUB_KEY_SIZE);
+        if (r) {
+            if (_mesh->shareContactZeroHop(*r)) {
+                writeOKFrame();
+            } else {
+                writeErrFrame(ERR_CODE_TABLE_FULL);   // unable to send
+            }
         } else {
             writeErrFrame(ERR_CODE_NOT_FOUND);
         }
@@ -967,6 +1006,63 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         return;
     }
 
+    // ---- CMD_SEND_CONTROL_DATA (55) ---- control packet from the app,
+    // sent zero-hop (upstream: only subtypes with the top bit set).
+    if (cmd == CMD_SEND_CONTROL_DATA && len >= 2 && (_cmd[1] & 0x80) != 0) {
+        if (_mesh->companionSendControlData(&_cmd[1], (int)len - 1)) {
+            writeOKFrame();
+        } else {
+            writeErrFrame(ERR_CODE_TABLE_FULL);
+        }
+        return;
+    }
+
+    // ---- CMD_SEND_ANON_REQ (57) ---- request to any node, contact or not
+    // (FIRMWARE_VER_CODE 13+). Reply comes back as PUSH_CODE_BINARY_RESPONSE.
+    if (cmd == CMD_SEND_ANON_REQ && len > 1 + PUB_KEY_SIZE) {
+        uint8_t* pub_key = &_cmd[1];
+        uint8_t* data = &_cmd[1 + PUB_KEY_SIZE];
+        uint32_t tag = 0, est_timeout = 0;
+        int result = _mesh->companionSendAnonReq(pub_key, data, (int)len - (1 + PUB_KEY_SIZE),
+                                                 tag, est_timeout);
+        if (result == MSG_SEND_FAILED) {
+            writeErrFrame(ERR_CODE_TABLE_FULL);
+        } else {
+            int i = 0;
+            _out[i++] = RESP_CODE_SENT;
+            _out[i++] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
+            memcpy(&_out[i], &tag, 4); i += 4;
+            memcpy(&_out[i], &est_timeout, 4); i += 4;
+            _serial->writeFrame(_out, i);
+        }
+        return;
+    }
+
+    // ---- CMD_SET_TUNING_PARAMS (21) / CMD_GET_TUNING_PARAMS (43) ----
+    // Receive delay base and airtime factor, each x1000, as upstream. Both
+    // are live: MeckMesh's calcRxDelay and getAirtimeBudgetFactor read them
+    // from prefs. Same settings as the CLI's rxdelay and af.
+    if (cmd == CMD_SET_TUNING_PARAMS) {
+        int i = 1;
+        uint32_t rx, af;
+        memcpy(&rx, &_cmd[i], 4); i += 4;
+        memcpy(&af, &_cmd[i], 4); i += 4;
+        prefs->rx_delay_base  = ((float)rx) / 1000.0f;
+        prefs->airtime_factor = ((float)af) / 1000.0f;
+        _mesh->savePrefs();
+        writeOKFrame();
+        return;
+    }
+    if (cmd == CMD_GET_TUNING_PARAMS) {
+        uint32_t rx = prefs->rx_delay_base * 1000, af = prefs->airtime_factor * 1000;
+        int i = 0;
+        _out[i++] = RESP_CODE_TUNING_PARAMS;
+        memcpy(&_out[i], &rx, 4); i += 4;
+        memcpy(&_out[i], &af, 4); i += 4;
+        _serial->writeFrame(_out, i);
+        return;
+    }
+
     // ---- CMD_RUN_CLI_COMMAND (66) ---- the app's Command Line (v14+).
     // Same handler as Settings > Experimental Features > Companion CLI.
     if (cmd == CMD_RUN_CLI_COMMAND && len >= 3) {
@@ -1186,5 +1282,17 @@ void MeckCompanion::pushBinaryResponse(uint32_t tag,
         memcpy(&_out[i], payload, payload_len);
         i += payload_len;
     }
+    _serial->writeFrame(_out, i);
+}
+void MeckCompanion::pushControlData(int8_t snr_x4, int8_t rssi, uint8_t path_len,
+                                    const uint8_t* payload, int payload_len) {
+    if (!_serial || !_serial->isConnected()) return;   // upstream: dropped while app offline
+    if (payload_len < 0 || payload_len + 4 > MAX_FRAME_SIZE) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_CONTROL_DATA;
+    _out[i++] = (uint8_t)snr_x4;
+    _out[i++] = (uint8_t)rssi;
+    _out[i++] = path_len;
+    memcpy(&_out[i], payload, payload_len); i += payload_len;
     _serial->writeFrame(_out, i);
 }

@@ -4448,7 +4448,10 @@ static void on_num_edit_save(lv_event_t *e) {
     } else if (g_num_edit_field == 2) {
         // Bandwidth
         float bw = strtof(text, nullptr);
-        if (bw >= 7.8f && bw <= 500.0f) {
+        // Upper limit follows the radio: 500 kHz on the SX1262, 1000 on the
+        // LR2021. On the LR2021 only its own bandwidth steps are accepted
+        // (meck_radio_bw_allowed), saved as the exact step.
+        if (bw >= 7.8f && bw <= meck_radio_max_bw_khz() && meck_radio_bw_allowed(bw, &bw)) {
             prefs->bw = bw;
             mesh->getDataStore()->savePrefs(*prefs);
             radio_request_reconfig(prefs->freq, prefs->bw, prefs->sf, prefs->cr, prefs->tx_power_dbm);

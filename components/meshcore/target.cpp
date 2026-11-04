@@ -183,6 +183,52 @@ void radio_set_tx_power(uint8_t dbm) {
 
 
 // ============================================================
+// Radio limits (declared in meck.h)
+// ============================================================
+
+int8_t meck_radio_max_tx_dbm(float freq_mhz) {
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    // RadioLib LR2021::checkOutputPower: -19..+12 dBm on the high-frequency
+    // path (freq above RADIOLIB_LR2021_LF_CUTOFF_FREQ), -9..+22 below it.
+    if (freq_mhz > RADIOLIB_LR2021_LF_CUTOFF_FREQ) return 12;
+#endif
+    (void)freq_mhz;
+    return 22;
+}
+
+float meck_radio_max_bw_khz(void) {
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    return 1000.0f;   // RadioLib LR2021::setBandwidth: widest LoRa step
+#else
+    return 500.0f;    // SX1262
+#endif
+}
+
+bool meck_radio_bw_allowed(float bw_khz, float* bw_out) {
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    // The LoRa bandwidths RadioLib LR2021::setBandwidth accepts (any other
+    // value returns RADIOLIB_ERR_INVALID_BANDWIDTH and the radio keeps its
+    // previous bandwidth). Stored as the exact step.
+    static const float LR2021_BW_STEPS[] = {
+        31.25f, 41.67f, 62.5f, 83.33f, 101.5625f, 125.0f,
+        203.125f, 250.0f, 406.25f, 500.0f, 812.5f, 1000.0f
+    };
+    for (size_t i = 0; i < sizeof(LR2021_BW_STEPS) / sizeof(LR2021_BW_STEPS[0]); i++) {
+        float d = bw_khz - LR2021_BW_STEPS[i];
+        if (d > -0.5f && d < 0.5f) {
+            if (bw_out) *bw_out = LR2021_BW_STEPS[i];
+            return true;
+        }
+    }
+    return false;
+#else
+    if (bw_out) *bw_out = bw_khz;
+    return true;
+#endif
+}
+
+
+// ============================================================
 // radio_get_rng_seed() — ESP32-P4 hardware TRNG
 // ============================================================
 

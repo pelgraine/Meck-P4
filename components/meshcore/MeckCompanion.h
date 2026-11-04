@@ -96,6 +96,11 @@ public:
     void pushBinaryResponse(uint32_t tag,
                             const uint8_t* payload, uint8_t payload_len);
 
+    // Received zero-hop control packet (PUSH_CODE_CONTROL_DATA), for the
+    // app's Discover nodes. Only sent while the app is connected, as upstream.
+    void pushControlData(int8_t snr_x4, int8_t rssi, uint8_t path_len,
+                         const uint8_t* payload, int payload_len);
+
 private:
     void handleCmdFrame(size_t len);
 

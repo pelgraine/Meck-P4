@@ -2187,4 +2187,56 @@ public:
         ESP_LOGI(TAG, "loadPostRecords: loaded %d of %ld total", loaded, total_records);
         return loaded;
     }
+
+    // =====================================================================
+    // Advert copies, for the app's Share Contact (CMD_SHARE_CONTACT, 16)
+    // =====================================================================
+    //
+    // The last raw advert heard from each node, one file per node, as
+    // upstream's ESP32 DataStore (getBlobByKey / putBlobByKey, files named
+    // by the first 8 bytes of the public key in hex under /bl). Here they
+    // live in /sdcard/meshcore/adverts. SD only: with no card nothing is
+    // stored, and sharing reports failure.
+
+    static constexpr const char* SD_ADVERTS_DIR = "/sdcard/meshcore/adverts";
+
+    static void makeAdvertPath(const uint8_t key[], int key_len, char* path, size_t path_size) {
+        char fname[18];
+        if (key_len > 8) key_len = 8;   // first 8 bytes (prefix), as upstream
+        mesh::Utils::toHex(fname, key, key_len);
+        snprintf(path, path_size, "%s/%s", SD_ADVERTS_DIR, fname);
+    }
+
+    // Write (replace) the stored advert for this node. Returns false with no
+    // card, or if the write fails (a partial file is removed, as upstream).
+    bool putAdvertBlob(const uint8_t key[], int key_len, const uint8_t src_buf[], int len) {
+        if (!src_buf || len <= 0 || len > 255) return false;
+        if (!p4_sdcard_is_mounted()) return false;
+        if (!ensureDir("/sdcard/meshcore") || !ensureDir(SD_ADVERTS_DIR)) {
+            ESP_LOGW(TAG, "putAdvertBlob: cannot create %s (errno=%d)", SD_ADVERTS_DIR, errno);
+            return false;
+        }
+        char path[64];
+        makeAdvertPath(key, key_len, path, sizeof(path));
+        FILE* f = fopen(path, "wb");
+        if (!f) return false;
+        size_t n = fwrite(src_buf, 1, (size_t)len, f);
+        fclose(f);
+        if (n == (size_t)len) return true;
+        remove(path);   // only partially written
+        return false;
+    }
+
+    // Read the stored advert for this node into dest_buf (at least 255
+    // bytes, as upstream). Returns its length, or 0 if there is none.
+    int getAdvertBlob(const uint8_t key[], int key_len, uint8_t dest_buf[]) {
+        if (!p4_sdcard_is_mounted()) return 0;
+        char path[64];
+        makeAdvertPath(key, key_len, path, sizeof(path));
+        FILE* f = fopen(path, "rb");
+        if (!f) return 0;
+        size_t n = fread(dest_buf, 1, 255, f);   // upstream: max 255-byte blob
+        fclose(f);
+        return (int)n;
+    }
 };

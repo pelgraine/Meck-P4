@@ -1340,6 +1340,60 @@ public:
         return true;
     }
 
+    // Anonymous request on behalf of the app (CMD_SEND_ANON_REQ, 57;
+    // FIRMWARE_VER_CODE 13+), e.g. asking a repeater found by the app's
+    // Discover nodes for its name. As upstream and Meck Watch: a node that
+    // isn't a contact gets a temporary slot (addAnonContact: never saved,
+    // not in the contact list) so its reply can be matched and decrypted,
+    // and the request goes zero-hop direct. The reply is matched by tag in
+    // onContactResponse through _companion_pending_binary_tag (upstream
+    // uses one pending_req for commands 50 and 57) and pushed to the app as
+    // PUSH_CODE_BINARY_RESPONSE. Returns the sendAnonReq result
+    // (MSG_SEND_FAILED when there is no slot or the send failed).
+    int companionSendAnonReq(const uint8_t* pub_key, const uint8_t* data, int data_len,
+                             uint32_t& tag, uint32_t& est_timeout_ms) {
+        ContactInfo* recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+        ContactInfo anon;
+        if (recipient == NULL) {  // FIRMWARE_VER_CODE 13+, allow non-contact requests
+            memset(&anon, 0, sizeof(anon));
+            memcpy(anon.id.pub_key, pub_key, PUB_KEY_SIZE);
+            anon.out_path_len = 0;      // default to zero-hop direct
+            anon.type = ADV_TYPE_NONE;  // unknown
+            anon.lastmod = getRTCClock()->getCurrentTime();
+
+            if (addAnonContact(anon)) recipient = &anon;
+        }
+        if (!recipient) {
+            printf("Meck: companionAnonReq no temporary slot\n");
+            return MSG_SEND_FAILED;
+        }
+
+        tag = 0;
+        est_timeout_ms = 0;
+        int result = sendAnonReq(*recipient, data, (uint8_t)data_len, tag, est_timeout_ms);
+        if (result == MSG_SEND_FAILED) {
+            printf("Meck: companionAnonReq FAILED\n");
+            est_timeout_ms = 0;
+            return result;
+        }
+        _companion_pending_binary_tag = tag;
+        printf("Meck: companionAnonReq to [%02X%02X] (%s) tag=0x%08X timeout=%ums len=%d\n",
+               pub_key[0], pub_key[1],
+               result == MSG_SEND_SENT_FLOOD ? "flood" : "direct",
+               (unsigned)tag, (unsigned)est_timeout_ms, data_len);
+        return result;
+    }
+
+    // Control data from the app (CMD_SEND_CONTROL_DATA, 55), e.g. the app's
+    // Discover nodes request. Sent zero-hop, as upstream. Replies reach the
+    // app through onControlDataRecv (PUSH_CODE_CONTROL_DATA).
+    bool companionSendControlData(const uint8_t* data, int len) {
+        mesh::Packet* pkt = createControlData(data, (size_t)len);
+        if (!pkt) return false;
+        sendZeroHop(pkt);
+        return true;
+    }
+
     // Request the repeater's telemetry data (REQ_TYPE_GET_TELEMETRY_DATA).
     // Response payload is a CayenneLPP buffer — variable-length, parsed
     // by the UI side. Common fields: voltage (type 0x74), temperature
@@ -1919,6 +1973,73 @@ public:
         if (_store && _prefs) {
             _store->savePrefs(*_prefs);
         }
+    }
+
+    // ---- Advert copies for the app's Share Contact (CMD_SHARE_CONTACT, 16) ----
+    //
+    // BaseChatMesh::onAdvertRecv calls putBlobByKey with the raw advert of
+    // every valid advert heard, and shareContactZeroHop reads it back with
+    // getBlobByKey (upstream stores these through its DataStore). Receive
+    // callbacks here must not do SD I/O, so putBlobByKey only queues the copy
+    // (a newer advert from the same node replaces its pending copy) and
+    // applyPendingAdvertSaves(), called from meck_task's loop like the
+    // channel-message save queue, writes them to /sdcard/meshcore/adverts via
+    // P4DataStore. getBlobByKey checks the queue first so a share straight
+    // after an advert uses the newest copy. Producer and consumer both run
+    // on meck_task, so no lock is needed.
+    static constexpr int ADVERT_SAVE_QUEUE_SIZE = 8;
+    struct PendingAdvertSave {
+        uint8_t key[8];      // public key prefix, as the file name
+        uint8_t len;
+        uint8_t data[255];   // upstream: max 255-byte blob
+    };
+    PendingAdvertSave _advert_saves[ADVERT_SAVE_QUEUE_SIZE];
+    int _advert_save_count = 0;
+
+    bool putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], int len) override {
+        if (!src_buf || len <= 0 || len > 255 || key_len < 8) return false;
+        int slot = -1;
+        for (int i = 0; i < _advert_save_count; i++) {
+            if (memcmp(_advert_saves[i].key, key, 8) == 0) { slot = i; break; }
+        }
+        if (slot < 0) {
+            if (_advert_save_count == ADVERT_SAVE_QUEUE_SIZE) {
+                // full: drop the oldest pending copy (that node keeps its
+                // previous file, if any)
+                memmove(&_advert_saves[0], &_advert_saves[1],
+                        sizeof(_advert_saves[0]) * (ADVERT_SAVE_QUEUE_SIZE - 1));
+                _advert_save_count--;
+                printf("Meck: advert save queue full, dropping oldest pending copy\n");
+            }
+            slot = _advert_save_count++;
+            memcpy(_advert_saves[slot].key, key, 8);
+        }
+        _advert_saves[slot].len = (uint8_t)len;
+        memcpy(_advert_saves[slot].data, src_buf, len);
+        return true;
+    }
+
+    int getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]) override {
+        if (key_len < 8) return 0;
+        for (int i = 0; i < _advert_save_count; i++) {
+            if (memcmp(_advert_saves[i].key, key, 8) == 0) {
+                memcpy(dest_buf, _advert_saves[i].data, _advert_saves[i].len);
+                return _advert_saves[i].len;
+            }
+        }
+        return _store ? _store->getAdvertBlob(key, key_len, dest_buf) : 0;
+    }
+
+    // Write the queued advert copies to SD. Called from meck_task's loop.
+    void applyPendingAdvertSaves() {
+        if (_advert_save_count == 0) return;
+        for (int i = 0; i < _advert_save_count; i++) {
+            if (_store) {
+                _store->putAdvertBlob(_advert_saves[i].key, 8,
+                                      _advert_saves[i].data, _advert_saves[i].len);
+            }
+        }
+        _advert_save_count = 0;
     }
 
     // ---- Contact persistence ----
@@ -3961,6 +4082,13 @@ protected:
         BaseChatMesh::onControlDataRecv(pkt);
 
         if (!pkt) return;
+
+        // Every control packet also goes to the app (PUSH_CODE_CONTROL_DATA),
+        // as upstream's companion does: the app's Discover nodes (command 55)
+        // reads the DISCOVER_RESP replies. Dropped if the app isn't connected.
+        meck_companion_push_control_data((int8_t)(_radio->getLastSNR() * 4),
+                                         (int8_t)_radio->getLastRSSI(),
+                                         pkt->path_len, pkt->payload, pkt->payload_len);
 
         // UNCONDITIONAL DIAGNOSTIC: log every control packet that arrives,
         // before any subtype/tag/active filtering, so we can verify:

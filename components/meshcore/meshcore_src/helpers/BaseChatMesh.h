@@ -37,6 +37,12 @@ public:
   #define MAX_CONTACTS  32
 #endif
 
+// Temporary contacts for requests to non-contacts (FIRMWARE_VER_CODE 13+).
+// Meck keeps them in reserved slots AFTER the MAX_CONTACTS normal slots,
+// outside num_contacts, so contact lists, saving, app sync and the UI never
+// see them. Only packet matching (searchPeersByHash and the peer methods) does.
+#define MAX_ANON_CONTACTS  8
+
 #ifndef MAX_CONNECTIONS
   #define MAX_CONNECTIONS  16
 #endif
@@ -73,6 +79,9 @@ class BaseChatMesh : public mesh::Mesh {
 
   mesh::Packet* composeMsgPacket(const ContactInfo& recipient, uint32_t timestamp, uint8_t attempt, const char *text, uint32_t& expected_ack);
   void sendAckTo(const ContactInfo& dest, uint32_t ack_hash);
+  bool isPeerIdxValid(int i) const {   // a normal contact, or a reserved temporary slot
+    return (i >= 0 && i < num_contacts) || (i >= MAX_CONTACTS && i < MAX_CONTACTS + MAX_ANON_CONTACTS);
+  }
 
 protected:
   BaseChatMesh(mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::PacketManager& mgr, mesh::MeshTables& tables)
@@ -98,10 +107,10 @@ protected:
   void initContacts() {
     if (contacts != NULL) return;  // already initialized
   #if defined(ESP32) && defined(BOARD_HAS_PSRAM)
-    contacts = (ContactInfo*)ps_calloc(MAX_CONTACTS, sizeof(ContactInfo));
+    contacts = (ContactInfo*)ps_calloc(MAX_CONTACTS + MAX_ANON_CONTACTS, sizeof(ContactInfo));
     sort_array = (int*)ps_calloc(MAX_CONTACTS, sizeof(int));
   #else
-    contacts = new ContactInfo[MAX_CONTACTS]();
+    contacts = new ContactInfo[MAX_CONTACTS + MAX_ANON_CONTACTS]();
     sort_array = new int[MAX_CONTACTS]();
   #endif
   }
@@ -177,6 +186,7 @@ public:
   ContactInfo* lookupContactByPubKey(const uint8_t* pub_key, int prefix_len);
   bool  removeContact(ContactInfo& contact);
   bool  addContact(const ContactInfo& contact);
+  bool  addAnonContact(const ContactInfo& contact);   // temporary slot, never saved (FIRMWARE_VER_CODE 13+)
   int getNumContacts() const { return num_contacts; }
   bool getContactByIdx(uint32_t idx, ContactInfo& contact);
   ContactsIterator startContactsIterator();

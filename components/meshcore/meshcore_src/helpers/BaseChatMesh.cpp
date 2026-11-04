@@ -141,6 +141,14 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
   }
   putBlobByKey(id.pub_key, PUB_KEY_SIZE, temp_buf, plen);
 
+  // already in a temporary slot from a non-contact request? clear it; the normal
+  // 'add' flow below then applies (upstream c2d223ff)
+  for (int i = MAX_CONTACTS; contacts != NULL && i < MAX_CONTACTS + MAX_ANON_CONTACTS; i++) {
+    if (contacts[i].lastmod != 0 && id.matches(contacts[i].id)) {
+      memset(&contacts[i], 0, sizeof(contacts[i]));
+    }
+  }
+
   bool is_new = false; // true = not in contacts[], false = exists in contacts[]
   if (from == NULL) {
     if (!shouldAutoAddContactType(parser.getType())) {
@@ -184,12 +192,18 @@ int BaseChatMesh::searchPeersByHash(const uint8_t* hash) {
       matching_peer_indexes[n++] = i;  // store the INDEXES of matching contacts (for subsequent 'peer' methods)
     }
   }
+  // then the temporary slots used for requests to non-contacts (lastmod 0 = slot unused)
+  for (int i = MAX_CONTACTS; contacts != NULL && i < MAX_CONTACTS + MAX_ANON_CONTACTS && n < MAX_SEARCH_RESULTS; i++) {
+    if (contacts[i].lastmod != 0 && contacts[i].id.isHashMatch(hash)) {
+      matching_peer_indexes[n++] = i;
+    }
+  }
   return n;
 }
 
 void BaseChatMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
   int i = matching_peer_indexes[peer_idx];
-  if (i >= 0 && i < num_contacts) {
+  if (isPeerIdxValid(i)) {
     memcpy(dest_secret, contacts[i].getSharedSecret(self_id), PUB_KEY_SIZE);
   } else {
     MESH_DEBUG_PRINTLN("getPeerSharedSecret: Invalid peer idx: %d", i);
@@ -198,7 +212,7 @@ void BaseChatMesh::getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) {
 
 void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) {
   int i = matching_peer_indexes[sender_idx];
-  if (i < 0 || i >= num_contacts) {
+  if (!isPeerIdxValid(i)) {
     MESH_DEBUG_PRINTLN("onPeerDataRecv: Invalid sender idx: %d", i);
     return;
   }
@@ -290,7 +304,7 @@ void BaseChatMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender
 
 bool BaseChatMesh::onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) {
   int i = matching_peer_indexes[sender_idx];
-  if (i < 0 || i >= num_contacts) {
+  if (!isPeerIdxValid(i)) {
     MESH_DEBUG_PRINTLN("onPeerPathRecv: Invalid sender idx: %d", i);
     return false;
   }
@@ -780,6 +794,28 @@ bool BaseChatMesh::addContact(const ContactInfo& contact) {
     return true;  // success
   }
   return false;
+}
+
+bool BaseChatMesh::addAnonContact(const ContactInfo& contact) {
+  if (contacts == NULL) return false;
+  // reuse this node's temporary slot if it has one, else the oldest (unused slots have lastmod 0)
+  ContactInfo* dest = NULL;
+  uint32_t oldest_lastmod = 0xFFFFFFFF;
+  for (int i = MAX_CONTACTS; i < MAX_CONTACTS + MAX_ANON_CONTACTS; i++) {
+    if (contacts[i].lastmod != 0 && contacts[i].id.matches(contact.id)) {
+      dest = &contacts[i];
+      break;
+    }
+    if (contacts[i].lastmod < oldest_lastmod) {
+      oldest_lastmod = contacts[i].lastmod;
+      dest = &contacts[i];
+    }
+  }
+  if (dest == NULL) return false;
+  // NOTE: do NOT call onContactOverwrite() (upstream 07648e33)
+  *dest = contact;
+  dest->shared_secret_valid = false; // mark shared_secret as needing calculation
+  return true;
 }
 
 bool BaseChatMesh::removeContact(ContactInfo& contact) {

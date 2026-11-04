@@ -35,7 +35,7 @@
 // Firmware identity -- single source of truth for UI and companion protocol.
 // Update MECK_FIRMWARE_VERSION here before each release.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.9"
+#define MECK_FIRMWARE_VERSION "0.8.1"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +44,22 @@ extern "C" {
 // Wrap LilyGo's already-running SX1262 with our mesh::Radio adapter and
 // reconfigure to MeshCore's Australia Narrow preset. Idempotent.
 bool meck_radio_attach();
+
+// Radio limits for this build (target.cpp), used by the Companion CLI and
+// the app's radio commands so they never store values the radio refuses.
+//   meck_radio_max_tx_dbm: highest TX power at the given frequency (MHz).
+//     SX1262: 22. LR2021: 12 on its high-frequency path (above RadioLib's
+//     1500 MHz cutoff, so 2.4 GHz), else 22.
+//   meck_radio_max_bw_khz: widest LoRa bandwidth. SX1262: 500. LR2021: 1000.
+int8_t meck_radio_max_tx_dbm(float freq_mhz);
+float  meck_radio_max_bw_khz(void);
+
+// LoRa bandwidth check (kHz). LR2021: true only for the chip's own steps
+// (31.25, 41.67, 62.5, 83.33, 101.5625, 125, 203.125, 250, 406.25, 500,
+// 812.5, 1000), matched within 0.5 kHz, and *bw_out gets the exact step.
+// SX1262: always true and *bw_out = bw_khz (callers keep their own range
+// checks, as before).
+bool meck_radio_bw_allowed(float bw_khz, float* bw_out);
 
 // Initialize the Meck mesh stack. Must be called AFTER meck_radio_attach().
 // Initializes NVS, loads or generates the node identity (persisted to SD),
@@ -187,6 +203,10 @@ void meck_companion_push_cli_reply(const uint8_t* pub_key,
 void meck_companion_push_binary_response(uint32_t tag,
                                           const uint8_t* payload,
                                           uint8_t payload_len);
+// Received zero-hop control packet (e.g. DISCOVER_RESP) for the app's
+// Discover nodes, as PUSH_CODE_CONTROL_DATA: SNR x4, RSSI, path_len, payload.
+void meck_companion_push_control_data(int8_t snr_x4, int8_t rssi, uint8_t path_len,
+                                       const uint8_t* payload, int payload_len);
 
 #ifdef __cplusplus
 }

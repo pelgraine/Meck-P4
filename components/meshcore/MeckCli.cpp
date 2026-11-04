@@ -76,13 +76,26 @@ bool meck_cli_handle(const char* command, char* reply) {
         float bw    = num > 1 ? strtof(parts[1], nullptr) : 0.0f;
         uint8_t sf  = num > 2 ? atoi(parts[2]) : 0;
         uint8_t cr  = num > 3 ? atoi(parts[3]) : 0;
-        if (freq >= 150.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= 500.0f) {
+        // meck_radio_bw_allowed: on the LR2021 only its own bandwidth steps
+        // pass, and bw becomes the exact step; SX1262 unchanged.
+        if (freq >= 150.0f && freq <= 2500.0f && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8 && bw >= 7.0f && bw <= meck_radio_max_bw_khz() &&
+            meck_radio_bw_allowed(bw, &bw)) {
             p->sf = sf;
             p->cr = cr;
             p->freq = freq;
             p->bw = bw;
+            // LR2021 on 2.4 GHz: lower a stored TX above the band's limit
+            // (as Settings does on the device) so the radio never gets a
+            // power it refuses. TX is stored unsigned; compare it signed.
+            int8_t max_tx = meck_radio_max_tx_dbm(freq);
+            bool tx_lowered = (int8_t)p->tx_power_dbm > max_tx;
+            if (tx_lowered) p->tx_power_dbm = (uint8_t)max_tx;
             meck_cli_save_prefs();
-            strcpy(reply, "OK - reboot to apply");
+            if (tx_lowered) {
+                sprintf(reply, "OK - TX lowered to %d dBm, reboot to apply", (int)max_tx);
+            } else {
+                strcpy(reply, "OK - reboot to apply");
+            }
         } else {
             strcpy(reply, "Error, invalid radio params");
         }
@@ -145,13 +158,14 @@ bool meck_cli_handle(const char* command, char* reply) {
     }
 
     if (strncmp(command, "get tx", 6) == 0 && (command[6] == 0 || command[6] == ' ')) {
-        sprintf(reply, "> %d", (int)p->tx_power_dbm);
+        sprintf(reply, "> %d", (int)(int8_t)p->tx_power_dbm);   // stored unsigned; the app can set -9..-1
         return true;
     }
     if (strncmp(command, "set tx ", 7) == 0) {
         int dbm = atoi(&command[7]);
-        if (dbm < 0 || dbm > 22) {
-            strcpy(reply, "Error, must be 0-22");
+        int max_tx = meck_radio_max_tx_dbm(p->freq);   // 22, or 12 on the LR2021 at 2.4 GHz
+        if (dbm < 0 || dbm > max_tx) {
+            sprintf(reply, "Error, must be 0-%d", max_tx);
         } else {
             p->tx_power_dbm = (uint8_t)dbm;
             meck_cli_save_prefs();

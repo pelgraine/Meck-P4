@@ -236,6 +236,14 @@ extern "C" void meck_companion_push_binary_response(uint32_t tag,
     g_wifi_companion.pushBinaryResponse(tag, payload, payload_len);
 }
 
+extern "C" void meck_companion_push_control_data(int8_t snr_x4, int8_t rssi, uint8_t path_len,
+                                                  const uint8_t* payload, int payload_len) {
+#if MECK_BLE_ENABLED
+    g_companion.pushControlData(snr_x4, rssi, path_len, payload, payload_len);
+#endif
+    g_wifi_companion.pushControlData(snr_x4, rssi, path_len, payload, payload_len);
+}
+
 #if MECK_BLE_ENABLED
 extern "C" void meck_ble_set_enabled(bool enabled) {
     g_ble_pending_action = enabled ? 1 : -1;
@@ -851,6 +859,7 @@ static void meck_task(void* arg) {
         // meck_apply_pending_voice_send();
         // meck_apply_pending_picture_send();
         meck_apply_pending_save();
+        if (g_the_mesh) g_the_mesh->applyPendingAdvertSaves();   // adverts kept for Share Contact (16)
 #if MECK_BLE_ENABLED
         meck_apply_pending_ble();
 #endif
