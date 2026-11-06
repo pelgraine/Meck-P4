@@ -34,6 +34,7 @@
 // #include "BundledPictures.h"  // disabled for v0.3.8
 #include "NotifSounds.h"
 #include "SerialC6BLEInterface.h"
+#include "SerialNimBLEInterface.h"   // BLE companion (ESP-Hosted C6 build only)
 #include "MeckCompanion.h"
 #include "esp_random.h"
 #include "esp_attr.h"     // RTC_NOINIT_ATTR
@@ -77,8 +78,8 @@ NotifSounds g_notif_sounds;
 static Cpp_Bus_Driver::Esp_At* g_c6_at = nullptr;
 
 #if MECK_BLE_ENABLED
-// ---- BLE companion transport via ESP32-C6 AT over SDIO ----
-static SerialC6BLEInterface g_ble_interface;
+// ---- BLE companion transport: NimBLE on the P4, C6 as radio via ESP-Hosted ----
+static SerialNimBLEInterface g_ble_interface;
 static MeckCompanion g_companion;
 #endif
 
@@ -103,6 +104,8 @@ static char          g_kbd_pending_addr[18] = {0};
 #if MECK_BLE_ENABLED
 // Deferred BLE enable/disable
 static volatile int g_ble_pending_action = 0;
+// Set by meck_ble_boot_start(): true once the ESP-Hosted link to the C6 is up.
+static volatile bool g_ble_link_up = false;
 #endif
 
 extern "C" void meck_ble_bind(void* esp_at_ptr) {
@@ -254,24 +257,38 @@ extern "C" bool meck_ble_is_enabled() {
     return g_ble_interface.isEnabled();
 }
 
+extern "C" void meck_ble_boot_start(bool c6_link_up) {
+    g_ble_link_up = c6_link_up;
+    if (!c6_link_up) {
+        printf("meck_ble_boot_start: ESP-Hosted link to the C6 is down, BLE companion unavailable\n");
+        return;
+    }
+    if (g_node_prefs.ble_enabled != 0) {
+        g_ble_pending_action = 1;
+        printf("meck_ble_boot_start: BLE companion on in Settings, starting\n");
+    } else {
+        printf("meck_ble_boot_start: BLE companion off in Settings\n");
+    }
+}
+
 // Process deferred BLE enable/disable — called from meck_task only.
 static void meck_apply_pending_ble() {
     int action = g_ble_pending_action;
     if (action == 0) return;
     g_ble_pending_action = 0;
 
-    if (action > 0 && !g_ble_interface.isEnabled() && g_c6_at) {
+    if (action > 0 && !g_ble_interface.isEnabled() && !g_ble_link_up) {
+        printf("meck_apply_pending_ble: ESP-Hosted link to the C6 is not up, not enabling\n");
+    } else if (action > 0 && !g_ble_interface.isEnabled()) {
         // Disable WiFi first (mutual exclusivity — shared SDIO bus)
         if (g_wifi_interface.isEnabled()) {
             g_wifi_interface.disable();
             printf("meck_apply_pending_ble: disabled WiFi (mutual excl)\n");
         }
-        Meck* mesh = meck_get_instance();
-        const char* name = mesh ? mesh->getNodeName() : "Meck-P4";
-        g_ble_interface.begin(g_c6_at, name);
         g_ble_interface.setPin(g_node_prefs.ble_pin);
         g_ble_interface.enable();
-        printf("meck_apply_pending_ble: enabled\n");
+        printf("meck_apply_pending_ble: %s\n",
+               g_ble_interface.isEnabled() ? "enabled" : "enable FAILED");
     } else if (action < 0 && g_ble_interface.isEnabled()) {
         g_ble_interface.disable();
         printf("meck_apply_pending_ble: disabled\n");
@@ -790,32 +807,29 @@ extern "C" bool meck_app_init() {
     // copyBundledPicturesToSD();  // disabled for v0.3.8
     g_notif_sounds.begin();
 
-    // 7. Initialize companion transports via C6
-    if (g_c6_at) {
+    // 7. BLE companion (ESP-Hosted C6 build). The P4 runs the Bluetooth host,
+    //    so this does not need the C6 AT driver. Bluetooth itself starts
+    //    later: from meck_ble_boot_start() (main.cpp, once the home screen is
+    //    up) when BLE Companion is on in Settings, or from the Settings toggle.
 #if MECK_BLE_ENABLED
-        g_ble_interface.begin(g_c6_at, g_node_prefs.node_name);
-
-        // Probe C6 for OTA and WiFi capability (diagnostic, runs once at boot)
-        g_ble_interface.probeOTA();
-
-        // Generate a 6-digit BLE pairing PIN on first use
-        if (g_node_prefs.ble_pin == 0) {
-            g_node_prefs.ble_pin = 100000 + (esp_random() % 900000);
-            if (g_the_mesh) g_the_mesh->getDataStore()->savePrefs(g_node_prefs);
-            printf("meck_app_init: generated BLE PIN (masked in log)\n");
-        }
-        g_ble_interface.setPin(g_node_prefs.ble_pin);
-
-        if (g_node_prefs.ble_enabled != 0) {
-            g_ble_interface.enable();
-            printf("meck_app_init: BLE companion enabled\n");
-        } else {
-            printf("meck_app_init: BLE companion interface OFF (pref)\n");
-        }
-        g_companion.begin(g_the_mesh, &g_ble_interface);
-        printf("meck_app_init: BLE companion protocol handler ready\n");
+    // Generate a 6-digit BLE pairing PIN on first use
+    if (g_node_prefs.ble_pin == 0) {
+        g_node_prefs.ble_pin = 100000 + (esp_random() % 900000);
+        if (g_the_mesh) g_the_mesh->getDataStore()->savePrefs(g_node_prefs);
+        printf("meck_app_init: generated BLE PIN (masked in log)\n");
+    }
+    {
+        // Advertised name, as Meck on the T-Deck: "MeshCore-" + node name
+        char ble_name[48];
+        snprintf(ble_name, sizeof(ble_name), "MeshCore-%s", g_node_prefs.node_name);
+        g_ble_interface.begin(ble_name, g_node_prefs.ble_pin);
+    }
+    g_companion.begin(g_the_mesh, &g_ble_interface);
+    printf("meck_app_init: BLE companion protocol handler ready (%s in Settings)\n",
+           g_node_prefs.ble_enabled != 0 ? "on" : "off");
 #endif
 
+    if (g_c6_at) {
         // 8. Initialize WiFi companion transport via C6
         g_wifi_interface.begin(g_c6_at);
         g_wifi_interface.setCredentials(g_node_prefs.wifi_ssid, g_node_prefs.wifi_password);

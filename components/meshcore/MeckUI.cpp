@@ -15784,12 +15784,20 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         if (bp && bp->wifi_enabled && wifi_ip && wifi_ip[0]) {
             lv_label_set_text_fmt(lbl_home_ble_pin,
                 "WiFi: %s:5000", wifi_ip);
+#if MECK_BLE_ENABLED
+            // Back to the label's own size (the BLE PIN below uses 28).
+            meck_update_font(lbl_home_ble_pin, &meck_montserrat_14, 0);
+#endif
             lv_obj_clear_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
 #if MECK_BLE_ENABLED
         } else if (bp && bp->ble_enabled && bp->ble_pin != 0) {
             lv_label_set_text_fmt(lbl_home_ble_pin,
                 "BLE PIN: %06lu",
                 (unsigned long)bp->ble_pin);
+            // The PIN is shown at 28 (twice the label's 14) so it can be read
+            // while typing it into the phone. Portrait: ends above the tile
+            // grid at y=140. Landscape: right edge stays 160 px from the edge.
+            meck_update_font(lbl_home_ble_pin, &meck_montserrat_28, 0);
             lv_obj_clear_flag(lbl_home_ble_pin, LV_OBJ_FLAG_HIDDEN);
 #endif
         } else {

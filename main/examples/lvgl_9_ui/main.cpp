@@ -6679,6 +6679,15 @@ extern "C" void app_main(void)
     meck_ui_show_home();
     Meck_Ram_Check("after the home screen");
 
+#if MECK_BLE_ENABLED
+    // BLE companion: Bluetooth starts now Meck is fully up (if BLE Companion
+    // is on in Settings), on meck_task. Give it a few seconds to sync with
+    // the C6 and start advertising, then report RAM.
+    meck_ble_boot_start(Sys_Status.esp32c6.init_flag == true);
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    Meck_Ram_Check("after Bluetooth start");
+#endif
+
     // Diagnostic — dumps task list + CPU% every 10s to serial. Low priority
     // so it can never starve real work. Disable by commenting out this line
     // (or set the configs in sdkconfig to off and the function compiles to

@@ -40,6 +40,7 @@ idf_component_register(
         "MeckAudioUI.cpp"
         "MeckMapScreen.cpp"
         "SerialC6BLEInterface.cpp"
+        "SerialNimBLEInterface.cpp"
         "SerialC6WiFiInterface.cpp"
         "MeckWebFetch.cpp"
         "MeckCompanion.cpp"
@@ -103,6 +104,14 @@ idf_component_register(
         codec2
         espressif__zlib
 )
+
+# BLE companion over ESP-Hosted (SerialNimBLEInterface.cpp): NimBLE's headers
+# come from the bt component, needed only in the ESP-Hosted C6 build with
+# NimBLE switched on. A REQUIRES entry cannot depend on menuconfig, so it is
+# added here instead (the pattern ESP-Hosted's own CMakeLists.txt uses).
+if(CONFIG_MECK_C6_ESP_HOSTED_TEST AND CONFIG_BT_NIMBLE_ENABLED)
+    idf_component_optional_requires(PRIVATE bt)
+endif()
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=reorder

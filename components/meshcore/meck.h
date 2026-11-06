@@ -25,11 +25,19 @@
 #pragma once
 
 #include <stdint.h>
+#include "sdkconfig.h"
 
-// BLE companion is disabled by default (saves C6 radio power).
-// Set to 1 in CMakeLists.txt or variant.h to re-enable.
+// BLE companion. On by itself only in the ESP-Hosted C6 build with NimBLE
+// switched on (menuconfig: Example Configuration -> Meck: ESP-Hosted C6 test
+// build, and Component config -> Bluetooth -> NimBLE): the P4 then runs the
+// Bluetooth host and the C6 is its radio (SerialNimBLEInterface). Off in
+// every other build.
 #ifndef MECK_BLE_ENABLED
+#if defined(CONFIG_MECK_C6_ESP_HOSTED_TEST) && defined(CONFIG_BT_NIMBLE_ENABLED)
+#define MECK_BLE_ENABLED 1
+#else
 #define MECK_BLE_ENABLED 0
+#endif
 #endif
 
 // Firmware identity -- single source of truth for UI and companion protocol.
@@ -115,10 +123,16 @@ void meck_ble_bind(void* esp_at_ptr);
 
 #if MECK_BLE_ENABLED
 // Enable or disable the BLE companion interface at runtime. When disabled,
-// the C6 stops advertising and drops any active connection (saves ~25 mA).
+// the board stops advertising and drops any active connection.
 // Persisted via P4NodePrefs.ble_enabled so the choice survives reboot.
 void meck_ble_set_enabled(bool enabled);
 bool meck_ble_is_enabled(void);
+
+// Called once from main.cpp after the home screen is up, with whether the
+// ESP-Hosted link to the C6 came up. Bluetooth only starts after this (at
+// boot if BLE Companion is on in Settings, or later from Settings), so
+// Meck's own start-up memory use is unchanged.
+void meck_ble_boot_start(bool c6_link_up);
 #endif
 
 // WiFi companion interface.
