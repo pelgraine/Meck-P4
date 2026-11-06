@@ -763,6 +763,9 @@ extern "C" bool meck_app_init() {
     // Power before params -- radio_set_params programs the SX1262 with the
     // stored TX value (see target.cpp), so store it first.
     radio_set_tx_power(g_node_prefs.tx_power_dbm);
+    // radio.rxgain before params: the LR2021 backend applies the gain level
+    // for the band radio_set_params tunes to (no-op on the SX1262 build).
+    radio_set_rx_boosted_gain(g_node_prefs.rx_boosted_gain != 0);
     radio_set_params(g_node_prefs.freq, g_node_prefs.bw,
                      g_node_prefs.sf,   g_node_prefs.cr);
     meck_set_antenna(g_node_prefs.antenna);

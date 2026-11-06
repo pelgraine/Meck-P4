@@ -1009,6 +1009,11 @@ static lv_obj_t *obj_contacts_settings_scroll = NULL;   // rows container (keybo
 // pattern as the channel picker's clear-history prompt, keyboard-modal).
 static lv_obj_t *scr_settings_experimental     = NULL;
 static lv_obj_t *obj_experimental_settings_scroll = NULL;   // rows container (keyboard row cycling)
+#if defined(CONFIG_MECK_RADIO_LR2021)
+// Settings > Experimental Features > RX Boosted Gain / CAD value labels
+static lv_obj_t *lbl_exp_rxgain = NULL;
+static lv_obj_t *lbl_exp_cad    = NULL;
+#endif
 static lv_obj_t *obj_purge_panel   = NULL;
 static lv_obj_t *obj_purge_card    = NULL;
 static lv_obj_t *lbl_purge_title   = NULL;
@@ -10247,8 +10252,50 @@ static void create_settings_contacts_screen() {
 // by the restart rather than cleared piecemeal here. Channel messages are
 // not touched.
 
+#if defined(CONFIG_MECK_RADIO_LR2021)
+// RX Boosted Gain and CAD rows (LR2021 build only): the same settings as the
+// Companion CLI's and the app's "set radio.rxgain on|off" and "set cad on|off",
+// so the labels are refreshed from prefs whenever this screen is shown.
+static void experimental_update_labels() {
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    if (lbl_exp_rxgain) lv_label_set_text(lbl_exp_rxgain, prefs->rx_boosted_gain != 0 ? "On" : "Off");
+    if (lbl_exp_cad)    lv_label_set_text(lbl_exp_cad,    prefs->cad_enabled != 0 ? "On" : "Off");
+}
+
+static void on_experimental_rxgain_tap(lv_event_t *e) {
+    LV_UNUSED(e);
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    prefs->rx_boosted_gain = (prefs->rx_boosted_gain != 0) ? 0 : 1;
+    mesh->getDataStore()->savePrefs(*prefs);
+    radio_request_rx_boosted_gain(prefs->rx_boosted_gain != 0);   // applied on meck_task
+    experimental_update_labels();
+    printf("Settings: RX boosted gain = %s\n", prefs->rx_boosted_gain != 0 ? "On" : "Off");
+}
+
+static void on_experimental_cad_tap(lv_event_t *e) {
+    LV_UNUSED(e);
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (!prefs) return;
+    prefs->cad_enabled = (prefs->cad_enabled != 0) ? 0 : 1;   // the Dispatcher picks it up within 2 s
+    mesh->getDataStore()->savePrefs(*prefs);
+    experimental_update_labels();
+    printf("Settings: CAD = %s\n", prefs->cad_enabled != 0 ? "On" : "Off");
+}
+#endif
+
 static void goto_settings_experimental(lv_event_t *e) {
     (void)e;
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    experimental_update_labels();
+#endif
     if (scr_settings_experimental) lv_screen_load(scr_settings_experimental);
 }
 
@@ -10480,6 +10527,17 @@ static void create_settings_experimental_screen() {
     }
     y += 65;
 
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    // radio.rxgain and cad (LR2021 build only; see MeckCli.cpp)
+    create_settings_row(scroll, "RX Boosted Gain",
+        &lbl_exp_rxgain, on_experimental_rxgain_tap, y);
+    y += 65;
+    create_settings_row(scroll, "CAD",
+        &lbl_exp_cad, on_experimental_cad_tap, y);
+    y += 65;
+    experimental_update_labels();
+#endif
+
     create_purge_prompt();
 }
 
@@ -10618,6 +10676,9 @@ static void on_experimental_cli_tap(lv_event_t *e) {
 static void goto_experimental_from_cli(lv_event_t *e) {
     (void)e;
     if (kb_cli_input) on_cli_input_defocused(NULL);
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    experimental_update_labels();   // a CLI "set cad" / "set radio.rxgain" shows here
+#endif
     if (scr_settings_experimental) lv_screen_load(scr_settings_experimental);
 }
 

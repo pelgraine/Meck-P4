@@ -46,7 +46,10 @@
  *                                         the frequency, so 2.4 GHz needs no
  *                                         GPIO action
  * Not yet ported for this backend: MECK_RX_DUTY_CYCLE (the SX1262 path's
- * listen/sleep duty cycling) and rx-boosted gain.
+ * listen/sleep duty cycling).
+ *
+ * radio.rxgain and cad (MeshCore companion CLI, Settings > Experimental
+ * Features): setRxBoostedGain() and setCADEnabled(), see there.
  */
 #pragma once
 
@@ -58,6 +61,8 @@
 #include "t_display_p4_config.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "meck_log.h"
 #include <memory>
 #include <stdio.h>
@@ -405,6 +410,9 @@ public:
         chk("standby", _radio.standby());
         int16_t st;
         if ((st = _radio.setFrequency(freq)) != RADIOLIB_ERR_NONE)        printf("P4LR2021Radio: setFrequency %d\n", (int)st);
+        // RadioLib keeps one RX gain level per band and applies the current
+        // band's at each startReceive(): set it for the band just tuned.
+        if ((st = _radio.setRxBoostedGainMode(rxGainLevelFor(freq))) != RADIOLIB_ERR_NONE) printf("P4LR2021Radio: setRxBoostedGainMode %d\n", (int)st);
         if ((st = _radio.setBandwidth(bw)) != RADIOLIB_ERR_NONE)          printf("P4LR2021Radio: setBandwidth %d\n", (int)st);
         if ((st = _radio.setSpreadingFactor(sf)) != RADIOLIB_ERR_NONE)    printf("P4LR2021Radio: setSpreadingFactor %d\n", (int)st);
         if ((st = _radio.setCodingRate(cr)) != RADIOLIB_ERR_NONE)         printf("P4LR2021Radio: setCodingRate %d\n", (int)st);
@@ -427,6 +435,28 @@ public:
         if (st != RADIOLIB_ERR_NONE) printf("P4LR2021Radio: setOutputPower(%u) %d\n", (unsigned)dbm, (int)st);
         clearAndResetRx();
     }
+
+    // radio.rxgain (MeshCore companion CLI). On: level 7, upstream
+    // CustomLR2021Wrapper's LR2021_RX_BOOST_LEVEL. Off: RadioLib's own
+    // per-band defaults (sub-GHz 0, 2.4 GHz 4), which is what this backend
+    // has always run with; upstream uses 0 on both bands. As upstream, the
+    // chip is put in standby first (it must be, to accept the command) and RX
+    // re-armed after. setParams() re-applies it whenever the band changes.
+    // Called on meck_task (radio_set_rx_boosted_gain). Returns false if the
+    // radio refused it.
+    bool setRxBoostedGain(bool on) {
+        _rxBoost = on;
+        if (!_initOk) return true;   // applied by setParams() at the prefs apply
+        chk("standby", _radio.standby());
+        int16_t st = _radio.setRxBoostedGainMode(rxGainLevelFor(_currentFreq));
+        if (st != RADIOLIB_ERR_NONE) printf("P4LR2021Radio: setRxBoostedGainMode %d\n", (int)st);
+        clearAndResetRx();
+        return st == RADIOLIB_ERR_NONE;
+    }
+
+    // cad (MeshCore companion CLI): the Dispatcher passes the saved setting
+    // here every noise-floor calibration tick, as upstream.
+    void setCADEnabled(bool enable) override { _cadEnabled = enable; }
 
     bool isInitialised() const { return _initOk; }
 
@@ -465,13 +495,65 @@ private:
     // int.thresh half): busy when the instantaneous RSSI is more than the
     // threshold above the noise floor. Off when the threshold is 0. Same
     // instantaneous read as sampleNoiseFloor() (does not re-arm RX).
+    //
+    // Then CAD (upstream RadioLibWrapper::isChannelActive, the cad half): a
+    // hardware channel activity scan, only reached from the Dispatcher's
+    // pre-send check. Anything but a clean "channel free" counts as busy, as
+    // upstream (result != RADIOLIB_CHANNEL_FREE).
     bool isChannelActive() {
-        if (_threshold == 0) return false;
         if (!_initOk || !_inReceiveMode) return false;
-        float inst = _radio.getRSSI(false, true);
-        if (inst == 0.0f) return false;
-        return (int)inst > _noiseFloor + _threshold;
+        if (_threshold != 0) {
+            float inst = _radio.getRSSI(false, true);
+            if (inst != 0.0f && (int)inst > _noiseFloor + _threshold) return true;
+        }
+        if (_cadEnabled) return cadBusy();
+        return false;
     }
+
+    // RX gain level for the band a frequency is on (see setRxBoostedGain).
+    uint8_t rxGainLevelFor(float freq) const {
+        if (_rxBoost) return 7;
+        return (freq > RADIOLIB_LR2021_LF_CUTOFF_FREQ) ? (uint8_t)RADIOLIB_LR2021_RX_BOOST_HF
+                                                       : (uint8_t)RADIOLIB_LR2021_RX_BOOST_LF;
+    }
+
+    // One channel activity scan. RadioLib's scanChannel() waits on the IRQ
+    // pin, which on this board is behind the XL9535 and never used as an
+    // interrupt source (see the header comment), so the scan is started with
+    // startChannelScan() and the IRQ register polled over SPI instead, with a
+    // deadline. The chip leaves CAD in standby; RX is re-armed here, as
+    // upstream re-arms straight after its scan.
+    bool cadBusy() {
+        int16_t st = _radio.startChannelScan();
+        if (st != RADIOLIB_ERR_NONE) {
+            if (!_cadErrPrinted) { chk("startChannelScan", st); _cadErrPrinted = true; }
+            clearAndResetRx();
+            return true;
+        }
+        // Deadline: 16 symbols at the current settings plus 20 ms (a scan is
+        // a few symbols long).
+        uint64_t tsym_us = (_currentBW > 0.0f && _currentSF != 0)
+                         ? (uint64_t)((float)(1UL << _currentSF) * 1000.0f / _currentBW) : 1000;
+        const uint64_t deadline = esp_timer_get_time() + tsym_us * 16 + 20000;
+        uint32_t irq = 0;
+        while (true) {
+            irq = _radio.getIrqFlags();
+            if (irq & (RADIOLIB_LR2021_IRQ_CAD_DONE | RADIOLIB_LR2021_IRQ_CAD_DETECTED)) break;
+            if (esp_timer_get_time() > deadline) {
+                if (!_cadErrPrinted) { printf("P4LR2021Radio: CAD timeout\n"); _cadErrPrinted = true; }
+                clearAndResetRx();
+                return true;
+            }
+            vTaskDelay(1);
+        }
+        const bool busy = (irq & RADIOLIB_LR2021_IRQ_CAD_DETECTED) != 0;
+        clearAndResetRx();
+        return busy;
+    }
+
+    bool     _rxBoost = false;       // radio.rxgain
+    bool     _cadEnabled = false;    // cad
+    bool     _cadErrPrinted = false; // print a CAD failure once, not every send
 
     // Consecutive startReceive() refusals since the last accepted one; also
     // gates the failure print to once per outage (recvRaw retries every loop).

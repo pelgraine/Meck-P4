@@ -3487,6 +3487,13 @@ protected:
         return _prefs ? ((int)_prefs->agc_reset_interval) * 4000 : 0;   // stored as seconds / 4
     }
 
+    // cad (MeshCore companion CLI, Settings > Experimental Features): the
+    // Dispatcher passes this to the radio every noise-floor calibration tick
+    // (2 s), as upstream. Only the LR2021 backend acts on it.
+    bool getCADEnabled() const override {
+        return _prefs ? _prefs->cad_enabled != 0 : false;
+    }
+
     // Client repeat mode (upstream MeshCore v9; the Meck Watch's version):
     // forward floods while the app has switched it on. Echoes of our own
     // channel sends are never forwarded (see P4MeshTables::isOurOutgoing).

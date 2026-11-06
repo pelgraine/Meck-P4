@@ -31,6 +31,10 @@ extern P4SX1262Radio radio_driver;
 
 void radio_set_params(float freq, float bw, uint8_t sf, uint8_t cr);
 void radio_set_tx_power(uint8_t dbm);
+// radio.rxgain: boosted RX gain on or off (LR2021 build; returns false on the
+// SX1262 build, which does not support it). Call on meck_task only; from any
+// other task use radio_request_rx_boosted_gain().
+bool radio_set_rx_boosted_gain(bool on);
 
 // SKY13453 LoRa antenna selector (XL9535 IO1 / VCTL). external=0 selects the
 // internal antenna (RF1, VCTL HIGH); external=1 selects the external port
@@ -48,6 +52,8 @@ Meck* meck_get_instance();
 // radio_apply_pending_reconfig() and applies it in its own context, avoiding
 // SPI bus contention with mesh.loop().
 extern "C" void radio_request_reconfig(float freq, float bw, uint8_t sf, uint8_t cr, uint8_t tx_power);
+// Same, for radio.rxgain: queued, applied by radio_apply_pending_reconfig().
+extern "C" void radio_request_rx_boosted_gain(bool on);
 extern "C" void radio_apply_pending_reconfig();
 
 // Deferred send-message. LVGL task calls meck_request_send_text() to queue;

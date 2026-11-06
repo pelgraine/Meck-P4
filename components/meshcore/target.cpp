@@ -183,6 +183,21 @@ void radio_set_tx_power(uint8_t dbm) {
 
 
 // ============================================================
+// radio_set_rx_boosted_gain() -- radio.rxgain (meck_task only)
+// ============================================================
+
+bool radio_set_rx_boosted_gain(bool on) {
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    printf("radio_set_rx_boosted_gain() -- %s\n", on ? "on" : "off");
+    return radio_driver.setRxBoostedGain(on);
+#else
+    (void)on;
+    return false;
+#endif
+}
+
+
+// ============================================================
 // Radio limits (declared in meck.h)
 // ============================================================
 
@@ -201,6 +216,14 @@ float meck_radio_max_bw_khz(void) {
     return 1000.0f;   // RadioLib LR2021::setBandwidth: widest LoRa step
 #else
     return 500.0f;    // SX1262
+#endif
+}
+
+bool meck_radio_has_cad_rxgain(void) {
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    return true;
+#else
+    return false;
 #endif
 }
 
@@ -245,6 +268,7 @@ static volatile float   g_pending_bw             = 0;
 static volatile uint8_t g_pending_sf             = 0;
 static volatile uint8_t g_pending_cr             = 0;
 static volatile uint8_t g_pending_tx_power       = 0;
+static volatile int8_t  g_pending_rx_boost       = -1;   // -1 none, 0 off, 1 on
 
 extern "C" void radio_request_reconfig(float freq, float bw, uint8_t sf, uint8_t cr, uint8_t tx_power) {
     g_pending_freq     = freq;
@@ -257,7 +281,17 @@ extern "C" void radio_request_reconfig(float freq, float bw, uint8_t sf, uint8_t
            freq, bw, (int)sf, (int)cr, (int)tx_power);
 }
 
+extern "C" void radio_request_rx_boosted_gain(bool on) {
+    g_pending_rx_boost = on ? 1 : 0;
+    printf("radio_request_rx_boosted_gain: queued %s\n", on ? "on" : "off");
+}
+
 extern "C" void radio_apply_pending_reconfig() {
+    if (g_pending_rx_boost >= 0) {
+        bool on = (g_pending_rx_boost == 1);
+        g_pending_rx_boost = -1;
+        radio_set_rx_boosted_gain(on);
+    }
     if (!g_radio_reconfig_pending) return;
     g_radio_reconfig_pending = false;
 

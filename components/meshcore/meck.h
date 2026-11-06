@@ -61,6 +61,11 @@ float  meck_radio_max_bw_khz(void);
 // checks, as before).
 bool meck_radio_bw_allowed(float bw_khz, float* bw_out);
 
+// True when this build's radio supports radio.rxgain and cad (the LR2021
+// build, through RadioLib). False on the SX1262 build: LilyGo's driver has no
+// call for either.
+bool meck_radio_has_cad_rxgain(void);
+
 // Initialize the Meck mesh stack. Must be called AFTER meck_radio_attach().
 // Initializes NVS, loads or generates the node identity (persisted to SD),
 // loads or creates default channels, loads stored contacts.

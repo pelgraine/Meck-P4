@@ -233,6 +233,13 @@ struct P4NodePrefs {
     float   direct_tx_delay_factor;  // direct.txdelay: direct retransmit delay factor, default 0.2
     uint8_t client_repeat;           // client repeat mode: 0 = off, 1 = forward floods
 
+    // radio.rxgain and cad (Settings > Experimental Features, the Companion
+    // CLI and the app's Command Line). LR2021 builds only. Appended for NVS
+    // compatibility: older blobs short-read them as zero, which is off, the
+    // behaviour before they existed.
+    uint8_t rx_boosted_gain;         // radio.rxgain: 0 = off, 1 = boosted RX gain
+    uint8_t cad_enabled;             // cad: 0 = off, 1 = channel activity detection before transmit
+
     void applyRadioCliDefaults() {
         if (radio_cli_init == 1) return;
         interference_threshold = 0;
@@ -290,6 +297,8 @@ struct P4NodePrefs {
         clock_slot_b = 0;       // Zone 2 UTC+0
         radio_cli_init = 0;
         applyRadioCliDefaults();
+        rx_boosted_gain = 0;    // off
+        cad_enabled = 0;        // off
     }
 };
 

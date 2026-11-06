@@ -13,9 +13,13 @@
  * change goes through radio_request_reconfig(), which meck_task applies.
  *
  * P4 differences from upstream:
- *   - radio.rxgain and cad are not handled yet (they answer "Unknown
- *     command"): on the SX1262 board, LilyGo's cpp_bus_driver has no call
- *     for RX boosted gain or for starting a CAD scan.
+ *   - radio.rxgain and cad work on the LR2021 build only. On the SX1262
+ *     build, LilyGo's cpp_bus_driver has no call for RX boosted gain or for
+ *     starting a CAD scan, so their set commands answer "Error: unsupported"
+ *     and change nothing, and get answers "> off". On the LR2021, "off" for
+ *     radio.rxgain keeps RadioLib's own per-band gain levels (see
+ *     P4LR2021Radio::setRxBoostedGain), and the gain change is queued through
+ *     radio_request_rx_boosted_gain(), which meck_task applies.
  *   - poweroff / shutdown answer "Error: unsupported" (no software power-off
  *     on P4), as the Meck Watch does on boards without one.
  *   - set tx takes 0..22: P4 stores TX power unsigned and its radio code caps
@@ -153,6 +157,40 @@ bool meck_cli_handle(const char* command, char* reply) {
     if (strncmp(command, "set int.thresh ", 15) == 0) {
         p->interference_threshold = atoi(&command[15]);
         meck_cli_save_prefs();
+        strcpy(reply, "OK");
+        return true;
+    }
+
+    // cad and radio.rxgain: upstream CommonRadioPrefs::handleCommand,
+    // LR2021 build only (meck_radio_has_cad_rxgain).
+    if (strcmp(command, "get cad") == 0) {
+        sprintf(reply, "> %s", p->cad_enabled ? "on" : "off");
+        return true;
+    }
+    if (strncmp(command, "set cad ", 8) == 0) {
+        if (!meck_radio_has_cad_rxgain()) {
+            strcpy(reply, "Error: unsupported");
+            return true;
+        }
+        p->cad_enabled = (strncmp(&command[8], "on", 2) == 0) ? 1 : 0;
+        meck_cli_save_prefs();
+        strcpy(reply, "OK");
+        return true;
+    }
+
+    if (strcmp(command, "get radio.rxgain") == 0) {
+        sprintf(reply, "> %s", p->rx_boosted_gain != 0 ? "on" : "off");
+        return true;
+    }
+    if (strncmp(command, "set radio.rxgain ", 17) == 0) {
+        bool enabled = strncmp(&command[17], "on", 2) == 0;
+        if (!meck_radio_has_cad_rxgain()) {
+            strcpy(reply, "Error: unsupported");
+            return true;
+        }
+        p->rx_boosted_gain = enabled ? 1 : 0;
+        meck_cli_save_prefs();
+        radio_request_rx_boosted_gain(enabled);
         strcpy(reply, "OK");
         return true;
     }
