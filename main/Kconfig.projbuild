@@ -127,6 +127,18 @@ menu "Example Configuration"
             bool "Semtech LR2021 (T-Display P4 LR2021 variant)"
     endchoice
 
+    config MECK_C6_ESP_HOSTED_TEST
+        bool "Meck: ESP-Hosted C6 test build"
+        default n
+        help
+            Test build for a board whose C6 has been flashed with the ESP-Hosted
+            2.0.17 firmware. The C6 is started through ESP-Hosted instead of
+            LilyGo's AT driver, the boot log prints the firmware version the C6
+            reports, and the SD card is checked with a small write and read-back
+            once the C6 link is up. Boot log lines start with "C6 test:".
+            WiFi Companion, the Web Reader and the BLE keyboard are off in this
+            build, because they send AT commands to the C6.
+
     choice BOARD_TYPE
         prompt "Board type"
         default BOARD_TYPE_T_DISPLAY_P4

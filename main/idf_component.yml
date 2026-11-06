@@ -13,6 +13,9 @@ dependencies:
 
   espressif/esp_hosted:
     version: 2.0.17
+    # Meck-P4: local copy of ESP-Hosted 2.0.17 with its task stacks moved
+    # to PSRAM (the only change, in host/port/esp/freertos/src/os_wrapper.c)
+    override_path: "../overrides/esp_hosted"
 
   espressif/esp_wifi_remote:
     version: ^1.1
