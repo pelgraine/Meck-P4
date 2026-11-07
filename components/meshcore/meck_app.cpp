@@ -894,6 +894,9 @@ static void meck_task(void* arg) {
         // Voice and picture transfer disabled for v0.3.8
         // meck_apply_pending_voice_send();
         // meck_apply_pending_picture_send();
+        // USB drive mode: hand the SD card to the computer or take it back.
+        // Runs here, between meck_task's own SD saves (MeckUsbDrive.cpp).
+        meck_usb_drive_service();
         meck_apply_pending_save();
         if (g_the_mesh) g_the_mesh->applyPendingAdvertSaves();   // adverts kept for Share Contact (16)
 #if MECK_BLE_ENABLED
@@ -1585,6 +1588,10 @@ extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
 extern "C" void meck_apply_pending_save() {
     if (g_save_tail == g_save_head) return;  // queue empty
     if (!g_the_mesh) return;
+    // USB drive mode: the SD card is with the computer. Leave the saves
+    // queued (up to MECK_SAVE_QUEUE_SIZE - 1, oldest dropped beyond that as
+    // usual) and write them once the card is back.
+    if (meck_usb_drive_card_away()) return;
     P4DataStore* store = g_the_mesh->getDataStore();
     if (!store) return;
 

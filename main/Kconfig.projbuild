@@ -158,6 +158,17 @@ menu "Example Configuration"
             - the watch's favourites list and contact-name lookup commands.
             Only for the ESP-Hosted C6 test build with NimBLE switched on.
 
+    config MECK_USB_DRIVE
+        bool
+        default y
+        select TINYUSB_MSC_ENABLED
+        help
+            Always on, not shown in menuconfig. Switches on the USB mass
+            storage support that Settings > Experimental Features > USB drive
+            mode needs (the SD card shown to a computer on the middle USB-C
+            port), so every build has it without a menuconfig step. USB stays
+            off until that row is switched on.
+
     choice BOARD_TYPE
         prompt "Board type"
         default BOARD_TYPE_T_DISPLAY_P4

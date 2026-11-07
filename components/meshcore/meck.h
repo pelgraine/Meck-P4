@@ -51,7 +51,7 @@
 // Firmware identity -- single source of truth for UI and companion protocol.
 // Update MECK_FIRMWARE_VERSION here before each release.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.9"
+#define MECK_FIRMWARE_VERSION "0.9.1"
 
 #ifdef __cplusplus
 extern "C" {
@@ -192,6 +192,30 @@ uint16_t meck_battery_get_pct(void);
 // when done to save ~5-10mA. Safe to call multiple times.
 void meck_audio_codec_wake(void);
 void meck_audio_codec_sleep(void);
+
+// USB drive mode (Settings > Experimental Features > USB drive mode): the SD
+// card is shown to a computer as a drive on the middle (high-speed) USB-C
+// port. Meck never uses the card while it is with the computer. The UI asks
+// with meck_usb_drive_request(); the card itself changes hands on meck_task
+// (meck_usb_drive_service). Implementation in MeckUsbDrive.cpp, which uses
+// main.cpp's SD card handle (g_meck_sd_card) and LVGL lock.
+typedef enum {
+    MECK_USB_DRIVE_OFF = 0,   // the card is with Meck (or there is no card)
+    MECK_USB_DRIVE_STARTING,  // switch-on asked for, meck_task is handing the card over
+    MECK_USB_DRIVE_ON,        // the card is on USB; Meck does not touch it
+    MECK_USB_DRIVE_STOPPING,  // switch-off asked for, meck_task is taking the card back
+    MECK_USB_DRIVE_ERROR,     // the last switch-on or switch-off failed (meck_usb_drive_error_text)
+} meck_usb_drive_state_t;
+
+bool meck_usb_drive_available(void);           // this build and board can do it, and there is a card to hand over
+void meck_usb_drive_request(bool on);          // UI task: switch on (from OFF/ERROR) or off (from ON)
+meck_usb_drive_state_t meck_usb_drive_state(void);
+bool meck_usb_drive_host_connected(void);      // a computer has set up the drive
+bool meck_usb_drive_host_ejected(void);        // the computer has ejected it (or the cable came out)
+const char* meck_usb_drive_error_text(void);   // why the last attempt failed (ERROR state)
+void meck_usb_drive_clear_error(void);         // UI task: ERROR back to OFF once shown
+bool meck_usb_drive_card_away(void);           // STARTING, ON or STOPPING: hold SD saves
+void meck_usb_drive_service(void);             // meck_task only
 
 // Companion push notifications -- called from MeckMesh callbacks to
 // notify the companion app (both BLE and WiFi) of incoming messages,

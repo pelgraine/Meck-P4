@@ -3488,6 +3488,11 @@ extern "C" void meck_audio_codec_sleep(void)
     }
 }
 
+// Meck: the SD card mounted by Sdmmc_Init(), kept for USB drive mode
+// (MeckUsbDrive.cpp), which hands this same card to a computer and back.
+// NULL when the card did not mount at boot.
+sdmmc_card_t *g_meck_sd_card = NULL;
+
 bool Sdmmc_Init(const char *base_path)
 {
     esp_vfs_fat_sdmmc_mount_config_t mount_config =
@@ -3546,6 +3551,8 @@ bool Sdmmc_Init(const char *base_path)
 
     // Card has been initialized, print its properties
     sdmmc_card_print_info(stdout, card);
+
+    g_meck_sd_card = card;   // Meck: for USB drive mode
 
     return true;
 }
@@ -5891,10 +5898,12 @@ extern "C" void app_main(void)
 #endif
     // ---- end Meck DFS ----
 
-#if CONFIG_ENABLE_USB_DISPLAY == true
-#else
-    Hardware_Usb_Cdc_Init();
-#endif
+    // Meck: LilyGo's USB serial echo demo (Hardware_Usb_Cdc_Init and
+    // hardware_usb_cdc_task) is no longer started. It took the middle USB-C
+    // port at boot as a serial device that only echoed back what was typed,
+    // and the USB driver's device type cannot be changed once started. That
+    // port now stays off until Settings > Experimental Features > USB drive
+    // mode starts it as a drive (MeckUsbDrive.cpp).
 
     XL9535->begin();
 
@@ -6523,10 +6532,8 @@ extern "C" void app_main(void)
     lv_screen_load(meck_splash);
     _lock_release(&lvgl_api_lock);
 
-#if CONFIG_ENABLE_USB_DISPLAY == true
-#else
-    xTaskCreate(hardware_usb_cdc_task, "hardware_usb_cdc_task", 4 * 1024, NULL, 3, NULL);
-#endif
+    // Meck: hardware_usb_cdc_task not started (see the note at the former
+    // Hardware_Usb_Cdc_Init() call; it waits on that init's queue).
     xTaskCreate(device_vibration_task, "device_vibration_task", 4 * 1024, NULL, 2, &Vibration_Task_Handle);
     // The speaker / microphone / IIS-transmission tasks below all reference
     // the ES8311 codec, which is no longer initialised at boot (MeckAudio

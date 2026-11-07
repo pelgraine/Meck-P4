@@ -3,7 +3,12 @@ dependencies:
     version: 9.3.0
 
   espressif/esp_tinyusb:
-    version: ^1
+    version: 1.7.6~1
+    # Meck-P4: local copy of esp_tinyusb 1.7.6~1 (espressif/esp-usb release
+    # commit 402c2cd, test folders left out) that never formats the SD card
+    # when USB drive mode hands it back (the only change, _mount() in
+    # tusb_msc_storage.c)
+    override_path: "../overrides/esp_tinyusb"
 
   # esp_video:
   #   version: "0.9.*"

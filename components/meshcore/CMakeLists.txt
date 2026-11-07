@@ -52,6 +52,7 @@ idf_component_register(
         "MeckNotes.cpp"
         "MeckNotesUI.cpp"
         "MeckGBC.cpp"
+        "MeckUsbDrive.cpp"
         "minigb_apu.c"
         "es8311.cpp" 
         "meck_montserrat_14.c"
@@ -103,6 +104,9 @@ idf_component_register(
         espressif__cjson
         codec2
         espressif__zlib
+        esp_tinyusb   # USB drive mode (MeckUsbDrive.cpp). The local copy in overrides/esp_tinyusb
+                      # builds under its folder name; the component manager maps it to and from
+                      # espressif__esp_tinyusb (_choose_component in idf-component-manager)
 )
 
 # BLE companion over ESP-Hosted (SerialNimBLEInterface.cpp): NimBLE's headers

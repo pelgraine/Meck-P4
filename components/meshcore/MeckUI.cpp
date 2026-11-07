@@ -1022,6 +1022,18 @@ static lv_obj_t *lbl_purge_restart = NULL;   // large restart notice above the b
 static lv_obj_t *btn_purge_yes     = NULL;
 static lv_obj_t *btn_purge_no      = NULL;
 static bool      g_purge_busy      = false;   // set from Yes until the restart
+// Settings > Experimental Features > USB drive mode: the row's value label and
+// the full-screen card shown while the SD card is with the computer (or after
+// a failed attempt). Same card pattern as the purge prompt, keyboard-modal.
+static lv_obj_t   *lbl_exp_usb        = NULL;
+static lv_obj_t   *obj_usb_panel      = NULL;
+static lv_obj_t   *obj_usb_card       = NULL;
+static lv_obj_t   *lbl_usb_body       = NULL;
+static lv_obj_t   *lbl_usb_status     = NULL;
+static lv_obj_t   *btn_usb_action     = NULL;
+static lv_obj_t   *lbl_usb_action     = NULL;
+static lv_timer_t *g_usb_timer        = NULL;   // refreshes the row and card, created once
+static uint32_t    g_usb_off_armed_ms = 0;      // lv_tick when "Switch off anyway" was armed, 0 = not armed
 // Settings > Experimental Features > Companion CLI: the companion's own
 // command line (MeshCore v1.18 companion command set, MeckCli.cpp). Same
 // layout as the repeater admin Cmd Line screen: scrollback of command/reply
@@ -10521,6 +10533,214 @@ static void create_purge_prompt() {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Settings > Experimental Features > USB drive mode
+// ----------------------------------------------------------------------------
+// The row asks for the SD card to be shown to a computer as a drive on the
+// middle USB-C port (MeckUsbDrive.cpp does the work, on meck_task). While
+// the card is away, a full-screen card covers this screen, so nothing else
+// can be opened that would look for files, and stays until the mode is
+// switched off. Switching off while the computer still has the drive (not
+// ejected) needs a second tap within USB_OFF_ARM_MS.
+#define USB_OFF_ARM_MS 8000
+
+static void set_label_if_changed(lv_obj_t *lbl, const char *text) {
+    if (!lbl) return;
+    const char *cur = lv_label_get_text(lbl);
+    if (cur && strcmp(cur, text) == 0) return;
+    lv_label_set_text(lbl, text);
+}
+
+static void usb_prompt_refresh() {
+    const meck_usb_drive_state_t st = meck_usb_drive_state();
+
+    if (lbl_exp_usb) {
+        set_label_if_changed(lbl_exp_usb,
+            (st == MECK_USB_DRIVE_ON)       ? "On" :
+            (st == MECK_USB_DRIVE_STARTING) ? "Starting" :
+            (st == MECK_USB_DRIVE_STOPPING) ? "Switching off" : "Off");
+    }
+    if (!obj_usb_panel) return;
+
+    if (st == MECK_USB_DRIVE_OFF) {
+        g_usb_off_armed_ms = 0;
+        if (!lv_obj_has_flag(obj_usb_panel, LV_OBJ_FLAG_HIDDEN)) {
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+            meck_row_ring_clear_if_on(obj_usb_card);
+#endif
+            lv_obj_add_flag(obj_usb_panel, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+    if (lv_obj_has_flag(obj_usb_panel, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_clear_flag(obj_usb_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(obj_usb_panel);
+    }
+
+    if (g_usb_off_armed_ms != 0 && lv_tick_elaps(g_usb_off_armed_ms) > USB_OFF_ARM_MS) {
+        g_usb_off_armed_ms = 0;
+    }
+
+    const char *body =
+        "Your computer can now open the SD card as a drive. While this is on, "
+        "Meck cannot use the card: the audio player, reader, notes, maps and "
+        "games will not find their files, and new channel messages wait to be "
+        "saved.\n\nWhen you have finished, eject the drive on your computer "
+        "first, then tap Switch off.";
+    const char *status = "";
+    const char *action = NULL;   // NULL hides the button
+
+    switch (st) {
+        case MECK_USB_DRIVE_STARTING:
+            status = "Starting...";
+            break;
+        case MECK_USB_DRIVE_ON:
+            action = "Switch off";
+            if (g_usb_off_armed_ms != 0) {
+                status = "Your computer still has the drive. Eject it there first "
+                         "so no files are damaged, or tap Switch off anyway.";
+                action = "Switch off anyway";
+            } else if (meck_usb_drive_host_ejected()) {
+                status = "Your computer has let go of the drive. "
+                         "Tap Switch off to give the card back to Meck.";
+            } else if (meck_usb_drive_host_connected()) {
+                status = "Connected. Your computer is using the SD card.";
+            } else {
+                status = "Waiting for a computer. Connect the middle USB-C port "
+                         "to your computer with a data cable.";
+            }
+            break;
+        case MECK_USB_DRIVE_STOPPING:
+            status = "Giving the card back to Meck...";
+            break;
+        case MECK_USB_DRIVE_ERROR:
+        default:
+            body = meck_usb_drive_error_text();
+            action = "Close";
+            break;
+    }
+
+    set_label_if_changed(lbl_usb_body, body);
+    set_label_if_changed(lbl_usb_status, status);
+    if (action) {
+        set_label_if_changed(lbl_usb_action, action);
+        if (btn_usb_action && lv_obj_has_flag(btn_usb_action, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_clear_flag(btn_usb_action, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else if (btn_usb_action && !lv_obj_has_flag(btn_usb_action, LV_OBJ_FLAG_HIDDEN)) {
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+        meck_row_ring_clear_if_on(obj_usb_card);
+#endif
+        lv_obj_add_flag(btn_usb_action, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void usb_timer_cb(lv_timer_t *t) {
+    (void)t;
+    if (lv_screen_active() != scr_settings_experimental) return;
+    usb_prompt_refresh();
+}
+
+// The card's one button: Switch off / Switch off anyway / Close.
+static void on_usb_action(lv_event_t *e) {
+    (void)e;
+    const meck_usb_drive_state_t st = meck_usb_drive_state();
+    if (st == MECK_USB_DRIVE_ERROR) {
+        meck_usb_drive_clear_error();
+        usb_prompt_refresh();
+        return;
+    }
+    if (st != MECK_USB_DRIVE_ON) return;
+    const bool computer_has_it = meck_usb_drive_host_connected() &&
+                                 !meck_usb_drive_host_ejected();
+    if (computer_has_it && g_usb_off_armed_ms == 0) {
+        g_usb_off_armed_ms = lv_tick_get();
+        if (g_usb_off_armed_ms == 0) g_usb_off_armed_ms = 1;
+        usb_prompt_refresh();
+        return;
+    }
+    g_usb_off_armed_ms = 0;
+    meck_usb_drive_request(false);
+    usb_prompt_refresh();
+}
+
+// The row on the Experimental Features screen.
+static void on_experimental_usb_tap(lv_event_t *e) {
+    (void)e;
+    if (meck_usb_drive_state() == MECK_USB_DRIVE_OFF) {
+        g_usb_off_armed_ms = 0;
+        meck_usb_drive_request(true);
+    }
+    usb_prompt_refresh();
+}
+
+// Built by create_settings_experimental_screen (so it is rebuilt with the
+// screen on an orientation change). Same card style as the purge prompt.
+static void create_usb_prompt() {
+    obj_usb_panel = lv_obj_create(scr_settings_experimental);
+    lv_obj_set_size(obj_usb_panel, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_pos(obj_usb_panel, 0, 0);
+    lv_obj_set_style_bg_color(obj_usb_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(obj_usb_panel, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(obj_usb_panel, 0, 0);
+    lv_obj_add_flag(obj_usb_panel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(obj_usb_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj_usb_panel, LV_SCROLLBAR_MODE_OFF);
+
+    const int card_w = SCREEN_WIDTH - 60;
+    const int inner  = card_w - 32;
+    obj_usb_card = lv_obj_create(obj_usb_panel);
+    lv_obj_set_size(obj_usb_card, card_w, 520);
+    lv_obj_center(obj_usb_card);
+    lv_obj_set_style_bg_color(obj_usb_card, lv_color_make(25, 25, 35), 0);
+    lv_obj_set_style_radius(obj_usb_card, 12, 0);
+    lv_obj_set_style_border_width(obj_usb_card, 1, 0);
+    lv_obj_set_style_border_color(obj_usb_card, lv_palette_main(LV_PALETTE_CYAN), 0);
+    lv_obj_set_style_pad_all(obj_usb_card, 16, 0);
+    lv_obj_clear_flag(obj_usb_card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(obj_usb_card);
+    lv_label_set_text(title, "USB drive mode");
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_CYAN), 0);
+    meck_set_font(title, &meck_montserrat_22, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    lbl_usb_body = lv_label_create(obj_usb_card);
+    lv_label_set_text(lbl_usb_body, "");
+    lv_obj_set_style_text_color(lbl_usb_body, lv_color_white(), 0);
+    meck_set_font(lbl_usb_body, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_usb_body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_usb_body, inner);
+    lv_obj_align(lbl_usb_body, LV_ALIGN_TOP_LEFT, 0, 44);
+
+    // Status: orange, anchored above the button so it stays put whatever
+    // the body wraps to (as the purge prompt's restart notice).
+    lbl_usb_status = lv_label_create(obj_usb_card);
+    lv_label_set_text(lbl_usb_status, "");
+    lv_obj_set_style_text_color(lbl_usb_status, lv_palette_main(LV_PALETTE_ORANGE), 0);
+    meck_set_font(lbl_usb_status, &meck_montserrat_18, 0);
+    lv_label_set_long_mode(lbl_usb_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl_usb_status, inner);
+    lv_obj_set_style_text_align(lbl_usb_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lbl_usb_status, LV_ALIGN_BOTTOM_MID, 0, -75);
+
+    btn_usb_action = lv_button_create(obj_usb_card);
+    lv_obj_set_size(btn_usb_action, inner, 55);
+    lv_obj_align(btn_usb_action, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(btn_usb_action, lv_color_make(60, 60, 70), 0);
+    lv_obj_set_style_radius(btn_usb_action, 8, 0);
+    lbl_usb_action = lv_label_create(btn_usb_action);
+    lv_label_set_text(lbl_usb_action, "Switch off");
+    lv_obj_set_style_text_color(lbl_usb_action, lv_color_white(), 0);
+    meck_set_font(lbl_usb_action, &meck_montserrat_18, 0);
+    lv_obj_center(lbl_usb_action);
+    lv_obj_add_event_cb(btn_usb_action, on_usb_action, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(btn_usb_action, LV_OBJ_FLAG_HIDDEN);
+
+    if (!g_usb_timer) g_usb_timer = lv_timer_create(usb_timer_cb, 500, NULL);
+    usb_prompt_refresh();
+}
+
 static void create_settings_experimental_screen() {
     scr_settings_experimental = lv_obj_create(NULL);
     lock_screen_scroll(scr_settings_experimental);
@@ -10589,7 +10809,14 @@ static void create_settings_experimental_screen() {
     experimental_update_labels();
 #endif
 
+    // SD card as a drive on a computer, middle USB-C port (MeckUsbDrive.cpp)
+    create_settings_row(scroll, "USB drive mode (middle USB-C port)",
+        &lbl_exp_usb, on_experimental_usb_tap, y);
+    if (lbl_exp_usb) lv_label_set_text(lbl_exp_usb, "Off");
+    y += 65;
+
     create_purge_prompt();
+    create_usb_prompt();
 }
 
 // ============================================================================
@@ -21609,6 +21836,24 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
                 case LV_KEY_ESC:   on_purge_no(NULL);                      break;
                 default:           break;
             }
+        }
+        return;
+    }
+
+    // USB drive mode card on the Experimental Features screen: modal to the
+    // keyboard while it shows (Up/Down ring its button, Enter presses it).
+    // Esc closes it only after a failed attempt; otherwise the card stays
+    // until the mode is switched off.
+    if ((lv_screen_active() == scr_settings_experimental) && obj_usb_panel &&
+        !lv_obj_has_flag(obj_usb_panel, LV_OBJ_FLAG_HIDDEN)) {
+        switch (key) {
+            case LV_KEY_UP:    meck_row_ring_step(obj_usb_card, -1); break;
+            case LV_KEY_DOWN:  meck_row_ring_step(obj_usb_card, +1); break;
+            case LV_KEY_ENTER: meck_row_ring_enter();                break;
+            case LV_KEY_ESC:
+                if (meck_usb_drive_state() == MECK_USB_DRIVE_ERROR) on_usb_action(NULL);
+                break;
+            default:           break;
         }
         return;
     }
