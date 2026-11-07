@@ -139,6 +139,26 @@ menu "Example Configuration"
             WiFi Companion, the Web Reader and the BLE keyboard are off in this
             build, because they send AT commands to the C6.
 
+    config MECK_BLE_GARMIN
+        bool "Meck: Garmin watch support (BLE companion without a PIN)"
+        depends on MECK_C6_ESP_HOSTED_TEST && BT_NIMBLE_ENABLED
+        default n
+        help
+            Lets a Garmin watch running the Meck Connect IQ app use the BLE
+            companion, as the BLE_GARMIN builds on the garmin branch of
+            MeshCore and Meck's meck_max_ble_garmin build do:
+            - pairing without a PIN (an encrypted link with no passkey).
+              Phones also pair without a PIN while this is on.
+            - frames go as tagged 20-byte slices to and from a peer that keeps
+              the smallest Bluetooth packet size, as the watch does.
+            - the P4 also advertises as a heart-rate sensor, so the watch's
+              Sensors & Accessories menu can pair with it. No heart-rate data
+              is ever sent.
+            - a relaxed connection interval for the watch, the fast one for
+              phones.
+            - the watch's favourites list and contact-name lookup commands.
+            Only for the ESP-Hosted C6 test build with NimBLE switched on.
+
     choice BOARD_TYPE
         prompt "Board type"
         default BOARD_TYPE_T_DISPLAY_P4

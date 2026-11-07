@@ -3131,6 +3131,37 @@ static int dm_total_unread() {
     return total;
 }
 
+#if MECK_BLE_ENABLED
+// Marking DMs read once the BLE app has them. meck_task (meck_app.cpp,
+// meck_ble_app_synced) posts the DM sequence count at the moment the app
+// finished collecting every waiting message, stored here plus one so that
+// 0 means "no request". The UI task applies it after draining the pending
+// DMs: only when the rings hold exactly the DMs up to that count, so a DM
+// that arrived after the app's sync is never marked read early. If a newer
+// DM is already in, the request waits for the app's next sync (the app is
+// told about that DM and syncs again).
+static volatile uint32_t g_dm_read_req = 0;
+
+extern "C" void meck_ui_mark_dms_read_upto(uint32_t dm_seq) {
+    g_dm_read_req = dm_seq + 1;
+}
+
+static void meck_apply_dm_read_request(Meck* mesh) {
+    uint32_t req = g_dm_read_req;
+    if (req == 0 || !mesh) return;
+    if (mesh->getDMSeqOut() != req - 1) return;   // rings not at the app's sync point
+    int was_unread = dm_total_unread();
+    for (int c = 0; c < MAX_CONTACTS; c++) {
+        dm_ring_clear_unread(c);
+    }
+    // Clear the request unless meck_task has posted a newer one meanwhile.
+    __sync_bool_compare_and_swap(&g_dm_read_req, req, 0);
+    if (was_unread > 0) {
+        printf("BLE companion: app has every message, %d DM(s) marked read\n", was_unread);
+    }
+}
+#endif
+
 // Timestamp of the newest message in a contact's ring. 0 if no ring or
 // the ring is empty. Used to sort the DM inbox by most-recent-first.
 static uint32_t dm_ring_newest_timestamp(int contact_idx) {
@@ -15528,6 +15559,10 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // touch LVGL state. See meck_register_dm_recv_callback below for the
     // dispatch function.
     meck_drain_pending_dms();
+#if MECK_BLE_ENABLED
+    // DMs the BLE app has already collected: mark them read on the P4.
+    meck_apply_dm_read_request(mesh);
+#endif
     // Same pattern for send completions — the mesh task records the
     // expected_ack after a successful transmit, the UI thread picks it
     // up here and writes it onto the matching outgoing bubble.

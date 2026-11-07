@@ -133,6 +133,16 @@ static bool isValidClientRepeatFreq(uint32_t f) {
 #define CMD_SEND_ANON_REQ             57   // v13+, requests to nodes that aren't contacts
 #define PUSH_CODE_CONTROL_DATA        0x8E // v8+, received control packet
 
+#if MECK_BLE_GARMIN
+// ---- Garmin watch app (Meck-Garmin): favourites list and contact-name
+// lookup. Same codes and layouts as the garmin branch of MeshCore
+// (BLE_GARMIN) and Meck's MECK_WATCH_EXT, so the watch uses one code path.
+#define CMD_WATCH_GET_FAV             0x76  // [n] -> RESP_CODE_WATCH_FAV (n-th favourite contact)
+#define CMD_WATCH_RESOLVE             0x77  // [plen][pubkey prefix] -> RESP_CODE_WATCH_RESOLVE
+#define RESP_CODE_WATCH_FAV           0x66  // [n][count] then, if n < count: [type][last_advert:4][pubkey:32][name]
+#define RESP_CODE_WATCH_RESOLVE       0x67  // [plen][prefix][name] (no name = not found)
+#endif
+
 // ---- Repeater admin commands (over-the-mesh login + status + session) ----
 #define CMD_SEND_LOGIN                26
 #define CMD_SEND_STATUS_REQ           27
@@ -345,6 +355,10 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         } else {
             _out[0] = RESP_CODE_NO_MORE_MESSAGES;
             _serial->writeFrame(_out, 1);
+#if MECK_BLE_ENABLED
+            // The app now has every message that was waiting for it.
+            if (_on_app_synced && _serial->isConnected()) _on_app_synced();
+#endif
         }
         return;
     }
@@ -363,6 +377,9 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         uint32_t secs;
         memcpy(&secs, &_cmd[1], 4);
         uint32_t curr = _mesh->getRTCClock()->getCurrentTime();
+        printf("Companion: app sent its time %lu, P4 clock %lu: %s\n",
+               (unsigned long)secs, (unsigned long)curr,
+               secs >= curr ? "taken" : "refused (earlier than the P4 clock)");
         if (secs >= curr) {
             _mesh->getRTCClock()->setCurrentTime(secs);
             writeOKFrame();
@@ -1080,6 +1097,64 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         _serial->writeFrame(_out, 1 + rlen);
         return;
     }
+
+#if MECK_BLE_GARMIN
+    // ---- CMD_WATCH_GET_FAV (0x76) ---- the n-th contact with the favourite
+    // bit (flags bit 0, upstream's isFav()), in contact order, with the
+    // number of favourites. Walks the contacts with the standard iterator, as
+    // CMD_GET_CONTACTS does, without touching that command's own iterator.
+    if (cmd == CMD_WATCH_GET_FAV && len >= 2) {
+        uint8_t n = _cmd[1];
+        int count = 0;
+        bool found = false;
+        ContactInfo hit;
+        ContactInfo c;
+        ContactsIterator it = _mesh->startContactsIterator();
+        while (it.hasNext(_mesh, c)) {
+            if (c.flags & 0x01) {
+                if (count == n) { hit = c; found = true; }
+                count++;
+            }
+        }
+        if (count > 255) count = 255;
+        int i = 0;
+        _out[i++] = RESP_CODE_WATCH_FAV;
+        _out[i++] = n;
+        _out[i++] = (uint8_t)count;
+        if (found) {
+            _out[i++] = hit.type;
+            memcpy(&_out[i], &hit.last_advert_timestamp, 4); i += 4;
+            memcpy(&_out[i], hit.id.pub_key, PUB_KEY_SIZE); i += PUB_KEY_SIZE;
+            int tlen = (int)strnlen(hit.name, sizeof(hit.name));
+            if (i + tlen > MAX_FRAME_SIZE) tlen = MAX_FRAME_SIZE - i;
+            memcpy(&_out[i], hit.name, tlen); i += tlen;
+        }
+        _serial->writeFrame(_out, i);
+        return;
+    }
+
+    // ---- CMD_WATCH_RESOLVE (0x77) ---- contact name for a public-key
+    // prefix (the watch's neighbour and discover lists show names).
+    if (cmd == CMD_WATCH_RESOLVE && len >= 3) {
+        uint8_t plen = _cmd[1];
+        if (plen < 1 || plen > PUB_KEY_SIZE || len < (size_t)(2 + plen)) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        } else {
+            ContactInfo* found = _mesh->lookupContactByPubKey(&_cmd[2], plen);
+            int i = 0;
+            _out[i++] = RESP_CODE_WATCH_RESOLVE;
+            _out[i++] = plen;
+            memcpy(&_out[i], &_cmd[2], plen); i += plen;
+            if (found != NULL && found->name[0] != '\0') {
+                int tlen = (int)strnlen(found->name, sizeof(found->name));
+                if (i + tlen > MAX_FRAME_SIZE) tlen = MAX_FRAME_SIZE - i;
+                memcpy(&_out[i], found->name, tlen); i += tlen;
+            }
+            _serial->writeFrame(_out, i);
+        }
+        return;
+    }
+#endif
 
     // ---- Unhandled command ----
     printf("Companion: unhandled cmd 0x%02X len=%d\n", cmd, (int)len);

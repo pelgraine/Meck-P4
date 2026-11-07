@@ -40,10 +40,18 @@
 #endif
 #endif
 
+// Garmin watch support for the BLE companion (menuconfig: Example
+// Configuration -> Meck: Garmin watch support). Only with MECK_BLE_ENABLED.
+#if MECK_BLE_ENABLED && defined(CONFIG_MECK_BLE_GARMIN)
+#define MECK_BLE_GARMIN 1
+#else
+#define MECK_BLE_GARMIN 0
+#endif
+
 // Firmware identity -- single source of truth for UI and companion protocol.
 // Update MECK_FIRMWARE_VERSION here before each release.
 #define MECK_FIRMWARE_NAME    "Meck P4"
-#define MECK_FIRMWARE_VERSION "0.9"
+#define MECK_FIRMWARE_VERSION "0.8.1"
 
 #ifdef __cplusplus
 extern "C" {
@@ -133,6 +141,10 @@ bool meck_ble_is_enabled(void);
 // boot if BLE Companion is on in Settings, or later from Settings), so
 // Meck's own start-up memory use is unchanged.
 void meck_ble_boot_start(bool c6_link_up);
+
+// Mark DMs read on the P4 once the BLE app has them (MeckUI.cpp, applied on
+// the UI task). dm_seq: Meck::getDMSeqIn() when the app finished its sync.
+void meck_ui_mark_dms_read_upto(uint32_t dm_seq);
 #endif
 
 // WiFi companion interface.

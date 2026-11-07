@@ -897,11 +897,26 @@ public:
             _pending_dm_recv[_pending_dm_tail].valid = false;
             _pending_dm_tail = (_pending_dm_tail + 1) % P4_PENDING_DM_RING;
             _pending_dm_count--;
+#if MECK_BLE_ENABLED
+            _dm_seq_out = _dm_seq_out + 1;
+#endif
             ok = true;
         }
         xSemaphoreGive(_mutex);
         return ok;
     }
+
+#if MECK_BLE_ENABLED
+    // DM sequence counters for marking DMs read once the BLE app has them.
+    // In: every DM put into the pending ring (onMessageRecv, meck_task),
+    // which also queues it for the app. Out: every DM taken out again,
+    // drained by the UI task or dropped when the ring was full. When the
+    // app has collected every waiting message, all DMs up to the In count
+    // have reached it; once Out equals that count, every DM in the rings
+    // is one the app has.
+    uint32_t getDMSeqIn()  const { return _dm_seq_in; }
+    uint32_t getDMSeqOut() const { return _dm_seq_out; }
+#endif
 
     // =====================================================================
     // Pending received room posts ring (Piece B)
@@ -3272,6 +3287,9 @@ protected:
         slot.text[sizeof(slot.text) - 1] = '\0';
 
         _pending_dm_head = (_pending_dm_head + 1) % P4_PENDING_DM_RING;
+#if MECK_BLE_ENABLED
+        _dm_seq_in = _dm_seq_in + 1;
+#endif
         if (_pending_dm_count < P4_PENDING_DM_RING) {
             _pending_dm_count++;
         } else {
@@ -3279,6 +3297,9 @@ protected:
             // oldest unread entry is dropped (not the just-arrived one);
             // this matches the channel-message ring-overwrite policy.
             _pending_dm_tail = (_pending_dm_tail + 1) % P4_PENDING_DM_RING;
+#if MECK_BLE_ENABLED
+            _dm_seq_out = _dm_seq_out + 1;   // the dropped one leaves the ring too
+#endif
             printf("Meck: pending DM ring full, dropping oldest unread\n");
         }
         xSemaphoreGive(_mutex);
@@ -4833,6 +4854,10 @@ private:
     int  _pending_dm_head  = 0;  // next slot to write (producer)
     int  _pending_dm_tail  = 0;  // next slot to read  (consumer)
     int  _pending_dm_count = 0;
+#if MECK_BLE_ENABLED
+    volatile uint32_t _dm_seq_in  = 0;   // see getDMSeqIn()
+    volatile uint32_t _dm_seq_out = 0;   // see getDMSeqOut()
+#endif
 
     // ---- Pending room post receive ring (Piece B) ----
     // Same shape as the DM ring. Filled by onSignedMessageRecv on

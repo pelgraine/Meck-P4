@@ -271,6 +271,24 @@ extern "C" void meck_ble_boot_start(bool c6_link_up) {
     }
 }
 
+// Called by the BLE companion (meck_task) when the connected, paired app,
+// phone or watch, has collected every waiting message. Every message the
+// P4 counts as unread was queued for the app when it arrived, so all of it
+// has now reached the app: mark it read on the P4. Channels here (their
+// unread counts are kept on this task); DMs through the UI task, which owns
+// the DM rings and marks them read once its rings hold nothing newer.
+// With no app connected nothing calls this, so messages stay unread.
+static void meck_ble_app_synced() {
+    if (!g_the_mesh) return;
+    int ch_unread = g_the_mesh->getUnreadCount();
+    if (ch_unread > 0) {
+        g_the_mesh->clearUnread();
+        printf("BLE companion: app has every message, %d channel message(s) marked read\n",
+               ch_unread);
+    }
+    meck_ui_mark_dms_read_upto(g_the_mesh->getDMSeqIn());
+}
+
 // Process deferred BLE enable/disable — called from meck_task only.
 static void meck_apply_pending_ble() {
     int action = g_ble_pending_action;
@@ -825,6 +843,7 @@ extern "C" bool meck_app_init() {
         g_ble_interface.begin(ble_name, g_node_prefs.ble_pin);
     }
     g_companion.begin(g_the_mesh, &g_ble_interface);
+    g_companion.setOnAppSynced(meck_ble_app_synced);   // mark messages read once the app has them
     printf("meck_app_init: BLE companion protocol handler ready (%s in Settings)\n",
            g_node_prefs.ble_enabled != 0 ? "on" : "off");
 #endif

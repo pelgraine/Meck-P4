@@ -43,6 +43,34 @@ static const ble_uuid128_t NUS_TX_UUID = BLE_UUID128_INIT(
     0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
     0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e);
 
+#if MECK_BLE_GARMIN
+// Small-MTU slicing for the watch: the same tags as Meck and the garmin
+// branch. No real frame starts with one of these (command codes are below
+// 0x80, push codes stop well short of 0xF0).
+#define SLICE_TAG_FIRST   0xF0   // first slice of a multi-slice frame
+#define SLICE_TAG_MIDDLE  0xF1
+#define SLICE_TAG_LAST    0xF2
+#define SLICE_TAG_SINGLE  0xF3   // whole frame fits in one slice
+#define SLICE_TAG_MASK    0xFC   // (b & MASK) == SLICE_TAG_FIRST matches any tag
+#define SPLIT_MAX_MTU     23     // slice outgoing frames when the peer MTU is at or below this
+
+// Heart-rate sensor advertising, as Meck's MECK_BLE_SENSOR_ADVERT.
+#define SENSOR_SVC_UUID        0x180D   // Heart Rate
+#define SENSOR_CHR_HRM_UUID    0x2A37   // Heart Rate Measurement (notify)
+#define SENSOR_CHR_LOC_UUID    0x2A38   // Body Sensor Location (read)
+#define SENSOR_APPEARANCE      0x0341   // Heart Rate Belt
+#define ADV_NAME_MAX_BYTES     18       // 31 - flags(3) - 16-bit svc(4) - appearance(4) - name header(2)
+
+static const ble_uuid16_t HR_SVC_UUID = BLE_UUID16_INIT(SENSOR_SVC_UUID);
+static const ble_uuid16_t HR_HRM_UUID = BLE_UUID16_INIT(SENSOR_CHR_HRM_UUID);
+static const ble_uuid16_t HR_LOC_UUID = BLE_UUID16_INIT(SENSOR_CHR_LOC_UUID);
+
+// NimBLE takes the access rules of every notification switch (CCCD) from one
+// setting, applied when the host starts. Declared only in a private NimBLE
+// header (ble_gatt_priv.h), so declared here.
+extern "C" void ble_gatts_set_clt_cfg_perm_flags(uint8_t flags);
+#endif
+
 static SerialNimBLEInterface* s_ble = nullptr;   // the one instance
 static uint16_t s_tx_val_handle = 0;              // filled by ble_gatts_add_svcs()
 
@@ -50,7 +78,12 @@ static uint16_t s_tx_val_handle = 0;              // filled by ble_gatts_add_svc
 // designated initialisers). NimBLE keeps pointers to these: they must live
 // for the whole session.
 static struct ble_gatt_chr_def s_nus_chrs[3];
-static struct ble_gatt_svc_def s_nus_svcs[2];
+#if MECK_BLE_GARMIN
+static struct ble_gatt_chr_def s_hr_chrs[3];
+static struct ble_gatt_svc_def s_nus_svcs[3];    // UART, Heart Rate, end of list
+#else
+static struct ble_gatt_svc_def s_nus_svcs[2];    // UART, end of list
+#endif
 
 // ---------------------------------------------------------------------------
 // C callbacks (NimBLE host task) forwarding to the instance
@@ -78,6 +111,24 @@ static int nus_access_cb(uint16_t conn_handle, uint16_t attr_handle,
     }
     return BLE_ATT_ERR_UNLIKELY;
 }
+
+#if MECK_BLE_GARMIN
+// Heart Rate service: Body Sensor Location reads "chest" (1). The measurement
+// is notify-only and never sent.
+static int hr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                        struct ble_gatt_access_ctxt* ctxt, void* arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        if (ble_uuid_cmp(ctxt->chr->uuid, &HR_LOC_UUID.u) == 0) {
+            uint8_t loc_chest = 1;
+            return os_mbuf_append(ctxt->om, &loc_chest, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        uint8_t hrm[2] = { 0x00, 0x00 };   // flags byte + 8-bit value 0
+        return os_mbuf_append(ctxt->om, hrm, 2) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+#endif
 
 static int gap_event_cb(struct ble_gap_event* event, void* arg)
 {
@@ -117,6 +168,10 @@ SerialNimBLEInterface::SerialNimBLEInterface()
       _recv_queue(nullptr), _send_queue(nullptr), _send_queue_len(0), _last_write(0)
 {
     _dev_name[0] = '\0';
+#if MECK_BLE_GARMIN
+    _slice_tx_off = 0;
+    _slice_rx_len = -1;
+#endif
 }
 
 void SerialNimBLEInterface::begin(const char* dev_name, uint32_t pin)
@@ -151,6 +206,25 @@ bool SerialNimBLEInterface::startNimBLE()
     ble_hs_cfg.sync_cb = on_sync_cb;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
+#if MECK_BLE_GARMIN
+    // No PIN: the watch can only reach an encrypted link without a passkey
+    // ("just works"), so pairing is Secure Connections, bonded, no MITM
+    // (Meck's MECK_BLE_JUST_WORKS: SC_BOND instead of SC_MITM_BOND).
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_sc = 1;
+    // Every notification switch (CCCD) needs an encrypted link, so the
+    // watch's sensor menu has to pair before it can subscribe to the heart-
+    // rate measurement (on the Max that refusal is what starts its pairing),
+    // and the watch app meets the same refusal on the UART TX switch as on
+    // nRF52 nodes, which it already answers by pairing.
+    ble_gatts_set_clt_cfg_perm_flags(BLE_ATT_F_READ | BLE_ATT_F_WRITE |
+                                     BLE_ATT_F_READ_ENC | BLE_ATT_F_WRITE_ENC);
+    const ble_gatt_chr_flags rx_sec = BLE_GATT_CHR_F_WRITE_ENC;
+    const ble_gatt_chr_flags tx_sec = BLE_GATT_CHR_F_READ_ENC;
+    BLE_LOG("Garmin watch support on: pairing without a PIN, heart-rate sensor advert");
+#else
     // Static PIN: shown on the device, typed on the phone (passkey entry),
     // Secure Connections with MITM protection, bonded. Matches Meck's
     // ESP_LE_AUTH_REQ_SC_MITM_BOND on the T-Deck.
@@ -158,6 +232,9 @@ bool SerialNimBLEInterface::startNimBLE()
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_mitm = 1;
     ble_hs_cfg.sm_sc = 1;
+    const ble_gatt_chr_flags rx_sec = BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN;
+    const ble_gatt_chr_flags tx_sec = BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN;
+#endif
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
@@ -166,18 +243,34 @@ bool SerialNimBLEInterface::startNimBLE()
     // RX: the app writes frames here
     s_nus_chrs[0].uuid = &NUS_RX_UUID.u;
     s_nus_chrs[0].access_cb = nus_access_cb;
-    s_nus_chrs[0].flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN;
+    s_nus_chrs[0].flags = BLE_GATT_CHR_F_WRITE | rx_sec;
     // TX: frames to the app go out as notifications
     s_nus_chrs[1].uuid = &NUS_TX_UUID.u;
     s_nus_chrs[1].access_cb = nus_access_cb;
-    s_nus_chrs[1].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY |
-                          BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN;
+    s_nus_chrs[1].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY | tx_sec;
     s_nus_chrs[1].val_handle = &s_tx_val_handle;
     // s_nus_chrs[2] stays zeroed: end of list
     s_nus_svcs[0].type = BLE_GATT_SVC_TYPE_PRIMARY;
     s_nus_svcs[0].uuid = &NUS_SVC_UUID.u;
     s_nus_svcs[0].characteristics = s_nus_chrs;
+#if MECK_BLE_GARMIN
+    // Heart Rate service: notify-only measurement plus body sensor location
+    // (encrypted read), as Meck's MECK_BLE_SENSOR_ADVERT.
+    memset(s_hr_chrs, 0, sizeof(s_hr_chrs));
+    s_hr_chrs[0].uuid = &HR_HRM_UUID.u;
+    s_hr_chrs[0].access_cb = hr_access_cb;
+    s_hr_chrs[0].flags = BLE_GATT_CHR_F_NOTIFY;
+    s_hr_chrs[1].uuid = &HR_LOC_UUID.u;
+    s_hr_chrs[1].access_cb = hr_access_cb;
+    s_hr_chrs[1].flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC;
+    // s_hr_chrs[2] stays zeroed: end of list
+    s_nus_svcs[1].type = BLE_GATT_SVC_TYPE_PRIMARY;
+    s_nus_svcs[1].uuid = &HR_SVC_UUID.u;
+    s_nus_svcs[1].characteristics = s_hr_chrs;
+    // s_nus_svcs[2] stays zeroed: end of list
+#else
     // s_nus_svcs[1] stays zeroed: end of list
+#endif
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -204,6 +297,38 @@ void SerialNimBLEInterface::startAdvertising()
     if (_conn_handle != BLE_HS_CONN_HANDLE_NONE) return;
     if (ble_gap_adv_active()) return;
 
+#if MECK_BLE_GARMIN
+    // Advert: flags, the Heart Rate service, appearance "Heart Rate Belt" and
+    // the name (shortened to 18 bytes at a UTF-8 character boundary if it does
+    // not fit), so the watch's Sensors & Accessories search lists the node.
+    // Scan response: the MeshCore (Nordic UART) service UUID, so phone apps
+    // that look for it still find the node. As Meck's MECK_BLE_SENSOR_ADVERT.
+    struct ble_hs_adv_fields fields;
+    memset(&fields, 0, sizeof(fields));
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.uuids16 = &HR_SVC_UUID;
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
+    fields.appearance = SENSOR_APPEARANCE;
+    fields.appearance_is_present = 1;
+    char adv_name[ADV_NAME_MAX_BYTES + 1];
+    copy_utf8_trunc(adv_name, sizeof(adv_name), _dev_name);
+    fields.name = (uint8_t*)adv_name;
+    fields.name_len = (uint8_t)strlen(adv_name);
+    fields.name_is_complete = (strcmp(adv_name, _dev_name) == 0) ? 1 : 0;
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        BLE_LOG("setting the advert data failed (rc=%d)", rc);
+        return;
+    }
+
+    struct ble_hs_adv_fields rsp;
+    memset(&rsp, 0, sizeof(rsp));
+    rsp.uuids128 = &NUS_SVC_UUID;
+    rsp.num_uuids128 = 1;
+    rsp.uuids128_is_complete = 1;
+    rc = ble_gap_adv_rsp_set_fields(&rsp);
+#else
     // Advert: flags + the MeshCore (Nordic UART) service UUID.
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
@@ -226,6 +351,7 @@ void SerialNimBLEInterface::startAdvertising()
     rsp.name_len = (uint8_t)strlen(name);
     rsp.name_is_complete = (strcmp(name, _dev_name) == 0) ? 1 : 0;
     rc = ble_gap_adv_rsp_set_fields(&rsp);
+#endif
     if (rc != 0) {
         BLE_LOG("setting the scan response failed (rc=%d)", rc);
         return;
@@ -268,6 +394,32 @@ void SerialNimBLEInterface::onReset(int reason)
 void SerialNimBLEInterface::onRxWrite(const uint8_t* data, int len)
 {
     if (!_recv_queue || len <= 0) return;
+#if MECK_BLE_GARMIN
+    // A sliced write from a small-MTU peer (the watch): collect the slices
+    // and queue the frame once its last slice is in. Same rules as Meck and
+    // the garmin branch.
+    if ((data[0] & SLICE_TAG_MASK) == SLICE_TAG_FIRST) {   // any SLICE_TAG_*
+        uint8_t tag = data[0];
+        if (tag == SLICE_TAG_FIRST || tag == SLICE_TAG_SINGLE) _slice_rx_len = 0;
+        if (_slice_rx_len < 0) return;               // middle/last with no start: drop
+        if (len < 2) return;                         // no length byte
+        int n = data[1];
+        if (n > len - 2) n = len - 2;                // never read past the write
+        if (_slice_rx_len + n > MAX_FRAME_SIZE) { _slice_rx_len = -1; return; }   // oversize: drop
+        memcpy(&_slice_rx_buf[_slice_rx_len], data + 2, n);
+        _slice_rx_len += n;
+        if (tag == SLICE_TAG_LAST || tag == SLICE_TAG_SINGLE) {
+            Frame sf;
+            sf.len = (uint8_t)_slice_rx_len;
+            memcpy(sf.buf, _slice_rx_buf, _slice_rx_len);
+            if (xQueueSend(_recv_queue, &sf, 0) != pdTRUE) {
+                BLE_LOG("receive queue full, sliced frame dropped");
+            }
+            _slice_rx_len = -1;
+        }
+        return;
+    }
+#endif
     Frame f;
     f.len = (uint8_t)len;
     memcpy(f.buf, data, len);
@@ -279,26 +431,59 @@ void SerialNimBLEInterface::onRxWrite(const uint8_t* data, int len)
 // Encryption is up: if it is also authenticated (PIN pairing, or a bonded
 // phone reconnecting), frames may flow. Then ask for a fast connection
 // interval for contact sync, as Meck does (15-20 ms, 4 s timeout).
+// Garmin build: encryption alone is enough (no PIN), and a peer still at the
+// 23-byte MTU is taken to be the watch and gets the relaxed interval; any
+// larger MTU is a phone and gets the fast one (also asked for from the MTU
+// event if the phone raises its MTU later), as Meck's MECK_BLE_SLOW_INTERVAL.
 void SerialNimBLEInterface::onLinkSecured(uint16_t conn_handle)
 {
     struct ble_gap_conn_desc desc;
     if (ble_gap_conn_find(conn_handle, &desc) != 0) return;
+#if MECK_BLE_GARMIN
+    if (!desc.sec_state.encrypted) {
+        BLE_LOG("link not encrypted, frames stay blocked");
+        return;
+    }
+#else
     if (!desc.sec_state.encrypted || !desc.sec_state.authenticated) {
         BLE_LOG("link encrypted but not authenticated, frames stay blocked");
         return;
     }
+#endif
     _paired_conn = true;
     BLE_LOG("paired link ready (bonded=%d)", (int)desc.sec_state.bonded);
 
+#if MECK_BLE_GARMIN
+    requestInterval(conn_handle, ble_att_mtu(conn_handle) > SPLIT_MAX_MTU);
+#else
+    requestInterval(conn_handle, true);
+#endif
+}
+
+// Fast: 15-20 ms, no latency, 4 s timeout (contact sync with a phone).
+// Relaxed (Garmin build, the watch): 100-200 ms, latency 2, 6 s timeout.
+void SerialNimBLEInterface::requestInterval(uint16_t conn_handle, bool fast)
+{
     struct ble_gap_upd_params p;
     memset(&p, 0, sizeof(p));
-    p.itvl_min = 12;                // 15 ms (units of 1.25 ms)
-    p.itvl_max = 16;                // 20 ms
-    p.latency = 0;
-    p.supervision_timeout = 400;    // 4 s (units of 10 ms)
+    if (fast) {
+        p.itvl_min = 12;                // 15 ms (units of 1.25 ms)
+        p.itvl_max = 16;                // 20 ms
+        p.latency = 0;
+        p.supervision_timeout = 400;    // 4 s (units of 10 ms)
+    } else {
+        p.itvl_min = 80;                // 100 ms
+        p.itvl_max = 160;               // 200 ms
+        p.latency = 2;                  // the peer may skip 2 intervals when idle
+        p.supervision_timeout = 600;    // 6 s
+    }
     p.min_ce_len = 0;
     p.max_ce_len = 0;
     ble_gap_update_params(conn_handle, &p);
+#if MECK_BLE_GARMIN
+    BLE_LOG("asked for the %s connection interval (MTU %u)",
+            fast ? "fast" : "relaxed", (unsigned)ble_att_mtu(conn_handle));
+#endif
 }
 
 int SerialNimBLEInterface::onGapEvent(void* ev)
@@ -312,6 +497,9 @@ int SerialNimBLEInterface::onGapEvent(void* ev)
             _paired_conn = false;
             _tx_subscribed = false;
             _adv_restart_at = 0;
+#if MECK_BLE_GARMIN
+            _slice_rx_len = -1;
+#endif
             BLE_LOG("phone connected");
         } else {
             BLE_LOG("connection attempt failed (status %d)", event->connect.status);
@@ -369,6 +557,13 @@ int SerialNimBLEInterface::onGapEvent(void* ev)
 
     case BLE_GAP_EVENT_MTU:
         BLE_LOG("MTU %u", (unsigned)event->mtu.value);
+#if MECK_BLE_GARMIN
+        // A phone that raises its MTU after pairing moves to the fast interval.
+        if (_paired_conn && event->mtu.conn_handle == _conn_handle &&
+            event->mtu.value > SPLIT_MAX_MTU) {
+            requestInterval(event->mtu.conn_handle, true);
+        }
+#endif
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -399,6 +594,9 @@ void SerialNimBLEInterface::enable()
     }
     xQueueReset(_recv_queue);
     _send_queue_len = 0;
+#if MECK_BLE_GARMIN
+    _slice_tx_off = 0;
+#endif
     _enabled = true;
     _adv_restart_at = 0;
     startAdvertising();             // no-op until the host has synced; onSync() starts it
@@ -419,6 +617,9 @@ void SerialNimBLEInterface::disable()
     _paired_conn = false;
     if (_recv_queue) xQueueReset(_recv_queue);
     _send_queue_len = 0;
+#if MECK_BLE_GARMIN
+    _slice_tx_off = 0;
+#endif
     BLE_LOG("companion off");
 }
 
@@ -445,19 +646,60 @@ size_t SerialNimBLEInterface::writeFrame(const uint8_t src[], size_t len)
 size_t SerialNimBLEInterface::checkRecvFrame(uint8_t dest[])
 {
     if (!_enabled) return 0;
+#if MECK_BLE_GARMIN
+    if (!_paired_conn) _slice_tx_off = 0;   // a new link starts each frame from its first byte
+#endif
 
     // Send the oldest queued frame, spaced like Meck. If NimBLE is out of
     // buffers the frame stays queued and is tried again next pass.
     if (_send_queue_len > 0 && _paired_conn && millis() >= _last_write + BLE_WRITE_MIN_INTERVAL) {
         uint16_t ch = _conn_handle;
-        struct os_mbuf* om = ble_hs_mbuf_from_flat(_send_queue[0].buf, _send_queue[0].len);
+        const uint8_t* out = _send_queue[0].buf;
+        int out_len = _send_queue[0].len;
+        bool frame_done = true;             // this notification finishes the frame
+#if MECK_BLE_GARMIN
+        // Small-MTU peer (the watch): send the next slice of the frame at the
+        // head of the queue, one slice per pass. The frame leaves the queue
+        // only once its last slice has gone.
+        uint8_t chunk[2 + MAX_FRAME_SIZE];
+        int slice_n = -1;                   // -1 = sending the whole frame
+        uint16_t mtu = ble_att_mtu(ch);
+        // A frame already part-sent as slices is finished as slices, even if
+        // the MTU has gone up since.
+        if ((mtu != 0 && mtu <= SPLIT_MAX_MTU) || _slice_tx_off != 0) {
+            if (mtu == 0 || mtu > SPLIT_MAX_MTU) mtu = SPLIT_MAX_MTU;
+            int room = (int)mtu - 3 - 2;    // ATT payload minus tag and length bytes
+            if (room < 1) room = 1;
+            int total = _send_queue[0].len;
+            int n = total - _slice_tx_off;
+            if (n > room) n = room;
+            bool first = (_slice_tx_off == 0);
+            frame_done = (_slice_tx_off + n >= total);
+            chunk[0] = (first && frame_done) ? SLICE_TAG_SINGLE
+                     : first      ? SLICE_TAG_FIRST
+                     : frame_done ? SLICE_TAG_LAST : SLICE_TAG_MIDDLE;
+            chunk[1] = (uint8_t)n;
+            memcpy(&chunk[2], &_send_queue[0].buf[_slice_tx_off], n);
+            out = chunk;
+            out_len = n + 2;
+            slice_n = n;
+        }
+#endif
+        struct os_mbuf* om = ble_hs_mbuf_from_flat(out, out_len);
         if (om && ch != BLE_HS_CONN_HANDLE_NONE) {
             int rc = ble_gatts_notify_custom(ch, s_tx_val_handle, om);   // consumes om
             if (rc == 0) {
                 _last_write = millis();
-                _send_queue_len--;
-                if (_send_queue_len > 0) {
-                    memmove(&_send_queue[0], &_send_queue[1], _send_queue_len * sizeof(Frame));
+#if MECK_BLE_GARMIN
+                if (slice_n >= 0) {
+                    _slice_tx_off = frame_done ? 0 : (uint16_t)(_slice_tx_off + slice_n);
+                }
+#endif
+                if (frame_done) {
+                    _send_queue_len--;
+                    if (_send_queue_len > 0) {
+                        memmove(&_send_queue[0], &_send_queue[1], _send_queue_len * sizeof(Frame));
+                    }
                 }
             }
         } else if (om) {

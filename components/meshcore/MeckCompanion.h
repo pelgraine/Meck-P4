@@ -45,6 +45,14 @@ public:
     // Call every meck_task loop iteration.
     void check();
 
+#if MECK_BLE_ENABLED
+    // Called on meck_task once the connected app has collected every waiting
+    // message (its CMD_SYNC_NEXT_MESSAGE got "no more messages" while the
+    // link was connected). Set only for the BLE companion (meck_app.cpp),
+    // which uses it to mark messages read on the P4.
+    void setOnAppSynced(void (*fn)()) { _on_app_synced = fn; }
+#endif
+
     // ---- Push notifications (called from MeckMesh callbacks) ----
 
     // Channel message received -- queues the frame and tickles the app
@@ -143,4 +151,8 @@ private:
     // Frame buffers
     uint8_t _cmd[MAX_FRAME_SIZE + 1];
     uint8_t _out[MAX_FRAME_SIZE + 1];
+
+#if MECK_BLE_ENABLED
+    void (*_on_app_synced)() = nullptr;   // see setOnAppSynced()
+#endif
 };

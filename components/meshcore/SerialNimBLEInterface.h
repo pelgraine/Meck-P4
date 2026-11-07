@@ -23,6 +23,28 @@
  *
  * NimBLE is started on the first enable() and stays up until the next
  * reboot; disable() stops advertising and drops any connection.
+ *
+ * MECK_BLE_GARMIN (meck.h, menuconfig "Meck: Garmin watch support") makes the
+ * companion usable from a Garmin watch running the Meck Connect IQ app, as
+ * the garmin branch of MeshCore (BLE_GARMIN) and Meck's meck_max_ble_garmin
+ * build do:
+ *   - pairing without a PIN: the watch can only reach an encrypted link with
+ *     no passkey, so the characteristics need encryption only. Phones also
+ *     pair without a PIN while this is on.
+ *   - small-MTU slicing: the watch never raises the ATT MTU above 23, so
+ *     frames to it travel as [tag][len][payload] slices of up to 18 bytes,
+ *     and sliced writes from it are put back together (tags F0 to F3).
+ *   - heart-rate sensor advertising: the watch's Connect IQ app never starts
+ *     pairing with a node it does not know, but its Sensors & Accessories
+ *     menu does. The advert shows the Heart Rate service, the UART service
+ *     goes in the scan response, and every notification switch (CCCD) needs
+ *     an encrypted link, so that menu pairs before it can subscribe. No
+ *     heart-rate data is sent.
+ *   - a relaxed connection interval for a peer that keeps the 23-byte MTU
+ *     (the watch) and the fast one for any larger-MTU peer (a phone).
+ *   - no PHY or packet-length change requests (none are made in any build;
+ *     on the T-Deck Max the 2M PHY request crashed the controller with the
+ *     watch).
  */
 
 #pragma once
@@ -70,6 +92,7 @@ private:
     bool startNimBLE();
     void startAdvertising();
     void onLinkSecured(uint16_t conn_handle);
+    void requestInterval(uint16_t conn_handle, bool fast);
 
     char     _dev_name[32];          // fits NimBLE's 31-byte GAP name limit
     uint32_t _pin;
@@ -89,6 +112,12 @@ private:
     Frame*   _send_queue;            // meck_task only, PSRAM
     int      _send_queue_len;
     uint32_t _last_write;
+
+#if MECK_BLE_GARMIN
+    uint16_t _slice_tx_off;          // meck_task: bytes of _send_queue[0] already sent as slices
+    uint8_t  _slice_rx_buf[MAX_FRAME_SIZE];   // host task: reassembly of sliced writes
+    int      _slice_rx_len;          // host task: bytes collected (-1 = not mid-frame)
+#endif
 };
 
 #endif // MECK_BLE_ENABLED
