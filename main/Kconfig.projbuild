@@ -133,9 +133,8 @@ menu "Example Configuration"
         help
             Test build for a board whose C6 has been flashed with the ESP-Hosted
             2.0.17 firmware. The C6 is started through ESP-Hosted instead of
-            LilyGo's AT driver, the boot log prints the firmware version the C6
-            reports, and the SD card is checked with a small write and read-back
-            once the C6 link is up. Boot log lines start with "C6 test:".
+            LilyGo's AT driver. One boot log line starting "C6:" says whether the
+            ESP-Hosted link came up and which firmware version the C6 reports.
             WiFi Companion, the Web Reader and the BLE keyboard are off in this
             build, because they send AT commands to the C6.
 

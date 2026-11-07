@@ -46,7 +46,6 @@
 #include "esp_hosted.h"             // ESP-Hosted C6 test build only
 #include "freertos/idf_additions.h" // xTaskCreatePinnedToCoreWithCaps
 #include "esp_heap_caps.h"
-#include <string.h>
 #endif
 
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
@@ -3580,21 +3579,10 @@ bool Sdmmc_Init(const char *base_path)
 // 0 connecting, 2 link up and asking for the version, 1 done, -1 gave up
 static volatile int s_c6_test_state = 0;
 static TaskHandle_t s_c6_test_task = NULL;
-
-static void C6_Hosted_Test_Print_Version(const char *when)
-{
-    esp_hosted_coprocessor_fwver_t ver = {};
-    int err = esp_hosted_get_coprocessor_fwversion(&ver);
-    if (err == ESP_OK)
-    {
-        printf("C6 test: %s, the C6 reports ESP-Hosted firmware %lu.%lu.%lu\n", when,
-               (unsigned long)ver.major1, (unsigned long)ver.minor1, (unsigned long)ver.patch1);
-    }
-    else
-    {
-        printf("C6 test: %s, the firmware version request failed (%s)\n", when, esp_err_to_name(err));
-    }
-}
+// The C6's firmware version, filled in by the connect task before it sets
+// s_c6_test_state to 1, and printed by C6_Hosted_Test_Link.
+static esp_hosted_coprocessor_fwver_t s_c6_fw_ver = {};
+static volatile int s_c6_fw_ver_err = ESP_FAIL;
 
 static void c6_hosted_test_task(void *arg)
 {
@@ -3604,22 +3592,18 @@ static void c6_hosted_test_task(void *arg)
         vTaskSuspend(NULL);
     }
     s_c6_test_state = 2;
-    C6_Hosted_Test_Print_Version("after link-up");
+    s_c6_fw_ver_err = esp_hosted_get_coprocessor_fwversion(&s_c6_fw_ver);
+    __sync_synchronize();   // the version is stored before app_main can see state 1
     s_c6_test_state = 1;
-
-    // app_main notifies once the SD card check has run
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    C6_Hosted_Test_Print_Version("after the SD card check");
 
     vTaskSuspend(NULL);
 }
 
 // Replaces ESP32C6_AT->begin(). Returns true when the C6 answered as an
-// ESP-Hosted co-processor.
+// ESP-Hosted co-processor. Prints one "C6:" line saying whether the link
+// came up and which firmware version the C6 reports.
 static bool C6_Hosted_Test_Link(void)
 {
-    printf("C6 test: ESP-Hosted test build, starting the C6 through ESP-Hosted\n");
-
     // C6 reset through its enable line (same pulse as LilyGo's example)
     XL9535->pin_write(XL9535_ESP32C6_EN, Cpp_Bus_Driver::Xl95x5::Value::HIGH);
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -3632,7 +3616,7 @@ static bool C6_Hosted_Test_Link(void)
                                         &s_c6_test_task, tskNO_AFFINITY, MALLOC_CAP_SPIRAM) != pdPASS)
     {
         s_c6_test_task = NULL;
-        printf("C6 test: could not create the C6 connect task\n");
+        printf("C6: could not create the ESP-Hosted connect task, carrying on without the C6\n");
         return false;
     }
 
@@ -3647,64 +3631,28 @@ static bool C6_Hosted_Test_Link(void)
     switch (s_c6_test_state)
     {
     case 1:
-        printf("C6 test: ESP-Hosted link to the C6 is up (waited %lu ms)\n", waited_ms);
+        if (s_c6_fw_ver_err == ESP_OK)
+        {
+            printf("C6: ESP-Hosted link up after %lu ms, the C6 reports ESP-Hosted firmware %lu.%lu.%lu\n",
+                   waited_ms, (unsigned long)s_c6_fw_ver.major1,
+                   (unsigned long)s_c6_fw_ver.minor1, (unsigned long)s_c6_fw_ver.patch1);
+        }
+        else
+        {
+            printf("C6: ESP-Hosted link up after %lu ms, the firmware version request failed (%s)\n",
+                   waited_ms, esp_err_to_name(s_c6_fw_ver_err));
+        }
         return true;
     case 2:
-        printf("C6 test: ESP-Hosted link to the C6 is up, but the version request had not finished after %lu ms\n", waited_ms);
+        printf("C6: ESP-Hosted link up, but the firmware version request had not finished after %lu ms\n", waited_ms);
         return true;
     case -1:
-        printf("C6 test: ESP-Hosted could not connect to the C6 (gave up after %lu ms)\n", waited_ms);
+        printf("C6: ESP-Hosted could not connect to the C6 (gave up after %lu ms)\n", waited_ms);
         return false;
     default:
-        printf("C6 test: no ESP-Hosted link to the C6 after %lu ms, carrying on without it\n", waited_ms);
+        printf("C6: no ESP-Hosted link to the C6 after %lu ms, carrying on without it\n", waited_ms);
         return false;
     }
-}
-
-// Writes a 4 KB pattern to a file on the SD card, reads it back, compares
-// and deletes the file.
-static void C6_Hosted_Test_Sd_Check(void)
-{
-    const char *path = SD_BASE_PATH "/meck_c6_test.tmp";
-    const size_t len = 4096;
-    uint8_t *out = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
-    uint8_t *in = (uint8_t *)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
-    if (out == NULL || in == NULL)
-    {
-        printf("C6 test: SD card check not run (no memory for its buffers)\n");
-        heap_caps_free(out);
-        heap_caps_free(in);
-        return;
-    }
-    for (size_t i = 0; i < len; i++)
-    {
-        out[i] = (uint8_t)(i * 7 + 3);
-    }
-    memset(in, 0, len);
-
-    FILE *f = fopen(path, "wb");
-    if (f == NULL)
-    {
-        printf("C6 test: SD card check FAILED, could not create %s\n", path);
-    }
-    else
-    {
-        size_t wrote = fwrite(out, 1, len, f);
-        fclose(f);
-        size_t got = 0;
-        f = fopen(path, "rb");
-        if (f != NULL)
-        {
-            got = fread(in, 1, len, f);
-            fclose(f);
-        }
-        bool ok = (wrote == len) && (got == len) && (memcmp(out, in, len) == 0);
-        remove(path);
-        printf("C6 test: SD card write and read-back of %u bytes %s\n", (unsigned)len, ok ? "PASSED" : "FAILED");
-    }
-
-    heap_caps_free(out);
-    heap_caps_free(in);
 }
 #endif // CONFIG_MECK_C6_ESP_HOSTED_TEST
 
@@ -5906,24 +5854,9 @@ static void __attribute__((unused)) meck_stats_task(void *arg)
 }
 #endif
 
-// ---- Meck: internal RAM check (temporary, for the ESP-Hosted work) ----
-// Prints how much internal RAM is free, the largest free block and the
-// lowest free figure so far, then the same per memory region, so we can see
-// how much room ESP-Hosted would have. Each report starts with a
-// "RAM check:" line; the per-region lines follow it.
-static void Meck_Ram_Check(const char *when)
-{
-    printf("RAM check: %s: internal free %u, largest block %u, lowest free so far %u\n", when,
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
-}
-
 extern "C" void app_main(void)
 {
     printf("Ciallo\n");
-    Meck_Ram_Check("start of app_main");
 
     // ---- Meck: dynamic frequency scaling ----
     // CPU scales between max_freq_mhz and min_freq_mhz based on whether any
@@ -6119,16 +6052,6 @@ extern "C" void app_main(void)
     {
         printf("Sdmmc_Init fail\n");
     }
-
-#if defined CONFIG_MECK_C6_ESP_HOSTED_TEST
-    // SD card write and read-back with the C6 link up, then ask the C6 for
-    // its version again to show the link still works after the SD traffic.
-    C6_Hosted_Test_Sd_Check();
-    if (s_c6_test_task != NULL)
-    {
-        xTaskNotifyGive(s_c6_test_task);
-    }
-#endif
 
     // if (Sdspi_Init(SD_BASE_PATH) == false)
     // {
@@ -6332,7 +6255,6 @@ extern "C" void app_main(void)
     // The C6 runs ESP-Hosted in this build, so Meck's AT-based WiFi
     // Companion, Web Reader and BLE keyboard are left unbound (each one
     // checks for a null AT pointer and stays off).
-    printf("C6 test: AT driver not bound, so WiFi Companion, the Web Reader and the BLE keyboard are off in this build\n");
 #else
     meck_ble_bind(ESP32C6_AT.get());
 #endif
@@ -6677,15 +6599,11 @@ extern "C" void app_main(void)
     _lock_release(&lvgl_api_lock);
 
     meck_ui_show_home();
-    Meck_Ram_Check("after the home screen");
 
 #if MECK_BLE_ENABLED
     // BLE companion: Bluetooth starts now Meck is fully up (if BLE Companion
-    // is on in Settings), on meck_task. Give it a few seconds to sync with
-    // the C6 and start advertising, then report RAM.
+    // is on in Settings), on meck_task.
     meck_ble_boot_start(Sys_Status.esp32c6.init_flag == true);
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    Meck_Ram_Check("after Bluetooth start");
 #endif
 
     // Diagnostic — dumps task list + CPU% every 10s to serial. Low priority
