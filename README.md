@@ -220,6 +220,8 @@ the grid to reveal it and swipe up to hide it again. Voice opens the voice
 message screens (experimental); Games opens the Game Boy emulator. See
 [Games](#games).
 
+The Bluetooth builds (v0.9) have no **Web** tile, because the Web Reader won't be available in them (see [Web Reader](#web-reader)). **Games** takes Web's place next to Audio, and the hidden sixth row holds **Voice** only.
+
 |Page           |Purpose                                                                                            |
 |---------------|---------------------------------------------------------------------------------------------------|
 |0 Home         |Node name, unread message count, clock + battery, ten-tile navigation grid                         |
@@ -1112,6 +1114,8 @@ operations move or remove the note's resume bookmark alongside the file.
 
 Tap **Web** from the home grid to open the web reader, a lightweight reader-mode browser that runs over the onboard ESP32-C6. It is aimed at light, text-heavy pages, not the full modern web.
 
+> **Not in the Bluetooth builds.** The web reader needs the C6's ESP-AT firmware, so it won't be available in the Bluetooth builds (v0.9), which need ESP-Hosted on the C6. Those builds have no Web tile on the home grid.
+
 > **Work in progress.** The web reader ships in v0.6 with known limitations (listed below). An amber notice appears for a few seconds each time you open the Web tile as a reminder.
 
 ### How it works
@@ -1349,7 +1353,7 @@ The pairing is remembered, so the phone reconnects without the PIN, including af
 
 ### Not available in the Bluetooth builds
 
-WiFi Companion, the Web Reader and the BLE keyboard all work by sending AT commands to the C6, so they are switched off in the Bluetooth builds. The WiFi Companion row is still in Settings, but WiFi won't connect.
+WiFi Companion, the Web Reader and the BLE keyboard all work by sending AT commands to the C6, so they are switched off in the Bluetooth builds. The WiFi Companion row is still in Settings, but WiFi won't connect. The Web Reader won't be available in the Bluetooth builds, and they have no Web tile on the home grid: Games takes its place next to Audio.
 
 ### Garmin watch build
 
@@ -1709,7 +1713,7 @@ no particular timeframes attached.
 - [ ] Picture over LoRa — enable image transfer end-to-end (infrastructure is complete, pending final integration)
 - [ ] Voice tile is live but experimental (it warns on entry); Camera stays disabled
 - [ ] Games follow-ups — allocate message rings only for channels that exist so 2 MB ROMs load at any point in a session; persist MBC3 real-time-clock state (Pokémon Crystal's clock); keyboard row selection in the games menu and ROM list; Snake and Minesweeper as further Games entries; optional haptic tick on the touch buttons
-- [ ] WiFi Companion and the Web Reader on boards whose C6 runs ESP-Hosted (today they need ESP-AT on the C6)
+- [ ] WiFi Companion on boards whose C6 runs ESP-Hosted (today it needs ESP-AT on the C6)
 - [ ] Mentions-only notification filtering — the "Mentions" preference currently behaves the same as "All"; filtering to trigger only on @nodename is planned
 - [ ] Serial CLI commands on the P4 — the Companion CLI runs on the device (Settings > Experimental Features) and from the app's Command Line as of v0.9, but not yet from a serial terminal. Remote CLI via Repeater Admin works normally
 - [ ] M4B audiobook files not supported (MP3 and WAV only)

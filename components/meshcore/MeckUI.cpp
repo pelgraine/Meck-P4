@@ -1786,6 +1786,7 @@ static void get_tile_colors(int idx, lv_color_t *bg, lv_color_t *border,
     // Web (creation idx 9): deep purple instead of the palette's amber,
     // which stacked directly under Notes' yellow in the landscape grid.
     // (Rose #FF0055 was tried and read as a near-twin of Discover's pink.)
+    // In the ESP-Hosted C6 builds Games is idx 9 (no Web tile) and gets this.
     if (idx == 9) *border = lv_palette_main(LV_PALETTE_DEEP_PURPLE);
 
     // Voice (creation idx 10): the palette hands it the same deep purple
@@ -6496,16 +6497,35 @@ static void create_page_home(lv_obj_t *page) {
     create_tile_button(page, LV_SYMBOL_IMAGE    "\nMaps",     cb_todo_maps,        1, 3);
     create_tile_button(page, LV_SYMBOL_SHUFFLE  "\nTrace",    cb_todo_trace,       0, 3);
     create_tile_button(page, LV_SYMBOL_AUDIO    "\nAudio",    goto_audio_browser,  0, 4);
-    create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_open_web,         1, 4);
-    // Hidden sixth row: Voice (left) opens the voice landing screen, Games
-    // (right) is a placeholder until the emulator lands. Parked off-view by
-    // home_apply_tile_scroll() until revealed by swipe.
-    create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    goto_voice_landing,  0, 5);
+    // Web tile: not shown in the ESP-Hosted C6 builds (the Bluetooth builds).
+    // The Web Reader fetches pages through the C6's ESP-AT link, which those
+    // builds leave unbound (main.cpp), so a page would never load. Games then
+    // takes Web's place next to Audio and Voice stays alone in the hidden
+    // row. Tiles land by creation order (home_apply_tile_scroll), so the
+    // order below is the layout. Skipped at RUNTIME, not compiled out, as the
+    // BLE Keyboard settings row is: show_web_tile is volatile so both
+    // branches stay in every build.
+#if defined(CONFIG_MECK_C6_ESP_HOSTED_TEST)
+    volatile bool show_web_tile = false;
+#else
+    volatile bool show_web_tile = true;
+#endif
     // Games icon: LV_SYMBOL_KEYBOARD, not LV_SYMBOL_PLAY -- the custom
     // Montserrat fonts embed only a subset of the Font Awesome symbols and
     // 0xF04B (play) is not among them (renders as a missing-glyph box);
     // 0xF11C (keyboard) is embedded.
-    create_tile_button(page, LV_SYMBOL_KEYBOARD "\nGames",    cb_todo_games,       1, 5);
+    if (show_web_tile) {
+        create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_open_web,         1, 4);
+        // Hidden sixth row: Voice (left) opens the voice landing screen, Games
+        // (right) opens the Game Boy emulator menu. Parked off-view by
+        // home_apply_tile_scroll() until revealed by swipe.
+        create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    goto_voice_landing,  0, 5);
+        create_tile_button(page, LV_SYMBOL_KEYBOARD "\nGames",    cb_todo_games,       1, 5);
+    } else {
+        create_tile_button(page, LV_SYMBOL_KEYBOARD "\nGames",    cb_todo_games,       1, 4);
+        // Hidden sixth row: Voice only.
+        create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    goto_voice_landing,  0, 5);
+    }
     home_apply_tile_scroll();
     // Camera tile stays disabled: nothing camera-related is to be booted,
     // powered, or accessible on this device.
