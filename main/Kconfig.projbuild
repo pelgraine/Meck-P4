@@ -162,12 +162,17 @@ menu "Example Configuration"
         bool
         default y
         select TINYUSB_MSC_ENABLED
+        select TINYUSB_NO_DEFAULT_TASK
         help
             Always on, not shown in menuconfig. Switches on the USB mass
             storage support that Settings > Experimental Features > USB drive
             mode needs (the SD card shown to a computer on the middle USB-C
             port), so every build has it without a menuconfig step. USB stays
             off until that row is switched on.
+            TINYUSB_NO_DEFAULT_TASK: esp_tinyusb would create its task with
+            the stack in internal RAM, which has no 4 KB block to spare by
+            the time the row is used ("create TinyUSB main task failed" on
+            hardware); MeckUsbDrive.cpp creates it with the stack in PSRAM.
 
     choice BOARD_TYPE
         prompt "Board type"

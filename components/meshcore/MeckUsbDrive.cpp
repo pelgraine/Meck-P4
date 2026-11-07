@@ -49,7 +49,9 @@
  * USB is not started at boot. The first switch-on starts the driver; after
  * that, switch-off disconnects from the computer (tud_disconnect) and
  * switch-on reconnects (tud_connect). The driver stays installed until the
- * next restart.
+ * next restart. The task that runs the USB stack is Meck's own
+ * (usb_device_task), with its stack in PSRAM: esp_tinyusb's default task
+ * takes its stack from internal RAM, which failed on hardware.
  */
 
 #include <stdio.h>
@@ -87,6 +89,16 @@ static const char * volatile s_error = "";     // meck_task/UI task -> UI task
 #include "tinyusb.h"
 #include "tusb_msc_storage.h"
 #include "device/usbd_pvt.h"   // usbd_defer_func: run a function on the TinyUSB task
+#include "esp_heap_caps.h"           // MALLOC_CAP_SPIRAM
+#include "freertos/idf_additions.h"  // xTaskCreatePinnedToCoreWithCaps
+
+// The TinyUSB task is Meck's own (usb_device_task below, stack in PSRAM), so
+// esp_tinyusb must not start its default one (main/Kconfig.projbuild:
+// MECK_USB_DRIVE selects TINYUSB_NO_DEFAULT_TASK). Two tasks running the USB
+// stack would break it.
+#if !CONFIG_TINYUSB_NO_DEFAULT_TASK
+#error "USB drive mode needs CONFIG_TINYUSB_NO_DEFAULT_TASK (selected by MECK_USB_DRIVE)"
+#endif
 
 extern _lock_t lvgl_api_lock;          // main.cpp: held by lvgl_ui_task around lv_timer_handler()
 extern sdmmc_card_t *g_meck_sd_card;   // main.cpp: set by Sdmmc_Init() once the card mounted
@@ -95,6 +107,16 @@ extern sdmmc_card_t *g_meck_sd_card;   // main.cpp: set by Sdmmc_Init() once the
 
 #define AUDIO_CLOSE_WAIT_MS  500    // the decoder closes its file this long after a stop, at most
 #define USB_TASK_WAIT_MS     5000   // longest wait for a mount/unmount on the TinyUSB task
+
+// The TinyUSB task: esp_tinyusb's defaults (4 KB stack, priority 5, core 1),
+// but the stack in PSRAM. Internal RAM has no 4 KB block to spare by the time
+// the row is used (hardware log: "create TinyUSB main task failed"), the same
+// reason MeckGBC's task stack is in PSRAM. A PSRAM-stacked task must do no
+// flash operations; this one only runs the USB stack, the SD card (SDMMC)
+// and FAT mount/unmount.
+#define USB_DEVICE_TASK_STACK  4096
+#define USB_DEVICE_TASK_PRIO   5
+#define USB_DEVICE_TASK_CORE   1
 
 // ---- USB descriptors (ESP-IDF 5.4.1 examples/peripherals/usb/device/tusb_msc) ----
 
@@ -167,11 +189,25 @@ static const char *s_string_desc[] = {
 
 static bool s_meck_owns_fat = true;    // Meck's boot mount (Sdmmc_Init) is still in place
 static bool s_storage_ready = false;   // tinyusb_msc_storage_init_sdmmc() done
-static bool s_usb_started   = false;   // tinyusb_driver_install() done
+static bool s_driver_installed = false;   // tinyusb_driver_install() done
+static TaskHandle_t s_usb_task = NULL;     // usb_device_task, created once
+static bool s_usb_started   = false;   // driver installed and usb_device_task running
 static SemaphoreHandle_t s_usb_task_done = NULL;
 static volatile esp_err_t s_usb_task_err = ESP_OK;
 
 // ---- TinyUSB task ----
+
+// Runs the USB stack: tud_task() waits on TinyUSB's event queue and handles
+// each event (the computer's requests, esp_tinyusb's callbacks, and the
+// functions queued with usbd_defer_func). Created only after
+// tinyusb_driver_install() has initialised the stack, and never ends.
+static void usb_device_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        tud_task();
+    }
+}
 
 // esp_tinyusb: the card was mounted back on the P4 side (is_mounted) or
 // handed to the computer (!is_mounted). While the mode is on, mounted back
@@ -255,6 +291,20 @@ static void usb_drive_fail(const char *why)
     s_state = MECK_USB_DRIVE_ERROR;
 }
 
+// Switch-on failed after the card was taken from Meck, before the TinyUSB
+// task existed: nothing else can touch esp_tinyusb's mount, so the card goes
+// straight back to Meck at /sdcard from here. why_card_back is the message
+// shown when that works (a fixed string: the UI keeps the pointer).
+static void give_back_without_usb_task(const char *why_card_back)
+{
+    if (tinyusb_msc_storage_mount(SD_BASE_PATH) != ESP_OK) {
+        usb_drive_fail("USB could not start, and Meck could not read the SD card afterwards. "
+                       "Restart the device.");
+        return;
+    }
+    usb_drive_fail(why_card_back);
+}
+
 static void do_switch_on(void)
 {
     sdmmc_card_t *card = g_meck_sd_card;
@@ -312,9 +362,10 @@ static void do_switch_on(void)
         return;
     }
 
-    // 3. Start USB the first time, reconnect it after that.
+    // 3. Start USB the first time, reconnect it after that. The driver and
+    //    the TinyUSB task are each set up once and kept until the restart.
     s_host_ejected = false;
-    if (!s_usb_started) {
+    if (!s_driver_installed) {
         const tinyusb_config_t tusb_cfg = {
             .device_descriptor = &s_device_desc,
             .string_descriptor = s_string_desc,
@@ -333,18 +384,25 @@ static void do_switch_on(void)
         err = tinyusb_driver_install(&tusb_cfg);
         if (err != ESP_OK) {
             USB_LOG("tinyusb_driver_install failed (%s)", esp_err_to_name(err));
-            // TinyUSB is not running, so the card goes straight back to Meck.
-            if (tinyusb_msc_storage_mount(SD_BASE_PATH) != ESP_OK) {
-                usb_drive_fail("USB could not start, and Meck could not read the SD card afterwards. Restart the device.");
-            } else {
-                usb_drive_fail("USB could not start. The SD card is back with Meck.");
-            }
+            give_back_without_usb_task("USB could not start. The SD card is back with Meck.");
             return;
         }
-        s_usb_started = true;
-    } else {
-        tud_connect();
+        s_driver_installed = true;
     }
+    if (!s_usb_task) {
+        if (xTaskCreatePinnedToCoreWithCaps(usb_device_task, "TinyUSB", USB_DEVICE_TASK_STACK,
+                                            NULL, USB_DEVICE_TASK_PRIO, &s_usb_task,
+                                            USB_DEVICE_TASK_CORE, MALLOC_CAP_SPIRAM) != pdPASS) {
+            s_usb_task = NULL;
+            USB_LOG("TinyUSB task create failed");
+            // Nothing would answer the computer: stay off the bus.
+            tud_disconnect();
+            give_back_without_usb_task("USB could not start (not enough memory). The SD card is back with Meck.");
+            return;
+        }
+    }
+    tud_connect();   // the first install has already connected; harmless then
+    s_usb_started = true;
     s_state = MECK_USB_DRIVE_ON;
     USB_LOG("on: the SD card is on USB");
 }
