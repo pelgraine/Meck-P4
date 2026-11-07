@@ -114,7 +114,18 @@ Download the latest firmware from the
 file is a **merged binary** containing the bootloader, partition table,
 and application combined into a single image — flash it at address `0x0`.
 
-**Bluetooth builds (v0.9 and later)** have `-ble` in the file name (`-ble`, `-ble-nokeyboard` and `-ble-garmin`). They need the C6 flashed with ESP-Hosted 2.0.17 first, using the [C6 flashing guide](information/Meck%20Docs/c6flashingguide.md), which takes a 3.3 V USB-to-serial adapter. Once the C6 runs ESP-Hosted, WiFi Companion and the Web Reader don't work, whichever build is on the P4, until ESP-AT is put back on the C6 (see "Going back to ESP-AT later" in the guide). Builds without `-ble` in the name are WiFi builds and need ESP-AT on the C6. See [Bluetooth Companion](#bluetooth-companion).
+**Bluetooth or WiFi (v0.9 and later).** A file with `ble` in its name is a Bluetooth build, and a file with `wifi` in its name is a WiFi build. `nokeyboard` builds leave out the K270 keyboard support, and `garmin` is the Garmin watch build.
+
+- **Bluetooth builds** need the C6 flashed with ESP-Hosted 2.0.17 first, using the [C6 flashing guide](information/Meck%20Docs/c6flashingguide.md), which takes a 3.3 V USB-to-serial adapter. Once the C6 runs ESP-Hosted, WiFi Companion and the Web Reader don't work, whichever build is on the P4, until ESP-AT is put back on the C6 (see "Going back to ESP-AT later" in the guide). See [Bluetooth Companion](#bluetooth-companion).
+- **WiFi builds** need ESP-AT on the C6. In v0.9 there are WiFi builds for the AMOLED SX1262 board only so far. For WiFi on the TFT or the AMOLED LR2021, use [v0.8.1](https://github.com/pelgraine/Meck-P4/releases/tag/v0.8.1), whose files (for example `meck-p4-0.8.1-amoled-LR2021-merged.bin`) are all WiFi builds.
+
+**Which v0.9 release for my board:**
+
+|Board          |Release                                                                                         |Files                                                                                                                                                         |
+|---------------|------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|AMOLED LR2021  |[v0.9-ble-lr2021](https://github.com/pelgraine/Meck-P4/releases/tag/v0.9-ble-lr2021)            |`meck-p4-0.9-amoled-LR2021-ble-merged.bin`, `meck-p4-0.9-amoled-LR2021-nokeyboard-ble-merged.bin`, `meck-p4-0.9-amoled-LR2021-ble-garmin-merged.bin`          |
+|TFT (SX1262)   |[v0.9-ble-tft](https://github.com/pelgraine/Meck-P4/releases/tag/v0.9-ble-tft)                  |`meck-p4-0.9-tft-ble-merged.bin`, `meck-p4-0.9-tft-nokeyboard-ble-merged.bin`                                                                                 |
+|AMOLED SX1262  |[v0.9-ble-wifi-amoled-sx1262](https://github.com/pelgraine/Meck-P4/releases/tag/v0.9-ble-wifi-amoled-sx1262)|`meck-p4-0.9-amoled-ble-merged.bin`, `meck-p4-0.9-amoled-nokeyboard-ble-merged.bin`, `meck-p4-0.9-amoled-wifi-merged.bin`, `meck-p4-0.9-amoled-nokeyboard-wifi-merged.bin`|
 
 ### First-Time Flash (Merged Firmware)
 
@@ -122,7 +133,7 @@ and application combined into a single image — flash it at address `0x0`.
 
 1. Go to <https://flasher.meshcore.io>
 1. Scroll to the bottom and select **Custom Firmware**
-1. Select the `meck-p4-X.Y.bin` file you downloaded
+1. Select the `-merged.bin` file for your board that you downloaded
 1. Click **Flash**, choose your device in the popup, and click **Connect**
 
 Ensure you use the **right-side USB-C port** (the data port), not the high-speed charger port, to flash.
@@ -130,11 +141,12 @@ Ensure you use the **right-side USB-C port** (the data port), not the high-speed
 
 If the flasher has completed successfully and your screen hasn't changed after flashing for the first time, unplug the device, turn it off and then on again.
 
-**Using esptool.py:**
+**Using esptool:**
+
+Install esptool as in Part 1 ("Get your computer ready") of the [C6 flashing guide](information/Meck%20Docs/c6flashingguide.md), which has the steps for a Mac and for Windows. Then, with the file for your board:
 
 ```
-pip install esptool
-esptool.py --chip esp32p4 -p /dev/cu.usbmodemXXXX write_flash 0x0 meck-p4-0.1.bin
+esptool --chip esp32p4 -p /dev/cu.usbmodemXXXX write-flash 0x0 meck-p4-0.9-tft-ble-merged.bin
 ```
 
 (Replace the port with whatever your device shows up as. On macOS this
@@ -142,7 +154,7 @@ will be `/dev/cu.usbmodem*`, on Linux `/dev/ttyACM0`, on Windows a COM
 port like `COM3`.)
 
 If you’ve previously had something else on the device, run
-`esptool.py --chip esp32p4 -p PORT erase_flash` first to clear NVS so Meck
+`esptool --chip esp32p4 -p PORT erase-flash` first to clear NVS so Meck
 starts with clean defaults.
 
 ### Building from Source
@@ -184,7 +196,7 @@ This generates `release/meck-p4-0.1.bin` along with a SHA-256 checksum.
 
 ### Build settings: WiFi or Bluetooth
 
-`sdkconfig` is not tracked by git, so these settings are made in `idf.py menuconfig`. The screen, LoRa radio and board type (with or without the keyboard) are chosen under **Example Configuration** as usual.
+`sdkconfig` is not tracked by git, so these settings are made in `idf.py menuconfig`. The screen, LoRa radio and board type (with or without the keyboard) are chosen under **Example Configuration** as usual. The [build switching guide](information/Meck%20Docs/buildswitchingguide.md) has the same steps with why each one is needed, and how to check which firmware the C6 runs.
 
 **WiFi build** (the C6 runs ESP-AT):
 
@@ -1549,6 +1561,8 @@ Rate) and the preset row will show “Custom”.
   ESP-Hosted's tasks with their stacks in PSRAM
 - `information/Meck Docs/c6flashingguide.md` - the C6 flashing guide for the
   Bluetooth builds
+- `information/Meck Docs/buildswitchingguide.md` - the menuconfig settings
+  for switching between WiFi and Bluetooth builds
 - everything else — straight from the upstream LilyGo example tree
 
 The Meck-specific work lives almost entirely in `components/meshcore/`. If
