@@ -1,6 +1,6 @@
-# Flashing the ESP-Hosted firmware onto the C6 chip: AMOLED LR2021 board
+# Flashing the ESP-Hosted firmware onto the C6 chip
 
-A step-by-step guide for your AMOLED LR2021 T-Display P4 and your Mac. The method was first used on a TFT SX1262 board in September 2026, and this version was checked for the AMOLED LR2021 board on 6 November 2026.
+A step-by-step guide for your T-Display P4 and your Mac. The steps are the same for every version of the board, TFT or AMOLED, SX1262 or LR2021: the C6's socket and buttons are wired the same way on all of them (see Wiring).
 
 ## What this does and why
 
@@ -12,7 +12,7 @@ The short version: put a small helper program from LilyGo onto the P4, connect t
 
 ## Read this before you start
 
-**Take the keyboard attachment off first.** The C6 flash only works with the T-Display P4 keyboard attachment removed, so take it off before you start, and leave it off until Part 7 is finished.
+**If your P4 has the keyboard attachment, take it off first.** The C6 flash only works with the T-Display P4 keyboard attachment removed, so take it off before you start, and leave it off until Part 7 is finished.
 
 **Test the WiFi features on this board first.** Meck-P4's WiFi Companion and Web Reader both work by sending commands to the C6's ESP-AT firmware. After this guide they will stop working on this board until Meck-P4's WiFi is rewritten for ESP-Hosted. So do any testing that needs the app over WiFi on this board first.
 
@@ -213,11 +213,13 @@ done && cat c6chunks/chunk_*.bin > c6_backup.bin && ls -la c6_backup.bin && xxd 
 
 Leave it running until Terminal is ready for a new command, which takes several minutes. It has worked if `c6_backup.bin` is listed at exactly `4194304` bytes and the last line shows `e9`.
 
-Straight away, give the backup this board's name so no later backup can replace it:
+Straight away, give the backup its own name so no later backup can replace it:
 
 ```
-mv c6_backup.bin c6_backup_amoled_lr2021.bin
+mv c6_backup.bin c6_backup_myp4.bin
 ```
+
+If you flash more than one board, give each backup a different name, for example by changing `myp4` to something that tells your boards apart.
 
 If one piece keeps failing over and over, check the pins are firmly on the adapter, especially GND. If the C6 seems to have dropped out of download mode, press Control and C to stop the block, do the three button steps from Part 4 again, and paste the block again. It starts over from piece 0.
 
@@ -255,10 +257,10 @@ idf.py -p /dev/cu.wchusbserial5B910814331 flash
 Do Parts 1 to 4 again, then in Part 6 write the backup instead of the ESP-Hosted file:
 
 ```
-esptool.py --chip esp32c6 --port /dev/cu.usbserial-240 write_flash 0x0 c6_backup_amoled_lr2021.bin
+esptool.py --chip esp32c6 --port /dev/cu.usbserial-240 write_flash 0x0 c6_backup_myp4.bin
 ```
 
-Then finish with Part 7.
+Use the name you gave that board's backup in Part 5. Then finish with Part 7.
 
 ## If something goes wrong
 
@@ -274,7 +276,7 @@ Then finish with Part 7.
 
 ## Checklist
 
-1. Take the keyboard attachment off.
+1. Take the keyboard attachment off, if your P4 has one.
 2. Do any WiFi app testing on this board first.
 3. SD card in the P4, then **Settings**, **Backup to SD**.
 4. Terminal: `. $HOME/esp/esp-idf/export.sh`, `cd ~/Downloads/c6flash`, then check both files with `shasum -a 256` (Part 1, Step 4).
@@ -285,7 +287,7 @@ Then finish with Part 7.
 9. P4 on. Monitor: `Coprocessor preparation completed` again.
 10. Hold C6 BOOT, press and release C6 Reset, let go of C6 BOOT.
 11. `chip_id` on the adapter's port.
-12. Backup (Part 5, several minutes), then rename it `c6_backup_amoled_lr2021.bin`.
+12. Backup (Part 5, several minutes), then rename it, for example `c6_backup_myp4.bin`.
 13. `write_flash 0x0 c6_esp_hosted_2.0.17.bin` on the adapter's port; wait for `Hash of data verified`.
 14. Close the monitor, `idf.py -p <P4 port> flash` from your Meck-P4 folder, unplug the C6 cable, power-cycle, check your settings are back.
 
