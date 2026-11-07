@@ -1,9 +1,10 @@
 # Meck-P4 — MeshCore for the LilyGo T-Display P4
 
 A port of [Meck](https://github.com/pelgraine/Meck) (a MeshCore fork) to the
-LilyGo T-Display P4. Targets the ESP32-P4 main MCU; as of v0.4 the onboard
-ESP32-C6 is used for WiFi companion connectivity to the MeshCore app (BLE is
-not yet enabled). Built on top of LilyGo’s
+LilyGo T-Display P4. Targets the ESP32-P4 main MCU; the onboard ESP32-C6
+provides the companion connection to the MeshCore app: over WiFi (as of v0.4)
+while the C6 runs LilyGo's ESP-AT firmware, or over Bluetooth (as of v0.9)
+once the C6 has been flashed with ESP-Hosted. Built on top of LilyGo’s
 [T-Display-P4](https://github.com/Xinyuan-LilyGO/T-Display-P4) example tree
 with a `meshcore` ESP-IDF component added on top.
 
@@ -57,7 +58,10 @@ with a `meshcore` ESP-IDF component added on top.
 - [Config Import](#config-import)
 - [Debug Logs](#debug-logs)
 - [Settings](#settings)
+- [Companion CLI](#companion-cli)
+- [Bluetooth Companion](#bluetooth-companion)
 - [WiFi Companion](#wifi-companion)
+- [Companion Repeat Mode](#companion-repeat-mode)
 - [GPS](#gps)
 - [Battery](#battery)
 - [Clock Sync](#clock-sync)
@@ -80,7 +84,7 @@ Meck-P4 runs on the LilyGo T-Display P4 in **both** of its display variants, and
 |**TFT**   |H0405S002T002  |a-Si TFT, 4.05", 540 × 1168 px   |HI8561        |HI8561 (integrated)|
 |**AMOLED**|H0410S001AMT001|a-Si AMOLED, 4.1", 568 × 1232 px |RM69A10       |GT9895             |
 
-Both panels are 10-point capacitive touch, and the UI is rendered rotated to portrait. Everything outside the screen is common to both boards: an **ESP32-P4** (RISC-V dual-core) with 16 MB flash and 32 MB PSRAM; an onboard **ESP32-C6** (WiFi 6 / BLE 5.3) coprocessor over SDIO that provides WiFi companion connectivity to the MeshCore app as of v0.4 (BLE not yet enabled); an **SX1262** LoRa radio on the HPD16A module; a **BQ27220** fuel gauge (1000 mAh) with an **LGS4056H** charger; an **L76K** GPS on UART1; a **PCF8563** RTC (initialised but not yet used); an **ES8311** audio codec (NS4150B amplifier plus an electret microphone); an **ICM20948** IMU; an **AW86224** haptic motor; an **OV2710** MIPI camera; and an **XL9535** IO expander.
+Both panels are 10-point capacitive touch, and the UI is rendered rotated to portrait. Everything outside the screen is common to both boards: an **ESP32-P4** (RISC-V dual-core) with 16 MB flash and 32 MB PSRAM; an onboard **ESP32-C6** (WiFi 6 / BLE 5.3) coprocessor over SDIO that provides the companion connection to the MeshCore app: WiFi with LilyGo's ESP-AT firmware (as of v0.4), or Bluetooth once the C6 has been flashed with ESP-Hosted (as of v0.9, see [Bluetooth Companion](#bluetooth-companion)); an **SX1262** LoRa radio on the HPD16A module; a **BQ27220** fuel gauge (1000 mAh) with an **LGS4056H** charger; an **L76K** GPS on UART1; a **PCF8563** RTC (initialised but not yet used); an **ES8311** audio codec (NS4150B amplifier plus an electret microphone); an **ICM20948** IMU; an **AW86224** haptic motor; an **OV2710** MIPI camera; and an **XL9535** IO expander.
 
 LilyGo also makes an **LR2021** radio variant of the board, and Meck-P4 supports it with its own firmware build (the standard builds are for the SX1262). On sub-GHz it behaves exactly like the SX1262 boards, and it adds **2.4 GHz LoRa**: the Radio Preset picker gains three 2.4 GHz presets (**2.4GHz Sydney**, **2.4GHz (2450)** and **2.4GHz Wide (2450)**), and on 2.4 GHz frequencies TX power is limited to **10 or 12 dBm**, the LR2021's 2.4 GHz ceiling. **2.4 GHz currently works on the internal antenna only** — the external antenna path is sub-GHz only for now. Sub-GHz works on Internal or External as usual on either radio.
 
@@ -99,6 +103,8 @@ If you’ve previously saved settings to SD and then erase NVS (factory
 reset, fresh flash), the device automatically restores everything from the
 SD backup on first boot.
 
+The MeshCore app's **Share contact** (v0.9) re-sends a contact's last advert. Meck-P4 keeps the last advert heard from each node in `/sdcard/meshcore/adverts`, so Share contact needs an SD card.
+
 -----
 
 ## Flashing Firmware
@@ -107,6 +113,8 @@ Download the latest firmware from the
 [Releases](https://github.com/pelgraine/Meck-P4/releases) page. The release
 file is a **merged binary** containing the bootloader, partition table,
 and application combined into a single image — flash it at address `0x0`.
+
+**Bluetooth builds (v0.9 and later)** have `-ble` in the file name (`-ble`, `-ble-nokeyboard` and `-ble-garmin`). They need the C6 flashed with ESP-Hosted 2.0.17 first, using the [C6 flashing guide](information/Meck%20Docs/c6flashingguide.md), which takes a 3.3 V USB-to-serial adapter. Once the C6 runs ESP-Hosted, WiFi Companion and the Web Reader don't work, whichever build is on the P4, until ESP-AT is put back on the C6 (see "Going back to ESP-AT later" in the guide). Builds without `-ble` in the name are WiFi builds and need ESP-AT on the C6. See [Bluetooth Companion](#bluetooth-companion).
 
 ### First-Time Flash (Merged Firmware)
 
@@ -173,6 +181,30 @@ tools/build-release.sh 0.1
 ```
 
 This generates `release/meck-p4-0.1.bin` along with a SHA-256 checksum.
+
+### Build settings: WiFi or Bluetooth
+
+`sdkconfig` is not tracked by git, so these settings are made in `idf.py menuconfig`. The screen, LoRa radio and board type (with or without the keyboard) are chosen under **Example Configuration** as usual.
+
+**WiFi build** (the C6 runs ESP-AT):
+
+1. Example Configuration: untick **Meck: ESP-Hosted C6 test build**.
+2. Component config > Wi-Fi: tick **Host WiFi Enable**.
+3. Component config > Bluetooth: untick **Bluetooth**.
+
+**Bluetooth build** (the C6 runs ESP-Hosted), in this order:
+
+1. Example Configuration: tick **Meck: ESP-Hosted C6 test build**.
+2. Component config > Wi-Fi: untick **Host WiFi Enable**. With it ticked, the Bluetooth build does not compile.
+3. Component config > Bluetooth: tick **Bluetooth**.
+4. Component config > Bluetooth > Host: choose **NimBLE - BLE only**.
+5. Component config > Bluetooth > NimBLE Options > Memory allocation strategy: choose **External SPIRAM**.
+6. In NimBLE Options: tick **Persist the BLE Bonding keys in NVS**, so phones reconnect without the PIN after a reboot.
+7. NimBLE Options > Host-controller Transport: untick **Enable Uart Transport**.
+8. Component config > ESP-Hosted config > Bluetooth Support: tick **Enable Hosted Nimble Bluetooth support** (it only appears after step 7). Leave **BT Nimble HCI Type** on VHCI.
+9. For the Garmin build only: Example Configuration: tick **Meck: Garmin watch support (BLE companion without a PIN)** (it appears after step 4).
+
+Coming back to a Bluetooth build after a WiFi build needs all nine steps again: saving the WiFi settings drops the Bluetooth options from `sdkconfig`, and ticking Bluetooth again brings back ESP-IDF's defaults, which use the Bluedroid host.
 
 -----
 
@@ -947,10 +979,12 @@ The scan window is 30 seconds. During that time:
 - A single DISCOVER_REQ goes out at the start (zero-hop, ROUTE_TYPE_DIRECT, ~12 bytes on the wire).
 - The type filter is set to **repeaters + rooms** (chat clients and sensors are not asked to respond).
 - The list pre-seeds with up to 32 repeaters/rooms from your recent-heard ring so the screen has content immediately while live responses arrive.
-- Any flood advert that lands during the window is also captured as a secondary signal, providing fallback for older repeater firmware that doesn’t yet implement DISCOVER_RESP.
 - A random tag is generated per scan; late responses to previous scans are ignored.
+- As of v0.9, live entries come only from replies to the scan. Adverts heard during the window are not added to the list.
 
 Tap **Rescan** to start a fresh scan. Tap **Back** to return to the home screen.
+
+As of v0.9 the MeshCore app's own **Discover nodes** works through Meck-P4 as well: the P4 sends the app's request zero-hop and passes every reply back to the app.
 
 -----
 
@@ -1248,7 +1282,7 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |--------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 |**Node Name**       |Tap to open virtual keyboard, type, **Confirm** to save                                                                                                                                                                         |
 |**Frequency**       |Tap to open numeric editor, type exact value (e.g. 916.575), **Confirm** to save and apply                                                                                                                                      |
-|**Bandwidth**       |Tap to open numeric editor, type value in kHz (e.g. 62.5), **Confirm** to save and apply                                                                                                                                        |
+|**Bandwidth**       |Tap to open numeric editor, type value in kHz (e.g. 62.5), **Confirm** to save and apply. On the LR2021 build (v0.9) the editor accepts up to 1000 kHz, in the chip's own steps (31.25, 41.67, 62.5, 83.33, 101.5625, 125, 203.125, 250, 406.25, 500, 812.5, 1000)|
 |**Spreading Factor**|Tap to open numeric editor, type value (5-12), **Confirm** to save and apply                                                                                                                                                    |
 |**Coding Rate**     |Tap to cycle: 4/5, 4/6, 4/7, 4/8                                                                                                                                                                                                |
 |**Radio Preset**    |Tap to open preset picker — 17 community presets covering AU, US, EU, CN regions, plus three 2.4 GHz presets on the LR2021 build. Selecting a preset populates the Frequency, Bandwidth, SF, and CR fields above. Shows “Custom” when the current values don’t match any preset.|
@@ -1260,6 +1294,7 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Home Color**      |Tap to cycle: Plain / Multi                                                                                                                                                                                                     |
 |**Canned Messages >>**|Opens the Canned Messages sub-screen — five editable message slots sent from the compose screens via the keyboard mic key. See [Canned Messages](#canned-messages).|
 |**Antenna**         |Tap to toggle: Internal / External. Selects the SKY13453 LoRa antenna port and applies live. On 2.4 GHz frequencies keep this on Internal — the external path is sub-GHz only for now.                                                                                                                                    |
+|**BLE Companion**   |Bluetooth builds only (v0.9). Tap to toggle: On / Off, saved. When on, Bluetooth starts at every boot and the home screen shows the pairing PIN. See [Bluetooth Companion](#bluetooth-companion).|
 |**Position >>**     |Opens the Position sub-screen (latitude, longitude, share position mode, copy position). See [Position Adverts and Share Position](#position-adverts-and-share-position).|
 |**Contacts >>**     |Opens the Contacts sub-screen (auto-add policies, type toggles)                                                                                                                                                                 |
 |**Channels >>**     |Opens the Channels sub-screen (per-channel region scope, notification preferences, notification tones, add/delete channels)                                                                                                     |
@@ -1272,10 +1307,60 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Orientation**     |Tap to toggle: Portrait (default) / Landscape. Applies live, rebuilding every screen at the new rotation, and persists across reboots. See [Screen Orientation](#screen-orientation).|
 |**KB Theme**        |Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details.                                                                                                  |
 |**KB Layout**       |Tap to cycle: QWERTY / AZERTY / QWERTZ / ЙЦУКЕН (Cyrillic). Layout switches apply live to every keyboard instance.                                                                                                            |
-|**Experimental Features >>**|Opens the Experimental Features sub-screen — kept a level away from the main list on purpose. Currently holds one action, **Delete all contacts**: after a confirmation card, every contact is deleted (favourites and custom paths included) along with the direct-message history; channel messages are kept, and the device restarts when the purge finishes.|
+|**Experimental Features >>**|Opens the Experimental Features sub-screen — kept a level away from the main list on purpose. It holds **Delete all contacts**: after a confirmation card, every contact is deleted (favourites and custom paths included) along with the direct-message history; channel messages are kept, and the device restarts when the purge finishes. As of v0.9 it also holds **Companion CLI** (see [Companion CLI](#companion-cli)) and, on the LR2021 build, **RX Boosted Gain** and **CAD** (tap to toggle, both off by default).|
 |**Identity**        |Read-only display of your public key                                                                                                                                                                                            |
 
 All settings persist via NVS with an SD card mirror.
+
+-----
+
+## Companion CLI
+
+As of v0.9, **Settings > Experimental Features > Companion CLI** is a command line for the device itself, with the MeshCore v1.18 companion command set:
+
+- `get` / `set` for `radio`, `af`, `dutycycle`, `int.thresh`, `tx`, `rxdelay`, `agc.reset.interval`, `path.hash.mode`, `multi.acks`, `txdelay`, `direct.txdelay`, `name`, `pin`, the `wifi` settings and `tz.offset`;
+- `board`, `ver` and `reboot`;
+- on the LR2021 build, `get/set radio.rxgain on|off` and `get/set cad on|off` (the same settings as the RX Boosted Gain and CAD rows in Experimental Features). On the SX1262 build, the two `set` commands reply `Error: unsupported` and change nothing.
+
+Commands run straight away on the device, and the reply is shown under the command, in red when it reads as an error. The radio tuning values (`af`, `rxdelay`, `txdelay`, `direct.txdelay`, `multi.acks`, `int.thresh` and `agc.reset.interval`) are saved and used by the radio. Radio values are checked against the radio's limits: on the LR2021, TX power is capped at 12 dBm on 2.4 GHz and the bandwidth goes up to 1000 kHz.
+
+The MeshCore app's **Command Line** runs the same commands, over Bluetooth or WiFi. Meck-P4 reports companion protocol version 14.
+
+-----
+
+## Bluetooth Companion
+
+As of v0.9, Meck-P4 can be a Bluetooth companion for the MeshCore app. The P4 runs the Bluetooth software itself (ESP-IDF's NimBLE) and uses the C6 as its radio through ESP-Hosted, so it offers the standard MeshCore Bluetooth service the app looks for.
+
+**The C6 has to be flashed first.** The Bluetooth builds need ESP-Hosted 2.0.17 on the C6 instead of LilyGo's ESP-AT firmware: follow the [C6 flashing guide](information/Meck%20Docs/c6flashingguide.md). Flashing Meck-P4 onto the P4 never changes the C6. The boot log has one line starting `C6:` that says whether the ESP-Hosted link to the C6 came up and which firmware version the C6 reports. Without that link, Bluetooth does not start.
+
+### Turning it on and pairing
+
+1. Open **Settings** and tap **BLE Companion (tap to toggle)** to turn it on. The choice is saved, and while it is on, Bluetooth starts by itself at every boot.
+2. The home screen shows **BLE PIN:** followed by six digits. The PIN is made the first time and then stays the same.
+3. In the MeshCore app, connect to **MeshCore-** followed by your node name, and type the PIN when your phone asks for it.
+
+The pairing is remembered, so the phone reconnects without the PIN, including after the P4 restarts.
+
+### While the app is connected
+
+- **Clock:** the app sends the phone's time when it connects. Meck-P4 takes it unless it is earlier than the P4's own clock, as upstream MeshCore does.
+- **Read on the P4 once the app has them:** while a paired app is connected and has collected every waiting message, channel messages and DMs are marked read on the P4 too. A DM that arrives after the app's sync stays unread until the app collects it. With no app connected, messages stay unread, even with BLE Companion on.
+
+### Not available in the Bluetooth builds
+
+WiFi Companion, the Web Reader and the BLE keyboard all work by sending AT commands to the C6, so they are switched off in the Bluetooth builds. The WiFi Companion row is still in Settings, but WiFi won't connect.
+
+### Garmin watch build
+
+The Garmin build (`-ble-garmin`, or **Meck: Garmin watch support** in menuconfig) lets a Garmin watch running the [Meck Garmin](https://github.com/pelgraine/Meck-Garmin) Connect IQ app connect straight to the P4, with no phone in between:
+
+- pairing without a PIN, for the watch and for phones (the PIN on the home screen isn't needed in this build);
+- the P4 also advertises as a heart-rate sensor, so the watch's **Sensors & Accessories** menu can pair with it (no heart-rate data is sent);
+- frames go to and from the watch in small slices, because it keeps the smallest Bluetooth packet size;
+- a favourites list and contact name look-up for the watch's Favourites, repeater admin and Discover screens.
+
+The MeshCore phone app works with the Garmin build too.
 
 -----
 
@@ -1285,6 +1370,8 @@ As of v0.4, Meck-P4 can act as a WiFi companion radio for the MeshCore app.
 The onboard ESP32-C6 provides the WiFi link (over SDIO using AT commands),
 and the MeshCore app connects to the device over your local network on TCP
 port 5000.
+
+WiFi Companion needs LilyGo's ESP-AT firmware on the C6. On a board whose C6 has been flashed with ESP-Hosted for the [Bluetooth Companion](#bluetooth-companion), WiFi Companion and the Web Reader don't work, with any build, until ESP-AT is put back (see "Going back to ESP-AT later" in the [C6 flashing guide](information/Meck%20Docs/c6flashingguide.md)).
 
 ### Connecting to WiFi
 
@@ -1313,6 +1400,19 @@ connection. Touch or the boot button wakes the screen.
 
 For instructions on using the MeshCore companion app itself (messaging,
 contacts, channels, and so on), see <https://meshcore.io/>.
+
+-----
+
+## Companion Repeat Mode
+
+As of v0.9, the MeshCore app can switch on companion repeat mode from its radio settings, over Bluetooth or WiFi. While it is on, Meck-P4 also forwards the packets it hears, as a repeater does, apart from echoes of its own channel messages. It is off by default.
+
+The app can only switch it on with an allowed frequency, and it can ask the P4 for the list:
+
+- 433.000 MHz, and 433.05 to 434.79 MHz;
+- 869.495 MHz, and 863 to 870 MHz;
+- 918.000 MHz, and 902 to 928 MHz;
+- 2.4 to 2.5 GHz (LR2021 build).
 
 -----
 
@@ -1370,8 +1470,10 @@ the pack's percentage and mAh figures are estimates.
 ## Clock Sync
 
 Meck-P4 has no hardware RTC backup yet (PCF8563 is initialised but not
-read on boot or written on shutdown), so the clock starts unset on every
-reboot. Once synced, the clock is used for message timestamps and the
+read on boot or written on shutdown), so the clock starts unset after the
+device is switched on. As of v0.9, after a software restart, crash or
+watchdog reset the clock carries on from the time it had instead (MeshCore
+PR #1896). Once synced, the clock is used for message timestamps and the
 status bar display.
 
 The clock is automatically synced from any of these sources:
@@ -1382,6 +1484,9 @@ The clock is automatically synced from any of these sources:
    mesh — no GPS or companion app needed.
 1. **GPS RMC sentences** — once the L76K acquires a satellite fix, the
    parsed UTC time is pushed into the soft RTC at the GPS sentence rate.
+1. **The MeshCore app** - when the app connects (Bluetooth or WiFi), it
+   sends the phone's time. Meck-P4 takes it unless it is earlier than the
+   P4's own clock, as upstream MeshCore does.
 
 The plausibility window is generous (rejects advert timestamps before
 2025-01-01 or after 2032-01-01) so legitimate adverts always pass while
@@ -1435,6 +1540,11 @@ Rate) and the preset row will show “Custom”.
   (BQ27220 fuel gauge, SX1262 radio, XL9555 IO expander, L76K GPS, and
   friends)
 - `tools/build-release.sh` — single-command release-image builder
+- `overrides/esp_hosted/` - local copy of ESP-Hosted 2.0.17, used through
+  `override_path` in `main/idf_component.yml`. Its one change creates
+  ESP-Hosted's tasks with their stacks in PSRAM
+- `information/Meck Docs/c6flashingguide.md` - the C6 flashing guide for the
+  Bluetooth builds
 - everything else — straight from the upstream LilyGo example tree
 
 The Meck-specific work lives almost entirely in `components/meshcore/`. If
@@ -1456,6 +1566,11 @@ Files of particular note:
 - `NotifSounds.h` — per-channel notification tone config, SD scanning, and playback request queue
 - `BundledSounds.h` — 7 default notification MP3s embedded as byte arrays, copied to SD on first boot
 - `es8311.cpp` — codec write-fn / clock reconfig / volume control routed through LilyGo’s `Cpp_Bus_Driver::Es8311`
+- `SerialNimBLEInterface.cpp` / `SerialNimBLEInterface.h` - the Bluetooth
+  companion: the MeshCore Bluetooth service on NimBLE, PIN pairing, and the
+  Garmin build's slicing and heart-rate advert
+- `MeckCli.cpp` / `MeckCli.h` - the Companion CLI, also used by the app's
+  Command Line
 - `meck_app.cpp` — lifecycle: NVS init, identity, prefs, mesh task spawn
 - `target.cpp` — radio attach, deferred-config queue, battery accessors,
   antenna selection
@@ -1577,6 +1692,14 @@ no particular timeframes attached.
 - [x] **Display memory fixes** (v0.8) — the landscape rotation buffer is allocated once instead of per frame (map screen no longer freezes under tile-decode pressure); the screen-off path reserves the framebuffer's memory so waking the screen cannot fail for lack of it.
 - [x] **Audio player in landscape** (v0.8) — Now Playing scrolls so all controls are reachable.
 - [x] **LR2021 radio support** (v0.7.4) — LilyGo's LR2021 variant of the T-Display P4 runs its own build of the firmware, verified working, adding 2.4 GHz LoRa alongside sub-GHz (2.4 GHz on the internal antenna only for now). See [Supported Devices](#supported-devices).
+- [x] **MeshCore v1.18 core fixes** (v0.9) - encrypted data that isn't whole 16-byte blocks is rejected; empty channel slots are skipped; packet pool checks; replies Meck-P4 doesn't handle itself are passed to the app; trace positions above 255; accented node names no longer cut mid-character in adverts; 24 contacts tried when decrypting (up from 8); text type 3 (CLI command) relayed from the app; forwarded ACKs wait the direct retransmit delay (MeshCore #3573).
+- [x] **Bluetooth companion** (v0.9) - the MeshCore app pairs with the P4 over Bluetooth once the C6 runs ESP-Hosted, with PIN pairing, reconnection without the PIN, clock sync from the app and messages marked read once the app has them. See [Bluetooth Companion](#bluetooth-companion).
+- [x] **Garmin watch build** (v0.9) - the [Meck Garmin](https://github.com/pelgraine/Meck-Garmin) watch app connects straight to the P4.
+- [x] **Companion CLI and the app's Command Line** (v0.9) - the MeshCore v1.18 companion command set on the device and from the app; protocol version 14. See [Companion CLI](#companion-cli).
+- [x] **Companion repeat mode** (v0.9) - switched on from the app. See [Companion Repeat Mode](#companion-repeat-mode).
+- [x] **App commands from MeshCore v1.18** (v0.9) - the app's Discover nodes, requests to nodes that aren't contacts, Share contact, and setting the receive delay and airtime factor.
+- [x] **RX Boosted Gain and CAD** (v0.9, LR2021 build) - in Settings > Experimental Features and the Companion CLI.
+- [x] **Clock kept across restarts** (v0.9) - after a software restart, crash or watchdog reset (MeshCore PR #1896). See [Clock Sync](#clock-sync).
 
 **Pending:**
 
@@ -1586,9 +1709,9 @@ no particular timeframes attached.
 - [ ] Picture over LoRa — enable image transfer end-to-end (infrastructure is complete, pending final integration)
 - [ ] Voice tile is live but experimental (it warns on entry); Camera stays disabled
 - [ ] Games follow-ups — allocate message rings only for channels that exist so 2 MB ROMs load at any point in a session; persist MBC3 real-time-clock state (Pokémon Crystal's clock); keyboard row selection in the games menu and ROM list; Snake and Minesweeper as further Games entries; optional haptic tick on the touch buttons
-- [ ] ESP32-C6 BLE companion firmware (WiFi companion is complete as of v0.4)
+- [ ] WiFi Companion and the Web Reader on boards whose C6 runs ESP-Hosted (today they need ESP-AT on the C6)
 - [ ] Mentions-only notification filtering — the "Mentions" preference currently behaves the same as "All"; filtering to trigger only on @nodename is planned
-- [ ] Serial CLI commands on the P4 — local serial settings require a serial terminal, which is not yet implemented. Remote CLI via Repeater Admin works normally
+- [ ] Serial CLI commands on the P4 — the Companion CLI runs on the device (Settings > Experimental Features) and from the app's Command Line as of v0.9, but not yet from a serial terminal. Remote CLI via Repeater Admin works normally
 - [ ] M4B audiobook files not supported (MP3 and WAV only)
 - [ ] Audio player pause button can take a second or two to refresh after a track change or when returning to the Now Playing screen; it no longer disappears for the rest of the session
 - [ ] Audio cover-art rendering at >256x256 — pre-flight succeeds but the LVGL heap
