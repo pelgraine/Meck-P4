@@ -157,7 +157,11 @@ struct P4NodePrefs {
     // for group channels, index MAX_GROUP_CHANNELS for DMs. Values:
     // 0 = All (default), 1 = Mentions only, 2 = None (muted).
     // Appending here is safe — loadPrefs tolerates short reads.
-    uint8_t channel_notif[41];       // 40 group channels + 1 DM slot
+    // The array stays at 41 entries (sized when the limit was 40 channels)
+    // so the saved settings keep their layout. With MAX_GROUP_CHANNELS at
+    // 20, entries 0..19 are the group channels, entry 20 is the DM slot and
+    // entries 21..40 are unused.
+    uint8_t channel_notif[41];
 
     // Position sharing for adverts. position_mode controls whether the
     // device includes lat/lon in self-adverts:
@@ -681,7 +685,10 @@ public:
     // Channels — NVS primary, SD backup
     //
     // Stored as: P4ChannelsHeader + P4ChannelRecord[MAX_GROUP_CHANNELS]
-    // NVS blob size: 8 + (68 × 8) = 552 bytes — fits easily
+    // NVS blob size: 8 + (99 × 20) = 1988 bytes. A blob saved by a
+    // 40-channel build (3968 bytes) is too big for this buffer, so the NVS
+    // read fails and loadChannels falls back to the SD backup, which holds
+    // the first 20 channels; the next save writes the 20-channel size.
     // =====================================================================
 
     bool loadChannels(P4ChannelRecord* channels, int maxChannels, int &outCount) {

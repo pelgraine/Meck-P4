@@ -577,7 +577,8 @@ public:
           _rtc_ref(rtc), _store(nullptr), _prefs(nullptr)
     {
         // Per-channel message rings, each P4_MSG_PER_CHANNEL entries in PSRAM.
-        // 8 channels × 500 msgs × ~308 bytes ≈ 1.2 MB total. PSRAM has plenty.
+        // 20 channels × 500 msgs × 392 bytes ≈ 3.7 MB total (40 channels used
+        // ≈ 7.5 MB, which left too little PSRAM for map tiles).
         size_t per_ring = P4_MSG_PER_CHANNEL * sizeof(P4ChannelMessage);
         for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
             _msgs_ch[i] = (P4ChannelMessage*)heap_caps_malloc(per_ring, MALLOC_CAP_SPIRAM);
