@@ -373,7 +373,7 @@ static const RadioPreset RADIO_PRESETS[] = {
     // checkOutputPower: -19..+12 on the high-frequency path). Bandwidths are
     // valid LR2021 LoRa steps (406.25 / 812.5 / 1000 kHz; the chip's LoRa max
     // is 1000, not the SX1280's 1625).
-    { "2.4GHz Sydney",            2400.500f, 406.25f, 11, 5, 12 },
+    { "2.4GHz Sydney",            2483.000f, 406.25f, 11, 5, 12 },
     { "2.4GHz (2450)",            2450.000f, 812.5f,  10, 5, 12 },
     { "2.4GHz Wide (2450)",       2450.000f, 1000.0f, 10, 5, 12 },
 #endif
