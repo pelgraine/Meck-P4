@@ -593,7 +593,7 @@ the home screens (wrapping at the ends, like swipes).
 |**Up / Down** (Home page)|Cycle a selection ring around the navigation tiles|
 |**Up / Down** (Timezones page)|Cycle the ring through the three zone rows|
 |**Enter**|Open the ringed tile or zone row. On the Advert page, send an advert; on the GPS page, toggle GPS power (the same actions as the touch long-press)|
-|**M / C / S / E / N / F / G / R / P / B**|Open Messages, Contacts, Settings, Reader, Notes, Discover (F), Maps (G), Trace (R), Audio (P), or Web (B) directly — the same key map as the Meck T-Deck builds|
+|**M / C / S / E / N / F / G / R / P / B**|Open Messages, Contacts, Settings, Reader, Notes, Discover (F), Maps (G), Trace (R), Audio (P), or Web (B, not in the Bluetooth builds) directly — the same key map as the Meck T-Deck builds|
 
 The letter shortcuts are lowercase; a shifted letter is treated as a
 deliberate uppercase character and does nothing on the home screen.
@@ -1365,7 +1365,7 @@ The pairing is remembered, so the phone reconnects without the PIN, including af
 
 ### Not available in the Bluetooth builds
 
-WiFi Companion, the Web Reader and the BLE keyboard all work by sending AT commands to the C6, so they are switched off in the Bluetooth builds. The WiFi Companion row is still in Settings, but WiFi won't connect. The Web Reader won't be available in the Bluetooth builds, and they have no Web tile on the home grid: Games takes its place next to Audio.
+WiFi Companion, the Web Reader and the BLE keyboard all work by sending AT commands to the C6, so they are switched off in the Bluetooth builds. The Bluetooth builds have no WiFi Companion row in Settings. The Web Reader won't be available in the Bluetooth builds, and they have no Web tile on the home grid: Games takes its place next to Audio. The **B** shortcut on the home screen does nothing in these builds.
 
 ### Garmin watch build
 

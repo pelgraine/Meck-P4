@@ -11125,16 +11125,29 @@ static void create_settings_screen() {
     y += 65;
 #endif
 
-    // WiFi Companion navigation row → opens sub-screen with SSID/password
-    lv_obj_t *wifi_value_lbl = NULL;
-    create_settings_row(scroll, "WiFi Companion",
-        &wifi_value_lbl, goto_settings_wifi, y);
-    if (wifi_value_lbl) {
-        lv_label_set_text(wifi_value_lbl, LV_SYMBOL_RIGHT);
-        lv_obj_set_style_text_color(wifi_value_lbl,
-            lv_palette_main(LV_PALETTE_GREY), 0);
+    // WiFi Companion navigation row → opens sub-screen with SSID/password.
+    // Not shown in the ESP-Hosted C6 builds (the Bluetooth builds): WiFi
+    // Companion runs over the C6's ESP-AT link, which those builds leave
+    // unbound (main.cpp), so it could never start, and turning it on would
+    // still save BLE Companion as off. Skipped at RUNTIME, not compiled out,
+    // as the Web tile and the BLE Keyboard row are: show_wifi_row is volatile
+    // so both branches stay in every build.
+#if defined(CONFIG_MECK_C6_ESP_HOSTED_TEST)
+    volatile bool show_wifi_row = false;
+#else
+    volatile bool show_wifi_row = true;
+#endif
+    if (show_wifi_row) {
+        lv_obj_t *wifi_value_lbl = NULL;
+        create_settings_row(scroll, "WiFi Companion",
+            &wifi_value_lbl, goto_settings_wifi, y);
+        if (wifi_value_lbl) {
+            lv_label_set_text(wifi_value_lbl, LV_SYMBOL_RIGHT);
+            lv_obj_set_style_text_color(wifi_value_lbl,
+                lv_palette_main(LV_PALETTE_GREY), 0);
+        }
+        y += 65;
     }
-    y += 65;
 
     // BLE Keyboard navigation row → opens the pairing sub-screen.
     // Hidden from users: the row is skipped at RUNTIME, not compiled out. The
@@ -21979,7 +21992,8 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
             // Letter shortcuts, matching the Meck T-Deck key map for the
             // apps this build carries: M messages (channel picker),
             // C contacts, S settings, E reader, N notes, F discover,
-            // G maps, R trace, P audio, B web. Same actions the home tiles
+            // G maps, R trace, P audio, B web (not in the Bluetooth builds).
+            // Same actions the home tiles
             // invoke; lowercase only (a shifted letter is deliberate).
             // Leaving home fires the screen-unload hook, which clears any
             // tile-selection ring.
@@ -21992,7 +22006,24 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
             case 'g': meck_map_ui_show();            return;
             case 'r': goto_trace(NULL);              return;
             case 'p': meck_audio_ui_show_browser();  return;
-            case 'b': cb_open_web(NULL);             return;
+            case 'b': {
+                // B (Web Reader) does nothing in the ESP-Hosted C6 builds
+                // (the Bluetooth builds), which have no Web tile: the Web
+                // Reader fetches through the C6's ESP-AT link, which those
+                // builds leave unbound (main.cpp), so a page would never
+                // load. B is then treated like any key with no shortcut.
+                // Skipped at runtime, as the Web tile is (show_web_tile).
+#if defined(CONFIG_MECK_C6_ESP_HOSTED_TEST)
+                volatile bool web_key_opens_web = false;
+#else
+                volatile bool web_key_opens_web = true;
+#endif
+                if (web_key_opens_web) {
+                    cb_open_web(NULL);
+                    return;
+                }
+                break;
+            }
             default:
                 break;
         }
