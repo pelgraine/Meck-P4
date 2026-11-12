@@ -135,11 +135,15 @@ extern "C" uint16_t meck_battery_get_pct() {
 
 extern "C" void meck_companion_push_channel_msg(uint8_t ch_idx, uint8_t path_len,
                                                   uint32_t timestamp, int8_t snr_x4,
+                                                  uint8_t scope_marker,
+                                                  const uint8_t* path, uint8_t path_bytes,
                                                   const char* text) {
 #if MECK_BLE_ENABLED
-    g_companion.pushChannelMessage(ch_idx, path_len, timestamp, snr_x4, text);
+    g_companion.pushChannelMessage(ch_idx, path_len, timestamp, snr_x4,
+                                   scope_marker, path, path_bytes, text);
 #endif
-    g_wifi_companion.pushChannelMessage(ch_idx, path_len, timestamp, snr_x4, text);
+    g_wifi_companion.pushChannelMessage(ch_idx, path_len, timestamp, snr_x4,
+                                        scope_marker, path, path_bytes, text);
 }
 
 extern "C" void meck_companion_push_contact_msg(const uint8_t* pub_key_prefix,
@@ -245,6 +249,65 @@ extern "C" void meck_companion_push_control_data(int8_t snr_x4, int8_t rssi, uin
     g_companion.pushControlData(snr_x4, rssi, path_len, payload, payload_len);
 #endif
     g_wifi_companion.pushControlData(snr_x4, rssi, path_len, payload, payload_len);
+}
+
+extern "C" void meck_companion_push_trace_data(uint8_t path_len, uint8_t flags,
+                                                uint32_t tag, uint32_t auth_code,
+                                                const uint8_t* path_hashes,
+                                                const uint8_t* path_snrs, int8_t final_snr_x4) {
+#if MECK_BLE_ENABLED
+    g_companion.pushTraceData(path_len, flags, tag, auth_code, path_hashes, path_snrs, final_snr_x4);
+#endif
+    g_wifi_companion.pushTraceData(path_len, flags, tag, auth_code, path_hashes, path_snrs, final_snr_x4);
+}
+
+extern "C" void meck_companion_push_path_discovery(const uint8_t* pub_key,
+                                                    const uint8_t* out_path, uint8_t out_path_len,
+                                                    const uint8_t* in_path, uint8_t in_path_len) {
+#if MECK_BLE_ENABLED
+    g_companion.pushPathDiscovery(pub_key, out_path, out_path_len, in_path, in_path_len);
+#endif
+    g_wifi_companion.pushPathDiscovery(pub_key, out_path, out_path_len, in_path, in_path_len);
+}
+
+extern "C" void meck_companion_push_telemetry_response(const uint8_t* pub_key,
+                                                        const uint8_t* payload,
+                                                        uint8_t payload_len) {
+#if MECK_BLE_ENABLED
+    g_companion.pushTelemetryResponse(pub_key, payload, payload_len);
+#endif
+    g_wifi_companion.pushTelemetryResponse(pub_key, payload, payload_len);
+}
+
+extern "C" void meck_companion_push_raw_data(int8_t snr_x4, int8_t rssi,
+                                              const uint8_t* payload, int payload_len) {
+#if MECK_BLE_ENABLED
+    g_companion.pushRawData(snr_x4, rssi, payload, payload_len);
+#endif
+    g_wifi_companion.pushRawData(snr_x4, rssi, payload, payload_len);
+}
+
+extern "C" void meck_companion_push_channel_data(int8_t snr_x4, uint8_t ch_idx, uint8_t path_len,
+                                                  uint16_t data_type, const uint8_t* data,
+                                                  int data_len) {
+#if MECK_BLE_ENABLED
+    g_companion.pushChannelData(snr_x4, ch_idx, path_len, data_type, data, data_len);
+#endif
+    g_wifi_companion.pushChannelData(snr_x4, ch_idx, path_len, data_type, data, data_len);
+}
+
+extern "C" void meck_companion_push_contact_deleted(const uint8_t* pub_key) {
+#if MECK_BLE_ENABLED
+    g_companion.pushContactDeleted(pub_key);
+#endif
+    g_wifi_companion.pushContactDeleted(pub_key);
+}
+
+extern "C" void meck_companion_push_contacts_full(void) {
+#if MECK_BLE_ENABLED
+    g_companion.pushContactsFull();
+#endif
+    g_wifi_companion.pushContactsFull();
 }
 
 #if MECK_BLE_ENABLED

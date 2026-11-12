@@ -1043,6 +1043,14 @@ static lv_obj_t *obj_cli_scroll     = NULL;
 static lv_obj_t *ta_cli_input       = NULL;
 static lv_obj_t *kb_cli_input       = NULL;
 static lv_obj_t *btn_cli_send       = NULL;
+// Settings > Experimental Features > Rx Log: on-device packet sniffer view
+// (ported from Meck's RxLogScreen). Shows the capture ring in MeckMesh.h,
+// newest first.
+static lv_obj_t   *scr_rx_log        = NULL;
+static lv_obj_t   *obj_rxlog_scroll  = NULL;
+static lv_obj_t   *lbl_rxlog_title   = NULL;
+static lv_timer_t *g_rxlog_timer     = NULL;   // picks up newly received packets, created once
+static uint32_t    g_rxlog_shown_seq = 0;      // ring sequence the list was last built from
 static lv_obj_t *lbl_set_contact_mode         = NULL;
 static lv_obj_t *lbl_set_autoadd_chat         = NULL;
 static lv_obj_t *lbl_set_autoadd_repeater     = NULL;
@@ -1598,6 +1606,8 @@ static void goto_settings_experimental(lv_event_t *e);
 static void goto_settings_from_experimental(lv_event_t *e);
 static void create_companion_cli_screen();
 static void on_experimental_cli_tap(lv_event_t *e);
+static void create_rx_log_screen();
+static void on_experimental_rxlog_tap(lv_event_t *e);
 static void on_purge_no(lv_event_t *e);
 static void settings_contacts_update_labels();
 static int  settings_contacts_get_mode();
@@ -10815,6 +10825,17 @@ static void create_settings_experimental_screen() {
     if (lbl_exp_usb) lv_label_set_text(lbl_exp_usb, "Off");
     y += 65;
 
+    // Rx Log packet sniffer (opens the Rx Log screen)
+    lv_obj_t *rxlog_value_lbl = NULL;
+    create_settings_row(scroll, "Rx Log",
+        &rxlog_value_lbl, on_experimental_rxlog_tap, y);
+    if (rxlog_value_lbl) {
+        lv_label_set_text(rxlog_value_lbl, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_color(rxlog_value_lbl,
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    y += 65;
+
     create_purge_prompt();
     create_usb_prompt();
 }
@@ -11026,6 +11047,230 @@ static void create_companion_cli_screen() {
     lv_obj_set_style_pad_all(obj_cli_scroll, 10, 0);
     lv_obj_set_scroll_dir(obj_cli_scroll, LV_DIR_VER);
     lv_obj_set_flex_flow(obj_cli_scroll, LV_FLEX_FLOW_COLUMN);
+}
+
+// ============================================================================
+// Settings > Experimental Features > Rx Log
+// ----------------------------------------------------------------------------
+// On-device packet sniffer view, ported from Meck's RxLogScreen. Reads the
+// capture ring in MeckMesh.h (filled by logRx()) and shows each received
+// packet as a block: route + payload type and SNR, time and size, hash, path,
+// channel hash/name or From/To, and the decoded line (decryptable channels
+// only). Newest first. The list is rebuilt when the screen opens and then
+// every 5 s while it is open, if the ring has changed.
+// ============================================================================
+static const char* rxlog_type_name(uint8_t t) {
+    switch (t) {
+        case PAYLOAD_TYPE_REQ:        return "REQUEST";
+        case PAYLOAD_TYPE_RESPONSE:   return "RESPONSE";
+        case PAYLOAD_TYPE_TXT_MSG:    return "TEXT";
+        case PAYLOAD_TYPE_ACK:        return "ACK";
+        case PAYLOAD_TYPE_ADVERT:     return "ADVERT";
+        case PAYLOAD_TYPE_GRP_TXT:    return "GROUP_TEXT";
+        case PAYLOAD_TYPE_GRP_DATA:   return "GRP_DATA";
+        case PAYLOAD_TYPE_ANON_REQ:   return "ANON_REQ";
+        case PAYLOAD_TYPE_PATH:       return "PATH";
+        case PAYLOAD_TYPE_TRACE:      return "TRACE";
+        case PAYLOAD_TYPE_MULTIPART:  return "MULTIPART";
+        case PAYLOAD_TYPE_CONTROL:    return "CONTROL";
+        case PAYLOAD_TYPE_RAW_CUSTOM: return "RAW";
+        default:                      return "?";
+    }
+}
+
+// One-line label inside an entry block, cut with "..." when too long.
+static void rxlog_add_line(lv_obj_t *card, const char *text, int32_t line_h) {
+    lv_obj_t *lbl = lv_label_create(card);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(lbl, SCREEN_WIDTH - 90, line_h);
+    lv_label_set_text(lbl, text);
+}
+
+// Add one entry block to the list. Text colour and font are set on the block
+// and inherited by its labels (not registered with the font-scale table: the
+// list is rebuilt, at the current font size, every time the screen opens).
+static void rxlog_add_entry(const P4RxLogEntry& e, int8_t utc_offset_hours,
+                            const lv_font_t *font) {
+    uint8_t route = e.header & PH_ROUTE_MASK;
+    bool flood = (route == ROUTE_TYPE_TRANSPORT_FLOOD || route == ROUTE_TYPE_FLOOD);
+    uint8_t ptype = (e.header >> PH_TYPE_SHIFT) & PH_TYPE_MASK;
+    int32_t line_h = lv_font_get_line_height(font);
+
+    lv_obj_t *card = lv_obj_create(obj_rxlog_scroll);
+    lv_obj_set_size(card, SCREEN_WIDTH - 60, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(card, lv_color_make(15, 15, 22), 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 12, 0);
+    lv_obj_set_style_margin_bottom(card, 10, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(card, 6, 0);
+    lv_obj_set_style_text_color(card, lv_color_white(), 0);
+    lv_obj_set_style_text_font(card, font, 0);
+    lock_screen_scroll(card);
+
+    // Lines 1-3: route + payload type, time (device UTC offset) + size, hash
+    int32_t local = (int32_t)e.timestamp + ((int32_t)utc_offset_hours * 3600);
+    int hrs = (local / 3600) % 24;
+    int mins = (local / 60) % 60;
+    int secs = local % 60;
+    if (hrs < 0) hrs += 24;
+    char hashbuf[2 * MAX_HASH_SIZE + 1];
+    for (int i = 0; i < MAX_HASH_SIZE; i++) {
+        snprintf(hashbuf + 2 * i, 3, "%02X", e.hash[i]);
+    }
+    char head[112];
+    snprintf(head, sizeof(head), "%s %s\n%02d:%02d:%02d  %u bytes\nHash: %s",
+             flood ? "FLOOD" : "DIRECT", rxlog_type_name(ptype),
+             hrs, mins, secs, (unsigned)e.size, hashbuf);
+    lv_obj_t *head_lbl = lv_label_create(card);
+    lv_label_set_text(head_lbl, head);
+
+    // SNR, right-aligned on line 1 (kept out of the column layout)
+    char snrbuf[16];
+    snprintf(snrbuf, sizeof(snrbuf), "%.2fdB", e.snr / 4.0f);
+    lv_obj_t *snr_lbl = lv_label_create(card);
+    lv_label_set_text(snr_lbl, snrbuf);
+    lv_obj_add_flag(snr_lbl, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(snr_lbl, LV_ALIGN_TOP_RIGHT, 0, 0);
+
+    // Line 4: path (hop count + hop hashes, per the bytes-per-hop mode)
+    uint8_t hops = e.path_len & 63;
+    uint8_t bph = (e.path_len >> 6) + 1;
+    char pathbuf[96];
+    int q = snprintf(pathbuf, sizeof(pathbuf), "Path: %d hops", hops);
+    if (hops > 0) {
+        q += snprintf(pathbuf + q, sizeof(pathbuf) - q, " [");
+        for (int h = 0; h < hops && q < (int)sizeof(pathbuf) - 8; h++) {
+            for (int b = 0; b < bph; b++) {
+                q += snprintf(pathbuf + q, sizeof(pathbuf) - q, "%02x", e.path[h * bph + b]);
+            }
+            if (h < hops - 1) q += snprintf(pathbuf + q, sizeof(pathbuf) - q, ",");
+        }
+        q += snprintf(pathbuf + q, sizeof(pathbuf) - q, "]");
+    }
+    rxlog_add_line(card, pathbuf, line_h);
+
+    // Line 5: channel hash/name (group) OR From/To (addressed)
+    char l5[48];
+    if (ptype == PAYLOAD_TYPE_GRP_TXT || ptype == PAYLOAD_TYPE_GRP_DATA) {
+        if (e.channel_name[0]) snprintf(l5, sizeof(l5), "Ch %02x  #%s", e.payload0, e.channel_name);
+        else                   snprintf(l5, sizeof(l5), "Ch %02x", e.payload0);
+        rxlog_add_line(card, l5, line_h);
+    } else if (ptype == PAYLOAD_TYPE_REQ || ptype == PAYLOAD_TYPE_RESPONSE
+               || ptype == PAYLOAD_TYPE_TXT_MSG || ptype == PAYLOAD_TYPE_PATH) {
+        snprintf(l5, sizeof(l5), "From %02x  To %02x", e.payload1, e.payload0);
+        rxlog_add_line(card, l5, line_h);
+    }
+
+    // Line 6: decoded "sender: message" (only present for decryptable channels)
+    if (e.text[0]) rxlog_add_line(card, e.text, line_h);
+}
+
+// Rebuild the whole list from the ring, keeping the scroll position.
+static void rxlog_rebuild() {
+    if (!obj_rxlog_scroll) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh) return;
+
+    P4RxLogEntry *buf = (P4RxLogEntry*)heap_caps_malloc(
+        P4_RXLOG_SIZE * sizeof(P4RxLogEntry), MALLOC_CAP_SPIRAM);
+    if (!buf) return;
+    g_rxlog_shown_seq = mesh->getRxLogSeq();
+    int count = mesh->copyRxLogNewestFirst(buf, P4_RXLOG_SIZE);
+
+    int8_t offset = 0;
+    P4NodePrefs* prefs = mesh->getNodePrefs();
+    if (prefs) offset = prefs->utc_offset_hours;
+    const lv_font_t *font = meck_font(&meck_montserrat_18);
+
+    int32_t keep_y = lv_obj_get_scroll_y(obj_rxlog_scroll);
+    lv_obj_clean(obj_rxlog_scroll);
+
+    if (lbl_rxlog_title) {
+        char hdr[32];
+        snprintf(hdr, sizeof(hdr), "Rx Log: %d pkts", count);
+        lv_label_set_text(lbl_rxlog_title, hdr);
+    }
+
+    if (count == 0) {
+        lv_obj_t *empty = lv_label_create(obj_rxlog_scroll);
+        lv_label_set_text(empty, "No packets received yet\nPackets appear as they arrive");
+        lv_obj_set_style_text_color(empty, lv_color_white(), 0);
+        lv_obj_set_style_text_font(empty, font, 0);
+    } else {
+        for (int d = 0; d < count; d++) {
+            rxlog_add_entry(buf[d], offset, font);
+        }
+    }
+    heap_caps_free(buf);
+
+    lv_obj_update_layout(obj_rxlog_scroll);
+    lv_obj_scroll_to_y(obj_rxlog_scroll, keep_y, LV_ANIM_OFF);
+}
+
+// Every 5 s: pick up newly received packets while the Rx Log screen is open.
+// Skipped while a finger is scrolling the list, so it is not rebuilt mid-drag.
+static void rxlog_timer_cb(lv_timer_t *t) {
+    (void)t;
+    if (!scr_rx_log || lv_screen_active() != scr_rx_log) return;
+    Meck* mesh = meck_get_instance();
+    if (!mesh || mesh->getRxLogSeq() == g_rxlog_shown_seq) return;
+    if (obj_rxlog_scroll && lv_obj_is_scrolling(obj_rxlog_scroll)) return;
+    rxlog_rebuild();
+}
+
+static void on_experimental_rxlog_tap(lv_event_t *e) {
+    (void)e;
+    if (!scr_rx_log) return;
+    rxlog_rebuild();
+    if (obj_rxlog_scroll) lv_obj_scroll_to_y(obj_rxlog_scroll, 0, LV_ANIM_OFF);
+    if (!g_rxlog_timer) g_rxlog_timer = lv_timer_create(rxlog_timer_cb, 5000, NULL);
+    lv_screen_load(scr_rx_log);
+}
+
+static void goto_experimental_from_rxlog(lv_event_t *e) {
+    (void)e;
+    // Free the entry blocks while the screen is not shown.
+    if (obj_rxlog_scroll) lv_obj_clean(obj_rxlog_scroll);
+    if (scr_settings_experimental) lv_screen_load(scr_settings_experimental);
+}
+
+static void create_rx_log_screen() {
+    scr_rx_log = lv_obj_create(NULL);
+    lock_screen_scroll(scr_rx_log);
+    lv_obj_set_style_bg_color(scr_rx_log, lv_color_black(), 0);
+    screen_attach_clock_battery(scr_rx_log, 1, &meck_montserrat_24, 30);
+
+    // Back button -> Experimental Features.
+    lv_obj_t *btn_back = lv_button_create(scr_rx_log);
+    lv_obj_set_size(btn_back, 100, 70);
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_set_style_bg_color(btn_back, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_t *bl = lv_label_create(btn_back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
+    meck_set_font(bl, &meck_montserrat_18, 0);
+    lv_obj_center(bl);
+    lv_obj_add_event_cb(btn_back, goto_experimental_from_rxlog, LV_EVENT_CLICKED, NULL);
+
+    lbl_rxlog_title = lv_label_create(scr_rx_log);
+    lv_label_set_text(lbl_rxlog_title, "Rx Log");
+    lv_obj_set_style_text_color(lbl_rxlog_title, lv_palette_main(LV_PALETTE_GREEN), 0);
+    meck_set_font(lbl_rxlog_title, &meck_montserrat_24, 0);
+    lv_obj_align(lbl_rxlog_title, LV_ALIGN_TOP_LEFT, 120, 30);
+
+    // Packet list between the title (y=110) and the bottom of the screen.
+    obj_rxlog_scroll = lv_obj_create(scr_rx_log);
+    lv_obj_set_size(obj_rxlog_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 120);
+    lv_obj_set_pos(obj_rxlog_scroll, 10, 110);
+    lv_obj_set_style_bg_color(obj_rxlog_scroll, lv_color_make(8, 8, 12), 0);
+    lv_obj_set_style_border_width(obj_rxlog_scroll, 0, 0);
+    lv_obj_set_style_radius(obj_rxlog_scroll, 8, 0);
+    lv_obj_set_style_pad_all(obj_rxlog_scroll, 10, 0);
+    lv_obj_set_scroll_dir(obj_rxlog_scroll, LV_DIR_VER);
+    lv_obj_set_flex_flow(obj_rxlog_scroll, LV_FLEX_FLOW_COLUMN);
 }
 
 // ============================================================================
@@ -22271,6 +22516,7 @@ static void meck_ui_build_screens() {
     create_settings_contacts_screen();
     create_settings_experimental_screen();
     create_companion_cli_screen();
+    create_rx_log_screen();
     create_settings_wifi_screen();
     create_web_screen();
 #if MECK_BLE_KEYBOARD_ENABLED
@@ -22374,6 +22620,7 @@ static void meck_ui_teardown_screens() {
         &scr_radio_picker, &scr_channel_picker, &scr_dm_inbox, &scr_messages,
         &scr_contacts, &scr_contact_detail, &scr_trace, &scr_path_editor,
         &scr_settings_contacts, &scr_settings_experimental, &scr_companion_cli,
+        &scr_rx_log,
         &scr_discover, &scr_admin_login, &scr_admin_home,
         &scr_room_messages, &scr_admin_status, &scr_admin_cmd, &scr_admin_settings,
         &scr_admin_send_advert, &scr_admin_setting_placeholder, &scr_admin_fw_info,

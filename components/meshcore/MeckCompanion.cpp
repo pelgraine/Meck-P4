@@ -10,6 +10,7 @@
 #include "MeckCli.h"
 #include "meck.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <helpers/TxtDataHelpers.h>
 
@@ -82,6 +83,18 @@ static bool isValidClientRepeatFreq(uint32_t f) {
 #define CMD_SHARE_CONTACT             16   // re-send a contact's advert zero-hop
 #define CMD_SET_TUNING_PARAMS         21   // rx delay base + airtime factor (x1000)
 #define CMD_GET_TUNING_PARAMS         43
+#define CMD_EXPORT_CONTACT            17
+#define CMD_IMPORT_CONTACT            18
+#define CMD_SEND_RAW_DATA             25
+#define CMD_SIGN_START                33
+#define CMD_SIGN_DATA                 34
+#define CMD_SIGN_FINISH               35
+#define CMD_SEND_TRACE_PATH           36
+#define CMD_SEND_TELEMETRY_REQ        39
+#define CMD_SEND_PATH_DISCOVERY_REQ   52
+#define CMD_SET_AUTOADD_CONFIG        58
+#define CMD_SEND_CHANNEL_DATA         62
+#define CMD_SEND_RAW_PACKET           65   // as Meck Watch: transmit a complete packet from the app
 
 // ---- Response codes ----
 #define RESP_CODE_OK                  0
@@ -105,6 +118,13 @@ static bool isValidClientRepeatFreq(uint32_t f) {
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
 #define RESP_CODE_CLI_REPLY           29   // v14+, a reply to CMD_RUN_CLI_COMMAND
 #define RESP_CODE_TUNING_PARAMS       23   // reply to CMD_GET_TUNING_PARAMS
+#define RESP_CODE_EXPORT_CONTACT      11
+#define RESP_CODE_SIGN_START          19
+#define RESP_CODE_SIGNATURE           20
+#define RESP_CODE_CHANNEL_DATA_RECV   27   // queued like a message
+
+#define MAX_SIGN_DATA_LEN             (8 * 1024) // 8K
+#define MAX_CHANNEL_DATA_LENGTH       (MAX_FRAME_SIZE - 9)
 
 // ---- Error codes ----
 #define ERR_CODE_UNSUPPORTED_CMD      1
@@ -120,6 +140,12 @@ static bool isValidClientRepeatFreq(uint32_t f) {
 #define PUSH_CODE_MSG_WAITING         0x83
 #define PUSH_CODE_LOG_RX_DATA         0x88
 #define PUSH_CODE_NEW_ADVERT          0x8A
+#define PUSH_CODE_RAW_DATA            0x84
+#define PUSH_CODE_TRACE_DATA          0x89
+#define PUSH_CODE_TELEMETRY_RESPONSE  0x8B
+#define PUSH_CODE_PATH_DISCOVERY_RESPONSE 0x8D
+#define PUSH_CODE_CONTACT_DELETED     0x8F // oldest contact overwritten
+#define PUSH_CODE_CONTACTS_FULL       0x90 // contacts storage is full
 
 // ---- Response codes for received messages (queued in offline queue) ----
 #define RESP_CODE_CONTACT_MSG_RECV    7
@@ -134,13 +160,26 @@ static bool isValidClientRepeatFreq(uint32_t f) {
 #define PUSH_CODE_CONTROL_DATA        0x8E // v8+, received control packet
 
 #if MECK_BLE_GARMIN
-// ---- Garmin watch app (Meck-Garmin): favourites list and contact-name
-// lookup. Same codes and layouts as the garmin branch of MeshCore
-// (BLE_GARMIN) and Meck's MECK_WATCH_EXT, so the watch uses one code path.
+// ---- Garmin watch app (Meck-Garmin): the full Meck watch extension, same
+// codes and layouts as Meck's MECK_WATCH_EXT (T-Deck Max Garmin build), so
+// the watch treats the P4 as a Meck node.
+#define CMD_WATCH_HELLO               0x70  // [ver] -> RESP_CODE_WATCH_INFO; marks this client as the watch
+#define CMD_WATCH_GET_CANNED          0x71  // [slot] -> RESP_CODE_WATCH_CANNED
+#define CMD_WATCH_GET_SENT_TRACK      0x72  // [n: 0 = most recent] -> RESP_CODE_WATCH_SENT_TRACK
+#define CMD_WATCH_GET_SCOPE           0x73  // [idx] -> RESP_CODE_WATCH_SCOPE
+#define CMD_WATCH_DISCOVER_START      0x74  // -> OK; runs the P4's own 30 s discovery scan
+#define CMD_WATCH_DISCOVER_GET        0x75  // [n] -> RESP_CODE_WATCH_DISCOVER
 #define CMD_WATCH_GET_FAV             0x76  // [n] -> RESP_CODE_WATCH_FAV (n-th favourite contact)
 #define CMD_WATCH_RESOLVE             0x77  // [plen][pubkey prefix] -> RESP_CODE_WATCH_RESOLVE
+#define RESP_CODE_WATCH_INFO          0x60  // [ext_ver][canned_slots][bph][scope_count]
+#define RESP_CODE_WATCH_CANNED        0x61  // [slot][text] (empty text = unused slot)
+#define RESP_CODE_WATCH_SENT_TRACK    0x62  // [n][active][fingerprint*12][repeats][bph][count][hash*bph*count][snr*count]
+#define RESP_CODE_WATCH_CHANNEL_MSG   0x63  // [snr*4][scope_idx][path bytes count][channel_idx][txt_type][timestamp:4][path bytes][text]
+#define RESP_CODE_WATCH_SCOPE         0x64  // [idx][name] (no name = no such scope)
+#define RESP_CODE_WATCH_DISCOVER      0x65  // [n][active][count] then, if n < count: [type][snr*4][path_len][known][pubkey:2][name]
 #define RESP_CODE_WATCH_FAV           0x66  // [n][count] then, if n < count: [type][last_advert:4][pubkey:32][name]
 #define RESP_CODE_WATCH_RESOLVE       0x67  // [plen][prefix][name] (no name = not found)
+#define WATCH_EXT_VER                 1
 #endif
 
 // ---- Repeater admin commands (over-the-mesh login + status + session) ----
@@ -197,6 +236,28 @@ void MeckCompanion::writeContactRespFrame(uint8_t code, const ContactInfo& conta
     memcpy(&_out[i], &contact.gps_lon, 4); i += 4;
     memcpy(&_out[i], &contact.lastmod, 4); i += 4;
     _serial->writeFrame(_out, i);
+}
+
+// Fill a contact from a CMD_ADD_UPDATE_CONTACT frame (as Meck's
+// MyMesh::updateContactFromFrame): type, flags, out path, name, last advert
+// time, then optionally position and last-modified time.
+static void updateContactFromFrame(ContactInfo& contact, uint32_t& last_mod,
+                                   const uint8_t* frame, int len) {
+    int i = 1;  // frame[0] is the command code
+    memcpy(contact.id.pub_key, &frame[i], PUB_KEY_SIZE); i += PUB_KEY_SIZE;
+    contact.type = frame[i++];
+    contact.flags = frame[i++];
+    contact.out_path_len = frame[i++];
+    memcpy(contact.out_path, &frame[i], MAX_PATH_SIZE); i += MAX_PATH_SIZE;
+    memcpy(contact.name, &frame[i], 32); i += 32;
+    memcpy(&contact.last_advert_timestamp, &frame[i], 4); i += 4;
+    if (len >= i + 8) {  // optional fields
+        memcpy(&contact.gps_lat, &frame[i], 4); i += 4;
+        memcpy(&contact.gps_lon, &frame[i], 4); i += 4;
+        if (len >= i + 4) {
+            memcpy(&last_mod, &frame[i], 4);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +333,9 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         printf("Companion: APP_START from '%s'\n", app_name);
 
         _iter_started = false;
+#if MECK_BLE_GARMIN
+        _watch_client = false;   // new client; the watch re-declares itself with CMD_WATCH_HELLO
+#endif
 
         int i = 0;
         _out[i++] = RESP_CODE_SELF_INFO;
@@ -351,6 +415,48 @@ void MeckCompanion::handleCmdFrame(size_t len) {
     if (cmd == CMD_SYNC_NEXT_MESSAGE) {
         int out_len = getFromOfflineQueue(_out);
         if (out_len > 0) {
+#if MECK_BLE_GARMIN
+            if (_out[0] == RESP_CODE_WATCH_CHANNEL_MSG && out_len >= 10) {
+                // Queued while the watch was the client. The txt_type slot
+                // holds the packet's encoded path_len until now (see
+                // pushChannelMessage).
+                uint8_t enc_path_len = _out[5];
+                if (_watch_client) {
+                    _out[5] = TXT_TYPE_PLAIN;
+                } else {
+                    // Rebuild as a standard frame for this client (V3 if it
+                    // supports it, else V1) and drop the hop list, as Meck.
+                    uint8_t snr = _out[1];
+                    uint8_t plen_byte = _out[3];
+                    uint8_t ch = _out[4];
+                    uint8_t ts[4];
+                    memcpy(ts, &_out[6], 4);
+                    int plen = (plen_byte != 0xFF) ? plen_byte : 0;
+                    int text_off = 10 + plen;
+                    int tlen = out_len - text_off;
+                    if (tlen < 0) tlen = 0;
+                    // Move the text to where it sits in the standard frame
+                    // (header: 11 bytes for V3, 8 for V1), then write the header.
+                    int hdr = (_app_target_ver >= 3) ? 11 : 8;
+                    if (hdr + tlen > MAX_FRAME_SIZE) tlen = MAX_FRAME_SIZE - hdr;
+                    memmove(&_out[hdr], &_out[text_off], tlen);
+                    int i = 0;
+                    if (_app_target_ver >= 3) {
+                        _out[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
+                        _out[i++] = snr;
+                        _out[i++] = 0;  // reserved1
+                        _out[i++] = 0;  // reserved2
+                    } else {
+                        _out[i++] = RESP_CODE_CHANNEL_MSG_RECV;
+                    }
+                    _out[i++] = ch;
+                    _out[i++] = (plen_byte != 0xFF) ? enc_path_len : 0xFF;
+                    _out[i++] = TXT_TYPE_PLAIN;
+                    memcpy(&_out[i], ts, 4); i += 4;
+                    out_len = i + tlen;
+                }
+            }
+#endif
             _serial->writeFrame(_out, out_len);
         } else {
             _out[0] = RESP_CODE_NO_MORE_MESSAGES;
@@ -605,32 +711,19 @@ void MeckCompanion::handleCmdFrame(size_t len) {
     if (cmd == CMD_ADD_UPDATE_CONTACT && len >= 1 + PUB_KEY_SIZE + 3) {
         uint8_t* pub_key = &_cmd[1];
         ContactInfo* existing = _mesh->lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
+        uint32_t last_mod = _mesh->getRTCClock()->getCurrentTime();  // fallback value if not present in the frame
         if (existing) {
-            // Update in place
-            int j = 1 + PUB_KEY_SIZE;
-            existing->type = _cmd[j++];
-            existing->flags = _cmd[j++];
-            // Skip out_path_len and out_path from app (device manages paths)
-            existing->lastmod = _mesh->getRTCClock()->getCurrentTime();
+            // Update in place, including the path the app set
+            updateContactFromFrame(*existing, last_mod, _cmd, (int)len);
+            existing->lastmod = last_mod;
             _mesh->scheduleLazyContactSave();
             writeOKFrame();
         } else {
-            // Add new contact (minimal parse)
+            // Add new contact
             ContactInfo ci;
             memset(&ci, 0, sizeof(ci));
-            memcpy(ci.id.pub_key, pub_key, PUB_KEY_SIZE);
-            int j = 1 + PUB_KEY_SIZE;
-            ci.type = _cmd[j++];
-            ci.flags = _cmd[j++];
-            ci.out_path_len = OUT_PATH_UNKNOWN;
-            // Skip path bytes, read name at offset 1+32+3+MAX_PATH_SIZE
-            j++;  // skip out_path_len byte from frame
-            j += MAX_PATH_SIZE;
-            if (j + 32 <= (int)len) {
-                memcpy(ci.name, &_cmd[j], 32);
-                ci.name[31] = '\0';
-            }
-            ci.lastmod = _mesh->getRTCClock()->getCurrentTime();
+            updateContactFromFrame(ci, last_mod, _cmd, (int)len);
+            ci.lastmod = last_mod;
             ci.sync_since = 0;
             if (_mesh->addContact(ci)) {
                 _mesh->scheduleLazyContactSave();
@@ -1098,7 +1191,379 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         return;
     }
 
+    // =======================================================================
+    // App commands ported from Meck (and CMD_SEND_RAW_PACKET from Meck Watch)
+    // =======================================================================
+
+    // ---- CMD_SEND_TRACE_PATH (36) ---- [tag:4][auth:4][flags][hop hashes].
+    // The result comes back as PUSH_CODE_TRACE_DATA.
+    if (cmd == CMD_SEND_TRACE_PATH && len > 10 && len - 10 < MAX_PACKET_PAYLOAD - 5) {
+        uint8_t path_len = (uint8_t)(len - 10);
+        uint8_t flags = _cmd[9];
+        uint8_t path_sz = flags & 0x03;  // hash size as a shift
+        if ((path_len >> path_sz) > MAX_PATH_SIZE || (path_len % (1 << path_sz)) != 0) {  // must be a multiple of the hash size
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        } else {
+            uint32_t tag, auth, est_timeout = 0;
+            memcpy(&tag, &_cmd[1], 4);
+            memcpy(&auth, &_cmd[5], 4);
+            if (_mesh->companionSendTrace(tag, auth, flags, &_cmd[10], path_len, est_timeout)) {
+                _out[0] = RESP_CODE_SENT;
+                _out[1] = 0;
+                memcpy(&_out[2], &tag, 4);
+                memcpy(&_out[6], &est_timeout, 4);
+                _serial->writeFrame(_out, 10);
+            } else {
+                writeErrFrame(ERR_CODE_TABLE_FULL);
+            }
+        }
+        return;
+    }
+
+    // ---- CMD_SEND_PATH_DISCOVERY_REQ (52) ---- [0][pub_key]. The result
+    // comes back as PUSH_CODE_PATH_DISCOVERY_RESPONSE.
+    if (cmd == CMD_SEND_PATH_DISCOVERY_REQ && _cmd[1] == 0 && len >= 2 + PUB_KEY_SIZE) {
+        ContactInfo* recipient = _mesh->lookupContactByPubKey(&_cmd[2], PUB_KEY_SIZE);
+        if (recipient) {
+            uint32_t tag = 0, est_timeout = 0;
+            int result = _mesh->companionSendPathDiscovery(*recipient, tag, est_timeout);
+            if (result == MSG_SEND_FAILED) {
+                writeErrFrame(ERR_CODE_TABLE_FULL);
+            } else {
+                _out[0] = RESP_CODE_SENT;
+                _out[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
+                memcpy(&_out[2], &tag, 4);
+                memcpy(&_out[6], &est_timeout, 4);
+                _serial->writeFrame(_out, 10);
+            }
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);  // contact not found
+        }
+        return;
+    }
+
+    // ---- CMD_SEND_TELEMETRY_REQ (39) ---- [3 reserved][pub_key]: ask a
+    // contact. The reply comes back as PUSH_CODE_TELEMETRY_RESPONSE.
+    if (cmd == CMD_SEND_TELEMETRY_REQ && len >= 4 + PUB_KEY_SIZE) {
+        ContactInfo* recipient = _mesh->lookupContactByPubKey(&_cmd[4], PUB_KEY_SIZE);
+        if (recipient) {
+            uint32_t tag = 0, est_timeout = 0;
+            int result = _mesh->companionSendTelemetryReq(*recipient, tag, est_timeout);
+            if (result == MSG_SEND_FAILED) {
+                writeErrFrame(ERR_CODE_TABLE_FULL);
+            } else {
+                _out[0] = RESP_CODE_SENT;
+                _out[1] = (result == MSG_SEND_SENT_FLOOD) ? 1 : 0;
+                memcpy(&_out[2], &tag, 4);
+                memcpy(&_out[6], &est_timeout, 4);
+                _serial->writeFrame(_out, 10);
+            }
+        } else {
+            writeErrFrame(ERR_CODE_NOT_FOUND);  // contact not found
+        }
+        return;
+    }
+    // ...with no pub_key: the P4's own telemetry. The battery voltage, as a
+    // CayenneLPP voltage record on the 'self' channel.
+    if (cmd == CMD_SEND_TELEMETRY_REQ && len == 4) {
+        uint16_t centivolts = meck_battery_get_mv() / 10;   // LPP voltage: 0.01 V units, big-endian
+        int i = 0;
+        _out[i++] = PUSH_CODE_TELEMETRY_RESPONSE;
+        _out[i++] = 0;  // reserved
+        memcpy(&_out[i], _mesh->getIdentity().pub_key, 6); i += 6;  // pub_key_prefix
+        _out[i++] = 1;      // TELEM_CHANNEL_SELF
+        _out[i++] = 116;    // LPP_VOLTAGE
+        _out[i++] = (uint8_t)(centivolts >> 8);
+        _out[i++] = (uint8_t)(centivolts & 0xFF);
+        _serial->writeFrame(_out, i);
+        return;
+    }
+
+    // ---- CMD_SET_AUTOADD_CONFIG (58) ---- which contact types are auto-added
+    if (cmd == CMD_SET_AUTOADD_CONFIG && len >= 2) {
+        prefs->autoadd_config = _cmd[1];
+        _mesh->savePrefs();
+        writeOKFrame();
+        return;
+    }
+
+    // ---- CMD_EXPORT_CONTACT (17) ---- a contact, or the P4 itself (no
+    // pub_key), as a shareable advert packet.
+    if (cmd == CMD_EXPORT_CONTACT) {
+        if (len < 1 + PUB_KEY_SIZE) {
+            // export SELF, with position when position sharing is on
+            mesh::Packet* pkt;
+            if (prefs->position_mode != 0 &&
+                (prefs->position_lat_e7 != 0 || prefs->position_lon_e7 != 0)) {
+                pkt = _mesh->createSelfAdvert(prefs->node_name,
+                                              (double)prefs->position_lat_e7 / 1e7,
+                                              (double)prefs->position_lon_e7 / 1e7);
+            } else {
+                pkt = _mesh->createSelfAdvert(prefs->node_name);
+            }
+            if (pkt) {
+                pkt->header |= ROUTE_TYPE_FLOOD;  // would normally be sent in this mode
+                _out[0] = RESP_CODE_EXPORT_CONTACT;
+                uint8_t out_len = pkt->writeTo(&_out[1]);
+                _mesh->releasePacket(pkt);  // undo the obtainNewPacket()
+                _serial->writeFrame(_out, out_len + 1);
+            } else {
+                writeErrFrame(ERR_CODE_TABLE_FULL);
+            }
+        } else {
+            ContactInfo* recipient = _mesh->lookupContactByPubKey(&_cmd[1], PUB_KEY_SIZE);
+            uint8_t out_len = recipient ? _mesh->exportContact(*recipient, &_out[1]) : 0;
+            if (out_len > 0) {
+                _out[0] = RESP_CODE_EXPORT_CONTACT;
+                _serial->writeFrame(_out, out_len + 1);
+            } else {
+                writeErrFrame(ERR_CODE_NOT_FOUND);
+            }
+        }
+        return;
+    }
+
+    // ---- CMD_IMPORT_CONTACT (18) ---- add a contact from a shared advert packet
+    if (cmd == CMD_IMPORT_CONTACT && len > 2 + 32 + 64) {
+        if (_mesh->importContact(&_cmd[1], (uint8_t)(len - 1))) {
+            _mesh->scheduleLazyContactSave();
+            writeOKFrame();
+        } else {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        }
+        return;
+    }
+
+    // ---- CMD_SEND_RAW_DATA (25) ---- [path_len][path][payload]: a custom
+    // packet sent direct along the given path.
+    if (cmd == CMD_SEND_RAW_DATA && len >= 6) {
+        int i = 1;
+        uint8_t path_len = _cmd[i++];
+        int path_bytes = (path_len & 63) * ((path_len >> 6) + 1);
+        if (path_len != OUT_PATH_UNKNOWN && mesh::Packet::isValidPathLen(path_len)
+            && i + path_bytes + 4 <= (int)len) {  // minimum 4 byte payload
+            uint8_t* path = &_cmd[i];
+            i += path_bytes;
+            mesh::Packet* pkt = _mesh->createRawData(&_cmd[i], len - i);
+            if (pkt) {
+                _mesh->sendDirect(pkt, path, path_len);
+                writeOKFrame();
+            } else {
+                writeErrFrame(ERR_CODE_TABLE_FULL);
+            }
+        } else {
+            writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);  // flood, not supported (yet)
+        }
+        return;
+    }
+
+    // ---- CMD_SEND_CHANNEL_DATA (62) ---- [channel][path_len][path][type:2][payload]:
+    // a data packet (not text) on a channel; path_len 0xFF = flood.
+    if (cmd == CMD_SEND_CHANNEL_DATA) {
+        if (len < 4) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+            return;
+        }
+        int i = 1;
+        uint8_t channel_idx = _cmd[i++];
+        uint8_t path_len = _cmd[i++];
+
+        // validate path len, allowing 0xFF for flood
+        if (!mesh::Packet::isValidPathLen(path_len) && path_len != OUT_PATH_UNKNOWN) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+            return;
+        }
+
+        // parse provided path if not flood
+        uint8_t path[MAX_PATH_SIZE];
+        if (path_len != OUT_PATH_UNKNOWN) {
+            i += mesh::Packet::writePath(path, &_cmd[i], path_len);
+        }
+
+        uint16_t data_type = ((uint16_t)_cmd[i]) | (((uint16_t)_cmd[i + 1]) << 8);
+        i += 2;
+        const uint8_t* payload = &_cmd[i];
+        int payload_len = (len > (size_t)i) ? (int)(len - i) : 0;
+
+        ChannelDetails channel;
+        if (!_mesh->getChannel(channel_idx, channel)) {
+            writeErrFrame(ERR_CODE_NOT_FOUND);  // bad channel_idx
+        } else if (data_type == DATA_TYPE_RESERVED) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        } else if (payload_len > MAX_GROUP_DATA_LENGTH) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        } else if (_mesh->sendGroupData(channel.channel, path, path_len, data_type, payload, payload_len)) {
+            writeOKFrame();
+        } else {
+            writeErrFrame(ERR_CODE_TABLE_FULL);
+        }
+        return;
+    }
+
+    // ---- CMD_SIGN_START (33) / CMD_SIGN_DATA (34) / CMD_SIGN_FINISH (35) ----
+    // Sign data supplied by the app with the P4's own key.
+    if (cmd == CMD_SIGN_START) {
+        _out[0] = RESP_CODE_SIGN_START;
+        _out[1] = 0;  // reserved
+        uint32_t max_len = MAX_SIGN_DATA_LEN;
+        memcpy(&_out[2], &max_len, 4);
+        _serial->writeFrame(_out, 6);
+
+        if (_sign_data) {
+            free(_sign_data);
+        }
+        _sign_data = (uint8_t*)malloc(MAX_SIGN_DATA_LEN);
+        _sign_data_len = 0;
+        return;
+    }
+    if (cmd == CMD_SIGN_DATA && len > 1) {
+        if (_sign_data == NULL || _sign_data_len + (len - 1) > MAX_SIGN_DATA_LEN) {
+            writeErrFrame(_sign_data == NULL ? ERR_CODE_BAD_STATE : ERR_CODE_TABLE_FULL);  // error: too long
+        } else {
+            memcpy(&_sign_data[_sign_data_len], &_cmd[1], len - 1);
+            _sign_data_len += (len - 1);
+            writeOKFrame();
+        }
+        return;
+    }
+    if (cmd == CMD_SIGN_FINISH) {
+        if (_sign_data) {
+            _mesh->getIdentity().sign(&_out[1], _sign_data, _sign_data_len);
+
+            free(_sign_data);  // don't need the data now
+            _sign_data = NULL;
+
+            _out[0] = RESP_CODE_SIGNATURE;
+            _serial->writeFrame(_out, 1 + SIGNATURE_SIZE);
+        } else {
+            writeErrFrame(ERR_CODE_BAD_STATE);
+        }
+        return;
+    }
+
+    // ---- CMD_SEND_RAW_PACKET (65) ---- [priority][complete packet]: transmit
+    // a packet supplied by the app, as Meck Watch.
+    if (cmd == CMD_SEND_RAW_PACKET && len >= 4) {
+        mesh::Packet* pkt = _mesh->obtainNewPacket();
+        if (pkt) {
+            uint8_t priority = _cmd[1];
+            if (_mesh->tryParsePacket(pkt, &_cmd[2], (int)len - 2)) {
+                _mesh->sendPacket(pkt, priority, 0);
+                writeOKFrame();
+            } else {
+                _mesh->releasePacket(pkt);
+                writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+            }
+        } else {
+            writeErrFrame(ERR_CODE_TABLE_FULL);
+        }
+        return;
+    }
+
 #if MECK_BLE_GARMIN
+    // =======================================================================
+    // Garmin watch extension, as Meck's MECK_WATCH_EXT
+    // =======================================================================
+
+    // ---- CMD_WATCH_HELLO (0x70) ---- the watch declares itself
+    if (cmd == CMD_WATCH_HELLO) {
+        _watch_client = true;
+        int i = 0;
+        _out[i++] = RESP_CODE_WATCH_INFO;
+        _out[i++] = WATCH_EXT_VER;
+        _out[i++] = CANNED_MSG_SLOTS;
+        _out[i++] = prefs->path_hash_mode + 1;   // bytes per hop in hop lists
+        _out[i++] = Meck::SCOPE_COUNT;
+        _serial->writeFrame(_out, i);
+        return;
+    }
+
+    // ---- CMD_WATCH_GET_CANNED (0x71) ---- one of the P4's canned messages
+    if (cmd == CMD_WATCH_GET_CANNED && len >= 2) {
+        uint8_t slot = _cmd[1];
+        if (slot >= CANNED_MSG_SLOTS) {
+            writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        } else {
+            int i = 0;
+            _out[i++] = RESP_CODE_WATCH_CANNED;
+            _out[i++] = slot;
+            int tlen = (int)strnlen(prefs->canned_msgs[slot], CANNED_MSG_LEN);
+            if (i + tlen > MAX_FRAME_SIZE) tlen = MAX_FRAME_SIZE - i;
+            memcpy(&_out[i], prefs->canned_msgs[slot], tlen); i += tlen;
+            _serial->writeFrame(_out, i);
+        }
+        return;
+    }
+
+    // ---- CMD_WATCH_GET_SCOPE (0x73) ---- region name for the scope byte of
+    // a watch channel message frame (the P4's scope marker).
+    if (cmd == CMD_WATCH_GET_SCOPE && len >= 2) {
+        uint8_t idx = _cmd[1];
+        char name[40];
+        int i = 0;
+        _out[i++] = RESP_CODE_WATCH_SCOPE;
+        _out[i++] = idx;
+        if (idx != 0xFF && _mesh->getScopeLabel(idx, name, sizeof(name))) {
+            int tlen = (int)strlen(name);
+            memcpy(&_out[i], name, tlen); i += tlen;
+        }
+        _serial->writeFrame(_out, i);
+        return;
+    }
+
+    // ---- CMD_WATCH_DISCOVER_START (0x74) ---- the P4's own discovery scan
+    if (cmd == CMD_WATCH_DISCOVER_START) {
+        _mesh->startDiscovery();
+        writeOKFrame();
+        return;
+    }
+
+    // ---- CMD_WATCH_DISCOVER_GET (0x75) ---- the n-th node the scan found
+    if (cmd == CMD_WATCH_DISCOVER_GET && len >= 2) {
+        uint8_t n = _cmd[1];
+        int count = _mesh->getDiscoveredCount();
+        int i = 0;
+        _out[i++] = RESP_CODE_WATCH_DISCOVER;
+        _out[i++] = n;
+        _out[i++] = _mesh->isDiscoveryActive() ? 1 : 0;
+        _out[i++] = (uint8_t)count;
+        if (n < count) {
+            const DiscoveredNode& d = _mesh->getDiscovered(n);
+            _out[i++] = d.adv_type;
+            _out[i++] = (uint8_t)d.snr_x4;
+            _out[i++] = d.path_len;
+            _out[i++] = d.already_in_contacts ? 1 : 0;
+            memcpy(&_out[i], d.pub_key, 2); i += 2;
+            int tlen = (int)strnlen(d.name, sizeof(d.name));
+            if (i + tlen > MAX_FRAME_SIZE) tlen = MAX_FRAME_SIZE - i;
+            memcpy(&_out[i], d.name, tlen); i += tlen;
+        }
+        _serial->writeFrame(_out, i);
+        return;
+    }
+
+    // ---- CMD_WATCH_GET_SENT_TRACK (0x72) ---- "Heard by" for a recent
+    // channel send: n = 0 is the most recent, n = 1 the one before.
+    if (cmd == CMD_WATCH_GET_SENT_TRACK && len >= 2) {
+        uint8_t n = _cmd[1];
+        int i = 0;
+        _out[i++] = RESP_CODE_WATCH_SENT_TRACK;
+        _out[i++] = n;
+        const P4SentTrack* t = _mesh->getSentTrack(n);
+        _out[i++] = t ? 1 : 0;   // 0 = no such slot, or expired
+        if (t) {
+            memcpy(&_out[i], t->fingerprint, P4_SENT_FINGERPRINT_SIZE); i += P4_SENT_FINGERPRINT_SIZE;
+            _out[i++] = t->repeat_count;
+            _out[i++] = t->echo_bph;
+            _out[i++] = t->echo_count;
+            int hlen = t->echo_bph * t->echo_count;
+            memcpy(&_out[i], t->echo_hash, hlen); i += hlen;
+            memcpy(&_out[i], t->echo_snr, t->echo_count); i += t->echo_count;
+        }
+        _serial->writeFrame(_out, i);
+        return;
+    }
+
     // ---- CMD_WATCH_GET_FAV (0x76) ---- the n-th contact with the favourite
     // bit (flags bit 0, upstream's isFav()), in contact order, with the
     // number of favourites. Walks the contacts with the standard iterator, as
@@ -1201,8 +1666,30 @@ void MeckCompanion::pushMsgWaiting() {
 
 void MeckCompanion::pushChannelMessage(uint8_t ch_idx, uint8_t path_len,
                                         uint32_t timestamp, int8_t snr_x4,
+                                        uint8_t scope_marker,
+                                        const uint8_t* path, uint8_t path_bytes,
                                         const char* text) {
     int i = 0;
+#if MECK_BLE_GARMIN
+    if (_watch_client) {
+        // Watch frame (as Meck's RESP_MECK_CHANNEL_MSG): carries the region
+        // and the hop hashes, which the standard frame omits. The path byte
+        // is the number of hop bytes that follow (0xFF = not a flood), which
+        // is how the watch reads it (hops = bytes / bytes-per-hop).
+        // Until the frame is collected (CMD_SYNC_NEXT_MESSAGE) the txt_type
+        // slot holds the packet's encoded path_len, so the frame can be
+        // rebuilt as a standard one for a non-watch client.
+        uint8_t plen = (path_len != 0xFF && path != NULL) ? path_bytes : 0;
+        _out[i++] = RESP_CODE_WATCH_CHANNEL_MSG;
+        _out[i++] = (uint8_t)snr_x4;
+        _out[i++] = (scope_marker == 0) ? 0xFF : scope_marker;   // 0xFF = no region
+        _out[i++] = (path_len != 0xFF) ? plen : 0xFF;
+        _out[i++] = ch_idx;
+        _out[i++] = path_len;   // replaced with TXT_TYPE_PLAIN on collection
+        memcpy(&_out[i], &timestamp, 4); i += 4;
+        memcpy(&_out[i], path, plen); i += plen;
+    } else {
+#endif
     if (_app_target_ver >= 3) {
         _out[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
         _out[i++] = (uint8_t)snr_x4;
@@ -1215,6 +1702,9 @@ void MeckCompanion::pushChannelMessage(uint8_t ch_idx, uint8_t path_len,
     _out[i++] = path_len;
     _out[i++] = 0;  // TXT_TYPE_PLAIN
     memcpy(&_out[i], &timestamp, 4); i += 4;
+#if MECK_BLE_GARMIN
+    }
+#endif
     int tlen = text ? (int)strlen(text) : 0;
     if (i + tlen > MAX_FRAME_SIZE) tlen = MAX_FRAME_SIZE - i;
     if (tlen > 0) memcpy(&_out[i], text, tlen);
@@ -1264,6 +1754,9 @@ void MeckCompanion::pushSendConfirmed(const uint8_t* ack_hash, uint32_t trip_tim
 void MeckCompanion::pushRxLog(int8_t snr_x4, int8_t rssi,
                               const uint8_t* raw, int len) {
     if (!_serial || !_serial->isConnected()) return;
+#if MECK_BLE_GARMIN
+    if (_watch_client) return;   // the watch does not want the raw packet log
+#endif
     if (len <= 0 || len + 3 > MAX_FRAME_SIZE) return;
     int i = 0;
     _out[i++] = PUSH_CODE_LOG_RX_DATA;
@@ -1370,4 +1863,102 @@ void MeckCompanion::pushControlData(int8_t snr_x4, int8_t rssi, uint8_t path_len
     _out[i++] = path_len;
     memcpy(&_out[i], payload, payload_len); i += payload_len;
     _serial->writeFrame(_out, i);
+}
+
+// ---------------------------------------------------------------------------
+// Pushes for the app commands ported from Meck. Frame layouts as Meck's
+// MyMesh (onTraceRecv, onContactPathRecv, onContactResponse, onRawDataRecv,
+// onChannelDataRecv, onContactOverwrite, onContactsFull).
+// ---------------------------------------------------------------------------
+
+void MeckCompanion::pushTraceData(uint8_t path_len, uint8_t flags, uint32_t tag,
+                                  uint32_t auth_code, const uint8_t* path_hashes,
+                                  const uint8_t* path_snrs, int8_t final_snr_x4) {
+    if (!_serial || !_serial->isConnected()) return;
+    uint8_t path_sz = flags & 0x03;  // hash size as a shift
+    if (12 + path_len + (path_len >> path_sz) + 1 > (int)sizeof(_out)) return;  // path too long
+    int i = 0;
+    _out[i++] = PUSH_CODE_TRACE_DATA;
+    _out[i++] = 0;  // reserved
+    _out[i++] = path_len;
+    _out[i++] = flags;
+    memcpy(&_out[i], &tag, 4); i += 4;
+    memcpy(&_out[i], &auth_code, 4); i += 4;
+    memcpy(&_out[i], path_hashes, path_len); i += path_len;
+    memcpy(&_out[i], path_snrs, path_len >> path_sz); i += path_len >> path_sz;
+    _out[i++] = (uint8_t)final_snr_x4;  // extra/final SNR (to this node)
+    _serial->writeFrame(_out, i);
+}
+
+void MeckCompanion::pushPathDiscovery(const uint8_t* pub_key,
+                                      const uint8_t* out_path, uint8_t out_path_len,
+                                      const uint8_t* in_path, uint8_t in_path_len) {
+    if (!_serial || !_serial->isConnected()) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_PATH_DISCOVERY_RESPONSE;
+    _out[i++] = 0;  // reserved
+    memcpy(&_out[i], pub_key, 6); i += 6;  // pub_key_prefix
+    _out[i++] = out_path_len;
+    i += mesh::Packet::writePath(&_out[i], out_path, out_path_len);
+    _out[i++] = in_path_len;
+    i += mesh::Packet::writePath(&_out[i], in_path, in_path_len);
+    _serial->writeFrame(_out, i);
+}
+
+void MeckCompanion::pushTelemetryResponse(const uint8_t* pub_key,
+                                          const uint8_t* payload, uint8_t payload_len) {
+    if (!_serial || !_serial->isConnected()) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_TELEMETRY_RESPONSE;
+    _out[i++] = 0;  // reserved
+    memcpy(&_out[i], pub_key, 6); i += 6;  // pub_key_prefix
+    if (i + (int)payload_len > MAX_FRAME_SIZE) return;
+    memcpy(&_out[i], payload, payload_len); i += payload_len;
+    _serial->writeFrame(_out, i);
+}
+
+void MeckCompanion::pushRawData(int8_t snr_x4, int8_t rssi,
+                                const uint8_t* payload, int payload_len) {
+    if (!_serial || !_serial->isConnected()) return;
+    if (payload_len < 0 || payload_len + 4 > MAX_FRAME_SIZE) return;
+    int i = 0;
+    _out[i++] = PUSH_CODE_RAW_DATA;
+    _out[i++] = (uint8_t)snr_x4;
+    _out[i++] = (uint8_t)rssi;
+    _out[i++] = 0xFF;  // reserved (possibly path_len in future)
+    memcpy(&_out[i], payload, payload_len); i += payload_len;
+    _serial->writeFrame(_out, i);
+}
+
+void MeckCompanion::pushChannelData(int8_t snr_x4, uint8_t ch_idx, uint8_t path_len,
+                                    uint16_t data_type, const uint8_t* data, int data_len) {
+    if (data_len < 0 || data_len > MAX_CHANNEL_DATA_LENGTH) return;  // exceeds frame limit
+    int i = 0;
+    _out[i++] = RESP_CODE_CHANNEL_DATA_RECV;
+    _out[i++] = (uint8_t)snr_x4;
+    _out[i++] = 0;  // reserved1
+    _out[i++] = 0;  // reserved2
+    _out[i++] = ch_idx;
+    _out[i++] = path_len;
+    _out[i++] = (uint8_t)(data_type & 0xFF);
+    _out[i++] = (uint8_t)(data_type >> 8);
+    _out[i++] = (uint8_t)data_len;
+    if (data_len > 0) {
+        memcpy(&_out[i], data, data_len); i += data_len;
+    }
+    addToOfflineQueue(_out, i);
+    pushMsgWaiting();
+}
+
+void MeckCompanion::pushContactDeleted(const uint8_t* pub_key) {
+    if (!_serial || !_serial->isConnected()) return;
+    _out[0] = PUSH_CODE_CONTACT_DELETED;
+    memcpy(&_out[1], pub_key, PUB_KEY_SIZE);
+    _serial->writeFrame(_out, 1 + PUB_KEY_SIZE);
+}
+
+void MeckCompanion::pushContactsFull() {
+    if (!_serial || !_serial->isConnected()) return;
+    _out[0] = PUSH_CODE_CONTACTS_FULL;
+    _serial->writeFrame(_out, 1);
 }

@@ -220,8 +220,13 @@ void meck_usb_drive_service(void);             // meck_task only
 // Companion push notifications -- called from MeckMesh callbacks to
 // notify the companion app (both BLE and WiFi) of incoming messages,
 // acks, and contact updates.
+// scope_marker (Meck::resolveScopeMarker), path and path_bytes (the hop
+// hashes, 0 bytes when not a flood) are used only for the Garmin watch's
+// channel message frame.
 void meck_companion_push_channel_msg(uint8_t ch_idx, uint8_t path_len,
                                       uint32_t timestamp, int8_t snr_x4,
+                                      uint8_t scope_marker,
+                                      const uint8_t* path, uint8_t path_bytes,
                                       const char* text);
 void meck_companion_push_contact_msg(const uint8_t* pub_key_prefix,
                                       uint8_t path_len, uint8_t txt_type,
@@ -262,6 +267,33 @@ void meck_companion_push_binary_response(uint32_t tag,
 // Discover nodes, as PUSH_CODE_CONTROL_DATA: SNR x4, RSSI, path_len, payload.
 void meck_companion_push_control_data(int8_t snr_x4, int8_t rssi, uint8_t path_len,
                                        const uint8_t* payload, int payload_len);
+
+// App commands ported from Meck (trace 36, path discovery 52, telemetry 39,
+// raw data 25, channel data 62) and the contact list notifications.
+// Trace result (PUSH_CODE_TRACE_DATA): path_len is the byte length of
+// path_hashes; flags' low 2 bits give the hash size as a shift.
+void meck_companion_push_trace_data(uint8_t path_len, uint8_t flags,
+                                     uint32_t tag, uint32_t auth_code,
+                                     const uint8_t* path_hashes,
+                                     const uint8_t* path_snrs, int8_t final_snr_x4);
+// Path discovery result (PUSH_CODE_PATH_DISCOVERY_RESPONSE): the path out to
+// the contact and the path back, each with its encoded path_len.
+void meck_companion_push_path_discovery(const uint8_t* pub_key,
+                                         const uint8_t* out_path, uint8_t out_path_len,
+                                         const uint8_t* in_path, uint8_t in_path_len);
+// Telemetry reply from a contact (PUSH_CODE_TELEMETRY_RESPONSE): CayenneLPP payload.
+void meck_companion_push_telemetry_response(const uint8_t* pub_key,
+                                             const uint8_t* payload, uint8_t payload_len);
+// Received raw custom packet (PUSH_CODE_RAW_DATA).
+void meck_companion_push_raw_data(int8_t snr_x4, int8_t rssi,
+                                   const uint8_t* payload, int payload_len);
+// Received channel datagram (RESP_CODE_CHANNEL_DATA_RECV), queued like a message.
+void meck_companion_push_channel_data(int8_t snr_x4, uint8_t ch_idx, uint8_t path_len,
+                                       uint16_t data_type, const uint8_t* data, int data_len);
+// Oldest contact overwritten (PUSH_CODE_CONTACT_DELETED) / contact list full
+// (PUSH_CODE_CONTACTS_FULL).
+void meck_companion_push_contact_deleted(const uint8_t* pub_key);
+void meck_companion_push_contacts_full(void);
 
 #ifdef __cplusplus
 }

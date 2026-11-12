@@ -56,8 +56,12 @@ public:
     // ---- Push notifications (called from MeckMesh callbacks) ----
 
     // Channel message received -- queues the frame and tickles the app
+    // (scope_marker, path and path_bytes are used only for the Garmin
+    // watch's frame: the region marker and the hop hashes)
     void pushChannelMessage(uint8_t ch_idx, uint8_t path_len,
                             uint32_t timestamp, int8_t snr_x4,
+                            uint8_t scope_marker,
+                            const uint8_t* path, uint8_t path_bytes,
                             const char* text);
 
     // DM / signed message received
@@ -109,6 +113,31 @@ public:
     void pushControlData(int8_t snr_x4, int8_t rssi, uint8_t path_len,
                          const uint8_t* payload, int payload_len);
 
+    // Trace result (PUSH_CODE_TRACE_DATA). Only sent while the app is connected.
+    void pushTraceData(uint8_t path_len, uint8_t flags, uint32_t tag, uint32_t auth_code,
+                       const uint8_t* path_hashes, const uint8_t* path_snrs,
+                       int8_t final_snr_x4);
+
+    // Path discovery result (PUSH_CODE_PATH_DISCOVERY_RESPONSE)
+    void pushPathDiscovery(const uint8_t* pub_key,
+                           const uint8_t* out_path, uint8_t out_path_len,
+                           const uint8_t* in_path, uint8_t in_path_len);
+
+    // Telemetry reply from a contact (PUSH_CODE_TELEMETRY_RESPONSE)
+    void pushTelemetryResponse(const uint8_t* pub_key,
+                               const uint8_t* payload, uint8_t payload_len);
+
+    // Received raw custom packet (PUSH_CODE_RAW_DATA)
+    void pushRawData(int8_t snr_x4, int8_t rssi, const uint8_t* payload, int payload_len);
+
+    // Received channel datagram (RESP_CODE_CHANNEL_DATA_RECV), queued like a message
+    void pushChannelData(int8_t snr_x4, uint8_t ch_idx, uint8_t path_len,
+                         uint16_t data_type, const uint8_t* data, int data_len);
+
+    // Contact list notifications (PUSH_CODE_CONTACT_DELETED / PUSH_CODE_CONTACTS_FULL)
+    void pushContactDeleted(const uint8_t* pub_key);
+    void pushContactsFull();
+
 private:
     void handleCmdFrame(size_t len);
 
@@ -151,6 +180,16 @@ private:
     // Frame buffers
     uint8_t _cmd[MAX_FRAME_SIZE + 1];
     uint8_t _out[MAX_FRAME_SIZE + 1];
+
+    // CMD_SIGN_START / CMD_SIGN_DATA / CMD_SIGN_FINISH: data collected for signing
+    uint8_t* _sign_data = nullptr;
+    uint32_t _sign_data_len = 0;
+
+#if MECK_BLE_GARMIN
+    // The connected client sent the watch hello (CMD 0x70, Garmin watch).
+    // Cleared on CMD_APP_START, as Meck's _meck_client.
+    bool _watch_client = false;
+#endif
 
 #if MECK_BLE_ENABLED
     void (*_on_app_synced)() = nullptr;   // see setOnAppSynced()

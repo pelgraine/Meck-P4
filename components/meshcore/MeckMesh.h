@@ -565,6 +565,53 @@ struct PendingChannelInvite {
     bool    active;         // is this slot in use
 };
 
+// Rx Log -- on-device packet sniffer ring (Settings > Experimental Features >
+// Rx Log), ported from Meck. logRx() captures every received packet (including
+// foreign relays, since it fires pre-filter) into header fields; for
+// decryptable channel messages the decoded "name: msg" text and channel name
+// are attached by onChannelMessageRecv(), matched on packet hash. RAM only,
+// lost on reboot.
+#define P4_RXLOG_SIZE        100
+#define P4_RXLOG_TEXT_LEN    64
+#define P4_RXLOG_CHNAME_LEN  16
+
+struct P4RxLogEntry {
+    uint32_t timestamp;                          // RTC at receive (UTC epoch)
+    uint8_t  header;                             // route type + payload type + ver (Packet::header)
+    uint8_t  path_len;                           // hop count (low 6 bits) + bytes-per-hop mode (high 2)
+    uint16_t size;                               // wire length (getRawLength)
+    int8_t   snr;                                // SNR x4 (snr / 4.0 = dB)
+    uint8_t  payload0;                           // first payload byte: channel hash, or dest hash (addressed)
+    uint8_t  payload1;                           // second payload byte: src hash (addressed types only)
+    uint8_t  hash[MAX_HASH_SIZE];                // packet hash
+    uint8_t  path[MAX_PATH_SIZE];                // hop hashes (layout per path_len)
+    char     channel_name[P4_RXLOG_CHNAME_LEN];  // channel name; empty if undecoded
+    char     text[P4_RXLOG_TEXT_LEN];            // decoded "name: msg"; empty if undecoded
+};
+
+#if MECK_BLE_GARMIN
+// Sent-message tracking for the Garmin watch's "Heard by" (CMD 0x72), ported
+// from Meck's SentMsgTrack: the first bytes of each channel packet we flood
+// are kept as a fingerprint, and every flood packet received with the same
+// fingerprint is a repeater's echo of it. Only the first hop of each echo is
+// recorded (the repeater that heard us directly), once per repeater.
+#define P4_SENT_TRACK_SIZE        4
+#define P4_SENT_FINGERPRINT_SIZE  12
+#define P4_SENT_TRACK_EXPIRY_MS   600000   // keep heard-by viewable for 10 minutes
+#define P4_SENT_ECHO_MAX          8        // distinct "heard by" repeaters stored per send
+
+struct P4SentTrack {
+    uint8_t fingerprint[P4_SENT_FINGERPRINT_SIZE];
+    uint8_t repeat_count;
+    unsigned long sent_millis;
+    bool active;
+    uint8_t echo_bph;                          // bytes-per-hop of stored hashes (1 or 2)
+    uint8_t echo_count;                        // distinct repeaters recorded (<= P4_SENT_ECHO_MAX)
+    uint8_t echo_hash[P4_SENT_ECHO_MAX * 2];   // first-hop hash of each source
+    int8_t  echo_snr[P4_SENT_ECHO_MAX];        // SNR (quarter-dB) heard from each source
+};
+#endif
+
 // ============================================================
 // P4Mesh — standalone mesh for T-Display P4
 // ============================================================
@@ -615,6 +662,32 @@ public:
         _contacts_save_at = 0;
 
         _mutex = xSemaphoreCreateMutex();
+
+        // Rx Log ring (PSRAM) and its own lock: logRx() writes on meck_task,
+        // the Rx Log screen reads on the LVGL task.
+        _rxlog = (P4RxLogEntry*)heap_caps_calloc(P4_RXLOG_SIZE, sizeof(P4RxLogEntry),
+                                                 MALLOC_CAP_SPIRAM);
+        _rxlog_head = 0;
+        _rxlog_count = 0;
+        _rxlog_seq = 0;
+        _rxlog_mutex = xSemaphoreCreateMutex();
+    }
+
+    // ---- Rx Log (Settings > Experimental Features > Rx Log) ----
+
+    // Changes whenever the ring changes (new packet, or decoded text attached).
+    uint32_t getRxLogSeq() const { return _rxlog_seq; }
+
+    // Copy up to max entries into out, newest first. Returns the number copied.
+    int copyRxLogNewestFirst(P4RxLogEntry* out, int max) {
+        if (_rxlog == nullptr || out == nullptr || max <= 0) return 0;
+        xSemaphoreTake(_rxlog_mutex, portMAX_DELAY);
+        int n = (_rxlog_count < max) ? _rxlog_count : max;
+        for (int d = 0; d < n; d++) {
+            out[d] = _rxlog[(_rxlog_head - 1 - d + 2 * P4_RXLOG_SIZE) % P4_RXLOG_SIZE];
+        }
+        xSemaphoreGive(_rxlog_mutex);
+        return n;
     }
 
     // ---- Initialization ----
@@ -1409,6 +1482,64 @@ public:
         sendZeroHop(pkt);
         return true;
     }
+
+    // Trace from the app (CMD_SEND_TRACE_PATH, 36), as Meck: the app supplies
+    // the tag, auth code, flags (low 2 bits = hash size as a shift) and the
+    // hop hashes. The result reaches the app through onTraceRecv
+    // (PUSH_CODE_TRACE_DATA). Returns false when no packet is free.
+    bool companionSendTrace(uint32_t tag, uint32_t auth, uint8_t flags,
+                            const uint8_t* path, uint8_t path_len,
+                            uint32_t& est_timeout_ms) {
+        mesh::Packet* pkt = createTrace(tag, auth, flags);
+        if (!pkt) return false;
+        sendDirect(pkt, path, path_len);
+        uint32_t t = _radio->getEstAirtimeFor(pkt->payload_len + pkt->path_len + 2);
+        est_timeout_ms = calcDirectTimeoutMillisFor(t, path_len >> (flags & 0x03));
+        printf("Meck: companionSendTrace tag=0x%08X flags=%u path_len=%u\n",
+               (unsigned)tag, (unsigned)flags, (unsigned)path_len);
+        return true;
+    }
+
+    // Path discovery from the app (CMD_SEND_PATH_DISCOVERY_REQ, 52), as Meck:
+    // a flooded base-telemetry request. The reply's path out and back is
+    // pushed to the app from onContactPathRecv
+    // (PUSH_CODE_PATH_DISCOVERY_RESPONSE). Returns the sendRequest result.
+    int companionSendPathDiscovery(ContactInfo& recipient, uint32_t& tag,
+                                   uint32_t& est_timeout_ms) {
+        uint8_t req_data[9];
+        req_data[0] = REQ_TYPE_GET_TELEMETRY_DATA;
+        req_data[1] = (uint8_t)~0x01;   // inverse permissions mask: base telemetry only (TELEM_PERM_BASE)
+        memset(&req_data[2], 0, 3);     // reserved
+        getRNG()->random(&req_data[5], 4);   // random blob to help make packet-hash unique
+        uint8_t save = recipient.out_path_len;   // temporarily force sendRequest() to flood
+        recipient.out_path_len = OUT_PATH_UNKNOWN;
+        int result = sendRequest(recipient, req_data, sizeof(req_data), tag, est_timeout_ms);
+        recipient.out_path_len = save;
+        if (result != MSG_SEND_FAILED) _companion_pending_discovery_tag = tag;
+        return result;
+    }
+
+    // Telemetry request from the app (CMD_SEND_TELEMETRY_REQ, 39). The reply
+    // is matched by tag in onContactResponse and pushed as
+    // PUSH_CODE_TELEMETRY_RESPONSE. Returns the sendRequest result.
+    int companionSendTelemetryReq(const ContactInfo& recipient, uint32_t& tag,
+                                  uint32_t& est_timeout_ms) {
+        int result = sendRequest(recipient, REQ_TYPE_GET_TELEMETRY_DATA, tag, est_timeout_ms);
+        if (result != MSG_SEND_FAILED) _companion_pending_telemetry_tag = tag;
+        return result;
+    }
+
+#if MECK_BLE_GARMIN
+    // Garmin watch "Heard by" (CMD 0x72): n = 0 is the most recent channel
+    // send, n = 1 the one before. NULL when there is no such slot or it has
+    // expired.
+    const P4SentTrack* getSentTrack(uint8_t n) const {
+        if (n >= P4_SENT_TRACK_SIZE) return NULL;
+        const P4SentTrack* t = &_sent_track[(_sent_track_idx - 1 - n + 2 * P4_SENT_TRACK_SIZE) % P4_SENT_TRACK_SIZE];
+        if (!t->active || (millis() - t->sent_millis) > P4_SENT_TRACK_EXPIRY_MS) return NULL;
+        return t;
+    }
+#endif
 
     // Request the repeater's telemetry data (REQ_TYPE_GET_TELEMETRY_DATA).
     // Response payload is a CayenneLPP buffer — variable-length, parsed
@@ -2508,6 +2639,19 @@ protected:
 
     void sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pkt,
                          uint32_t delay_millis = 0) override {
+#if MECK_BLE_GARMIN
+        // Capture the payload fingerprint for the watch's repeat tracking
+        if (pkt->payload_len >= P4_SENT_FINGERPRINT_SIZE) {
+            P4SentTrack* t = &_sent_track[_sent_track_idx];
+            memcpy(t->fingerprint, pkt->payload, P4_SENT_FINGERPRINT_SIZE);
+            t->repeat_count = 0;
+            t->echo_count = 0;
+            t->echo_bph = 0;
+            t->sent_millis = millis();
+            t->active = true;
+            _sent_track_idx = (_sent_track_idx + 1) % P4_SENT_TRACK_SIZE;
+        }
+#endif
         TransportKey scope;
         const char* ch_scope = getChannelScopeName(channel);
         if (ch_scope && ch_scope[0]) {
@@ -3006,9 +3150,68 @@ protected:
         meck_companion_push_rx_log((int8_t)(snr * 4), (int8_t)rssi, raw, len);
     }
 
+    // Dispatcher RX hook: fires for every parsed packet, before the duplicate
+    // filter. Fills the Rx Log ring (ported from Meck's MyMesh::logRx).
+    void logRx(mesh::Packet* pkt, int len, float score) override {
+        (void)score;
+        if (_rxlog == nullptr) return;
+        P4RxLogEntry e;
+        memset(&e, 0, sizeof(e));
+        e.timestamp = getRTCClock()->getCurrentTime();
+        e.header    = pkt->header;
+        e.path_len  = pkt->path_len;
+        e.size      = (uint16_t)len;
+        e.snr       = pkt->_snr;
+        e.payload0  = (pkt->payload_len > 0) ? pkt->payload[0] : 0;
+        e.payload1  = (pkt->payload_len > 1) ? pkt->payload[1] : 0;
+        pkt->calculatePacketHash(e.hash);
+        uint16_t pbl = pkt->getPathByteLen();
+        if (pbl > MAX_PATH_SIZE) pbl = MAX_PATH_SIZE;
+        memcpy(e.path, pkt->path, pbl);
+        // channel_name / text stay empty here; attached by
+        // onChannelMessageRecv() for decryptable channel messages.
+        xSemaphoreTake(_rxlog_mutex, portMAX_DELAY);
+        _rxlog[_rxlog_head] = e;
+        _rxlog_head = (_rxlog_head + 1) % P4_RXLOG_SIZE;
+        if (_rxlog_count < P4_RXLOG_SIZE) _rxlog_count++;
+        _rxlog_seq++;
+        xSemaphoreGive(_rxlog_mutex);
+    }
+
     void onChannelMessageRecv(const mesh::GroupChannel& channel, mesh::Packet* pkt,
                                uint32_t timestamp, const char* text) override {
         uint8_t ch_idx = findChannelIdx(channel);
+
+        // Rx Log: attach the decoded text + channel name to the matching
+        // captured entry, found by packet hash. logRx() ran first and stored
+        // the header fields.
+        if (_rxlog != nullptr && text) {
+            uint8_t h[MAX_HASH_SIZE];
+            pkt->calculatePacketHash(h);
+            ChannelDetails cd;
+            const char* cname = getChannel(ch_idx, cd) ? cd.name : "";
+            xSemaphoreTake(_rxlog_mutex, portMAX_DELAY);
+            int oldest = (_rxlog_head - _rxlog_count + P4_RXLOG_SIZE) % P4_RXLOG_SIZE;
+            for (int n = _rxlog_count - 1; n >= 0; n--) {
+                P4RxLogEntry& e = _rxlog[(oldest + n) % P4_RXLOG_SIZE];
+                if (e.text[0] == 0 && memcmp(e.hash, h, MAX_HASH_SIZE) == 0) {
+                    // Cut on a whole UTF-8 character so the label never gets
+                    // half of a multi-byte character at the end.
+                    size_t full = strlen(text);
+                    size_t tl = (full < sizeof(e.text) - 1) ? full : sizeof(e.text) - 1;
+                    if (tl < full) {
+                        while (tl > 0 && ((uint8_t)text[tl] & 0xC0) == 0x80) tl--;
+                    }
+                    memcpy(e.text, text, tl);
+                    e.text[tl] = '\0';
+                    strncpy(e.channel_name, cname, sizeof(e.channel_name) - 1);
+                    e.channel_name[sizeof(e.channel_name) - 1] = '\0';
+                    _rxlog_seq++;
+                    break;
+                }
+            }
+            xSemaphoreGive(_rxlog_mutex);
+        }
 
         // Self-echo dedup: if this is our own packet bouncing back via flood,
         // don't store in ring (we already wrote a local-echo entry at send time).
@@ -3188,7 +3391,12 @@ protected:
         {
         uint8_t pl = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
         int8_t snr4 = (int8_t)(pkt->getSNR() * 4);
-        meck_companion_push_channel_msg(ch_idx, pl, timestamp, snr4, text);
+        // Region marker and hop bytes: used only for the Garmin watch's frame
+        uint8_t scope_marker = (wrote_idx >= 0) ? saved_copy.scope_idx
+                                                : resolveScopeMarker(pkt, ch_idx);
+        uint8_t path_bytes = pkt->isRouteFlood() ? (uint8_t)pkt->getPathByteLen() : 0;
+        meck_companion_push_channel_msg(ch_idx, pl, timestamp, snr4,
+                                        scope_marker, pkt->path, path_bytes, text);
         }
     }
 
@@ -3516,6 +3724,50 @@ protected:
         return _prefs ? _prefs->cad_enabled != 0 : false;
     }
 
+#if MECK_BLE_GARMIN
+    // Fires for every received flood packet, before the duplicate filter.
+    // Counts repeats of our recent channel sends for the Garmin watch's
+    // "Heard by" (ported from Meck's MyMesh::filterRecvFloodPacket).
+    bool filterRecvFloodPacket(mesh::Packet* packet) override {
+        if (packet->payload_len >= P4_SENT_FINGERPRINT_SIZE) {
+            unsigned long now = millis();
+            for (int i = 0; i < P4_SENT_TRACK_SIZE; i++) {
+                P4SentTrack* t = &_sent_track[i];
+                if (!t->active) continue;
+
+                // Expire old entries
+                if ((now - t->sent_millis) > P4_SENT_TRACK_EXPIRY_MS) {
+                    t->active = false;
+                    continue;
+                }
+
+                if (memcmp(packet->payload, t->fingerprint, P4_SENT_FINGERPRINT_SIZE) == 0) {
+                    t->repeat_count++;
+                    // Record only the FIRST hop of each echo -- the repeater
+                    // that heard our transmission directly. Dedup so each
+                    // direct repeater is listed once.
+                    uint8_t hops = packet->path_len & 63;
+                    uint8_t bph  = (packet->path_len >> 6) + 1;
+                    if (hops > 0 && bph >= 1 && bph <= 2) {
+                        bool seen = false;
+                        for (int e = 0; e < t->echo_count; e++) {
+                            if (memcmp(&t->echo_hash[e * bph], packet->path, bph) == 0) { seen = true; break; }
+                        }
+                        if (!seen && t->echo_count < P4_SENT_ECHO_MAX) {
+                            t->echo_bph = bph;
+                            memcpy(&t->echo_hash[t->echo_count * bph], packet->path, bph);
+                            t->echo_snr[t->echo_count] = packet->_snr;
+                            t->echo_count++;
+                        }
+                    }
+                    break;  // found match, no need to check other entries
+                }
+            }
+        }
+        return false;  // never filter -- let normal processing continue
+    }
+#endif
+
     // Client repeat mode (upstream MeshCore v9; the Meck Watch's version):
     // forward floods while the app has switched it on. Echoes of our own
     // channel sends are never forwarded (see P4MeshTables::isOurOutgoing).
@@ -3649,6 +3901,20 @@ protected:
                                                 payload_len);
             printf("Meck: companion binary response from %s tag=0x%08X (%u bytes)\n",
                    contact.name, (unsigned)tag, (unsigned)payload_len);
+            companion_handled = true;
+            // fall through to device branches below
+        }
+
+        // Companion telemetry response (CMD_SEND_TELEMETRY_REQ, 39): matched
+        // by tag against _companion_pending_telemetry_tag. The CayenneLPP
+        // payload after the 4-byte tag is forwarded as it is.
+        if (len > 4 && _companion_pending_telemetry_tag != 0 &&
+            tag == _companion_pending_telemetry_tag) {
+            _companion_pending_telemetry_tag = 0;
+            meck_companion_push_telemetry_response(contact.id.pub_key, &data[4],
+                                                   (uint8_t)(len - 4));
+            printf("Meck: companion telemetry response from %s (%u bytes)\n",
+                   contact.name, (unsigned)(len - 4));
             companion_handled = true;
             // fall through to device branches below
         }
@@ -4083,6 +4349,32 @@ protected:
     // optimisation and ALL anon-request responses (login, region list,
     // owner info, clock query) were broken because the response is
     // delivered as an "extra" payload inside the path-return packet.
+    //
+    // The override below handles only the app's path discovery reply
+    // (CMD_SEND_PATH_DISCOVERY_REQ, 52), as Meck does, and passes everything
+    // else to the base class.
+    bool onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t in_path_len,
+                           uint8_t* out_path, uint8_t out_path_len, uint8_t extra_type,
+                           uint8_t* extra, uint8_t extra_len) override {
+        if (extra_type == PAYLOAD_TYPE_RESPONSE && extra_len > 4) {
+            uint32_t tag;
+            memcpy(&tag, extra, 4);
+            if (_companion_pending_discovery_tag != 0 && tag == _companion_pending_discovery_tag) {
+                _companion_pending_discovery_tag = 0;
+                if (mesh::Packet::isValidPathLen(in_path_len) &&
+                    mesh::Packet::isValidPathLen(out_path_len)) {
+                    meck_companion_push_path_discovery(contact.id.pub_key, out_path, out_path_len,
+                                                       in_path, in_path_len);
+                } else {
+                    printf("Meck: onContactPathRecv, invalid path sizes: %u, %u\n",
+                           (unsigned)in_path_len, (unsigned)out_path_len);
+                }
+                return false;  // DON'T send reciprocal path!
+            }
+        }
+        return BaseChatMesh::onContactPathRecv(contact, in_path, in_path_len, out_path,
+                                               out_path_len, extra_type, extra, extra_len);
+    }
 
     // PAYLOAD_TYPE_CONTROL (0x0B) handler. The base Mesh class delivers
     // control packets here for application-level processing. We use it
@@ -4279,8 +4571,20 @@ protected:
         return _prefs ? ((_prefs->autoadd_config & 0x01) != 0) : true;
     }
 
-    void onContactsFull() override {}
-    void onContactOverwrite(const uint8_t* pub_key) override {}
+    // Tell the app (PUSH_CODE_CONTACTS_FULL / PUSH_CODE_CONTACT_DELETED), as Meck
+    void onContactsFull() override { meck_companion_push_contacts_full(); }
+    void onContactOverwrite(const uint8_t* pub_key) override {
+        meck_companion_push_contact_deleted(pub_key);
+    }
+
+    // Channel datagram received: passed to the app as
+    // RESP_CODE_CHANNEL_DATA_RECV (as Meck). Not shown on the device.
+    void onChannelDataRecv(const mesh::GroupChannel& channel, mesh::Packet* pkt,
+                           uint16_t data_type, const uint8_t* data, size_t data_len) override {
+        meck_companion_push_channel_data((int8_t)(pkt->getSNR() * 4), findChannelIdx(channel),
+                                         pkt->isRouteFlood() ? (uint8_t)pkt->path_len : 0xFF,
+                                         data_type, data, (int)data_len);
+    }
     uint8_t getAutoAddMaxHops() const override { return 4; }
 
     // Match an incoming ACK against the expected-ACK table populated by
@@ -4681,6 +4985,11 @@ protected:
     void onTraceRecv(mesh::Packet* packet, uint32_t tag, uint32_t auth_code,
                      uint8_t flags, const uint8_t* path_snrs,
                      const uint8_t* path_hashes, uint8_t path_len) override {
+        // Every trace result goes to the app (PUSH_CODE_TRACE_DATA), as Meck;
+        // the app matches its own by tag.
+        meck_companion_push_trace_data(path_len, flags, tag, auth_code, path_hashes,
+                                       path_snrs, packet ? packet->_snr : 0);
+
         if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
 
         if (_trace_pending_tag != 0 && tag == _trace_pending_tag) {
@@ -4752,6 +5061,10 @@ protected:
     // for the LVGL task to drain via MeckVoice.
     void onRawDataRecv(mesh::Packet* pkt) override {
         if (!pkt || pkt->payload_len < 1) return;
+        // Every raw packet also goes to the app (PUSH_CODE_RAW_DATA), as Meck
+        meck_companion_push_raw_data((int8_t)(_radio->getLastSNR() * 4),
+                                     (int8_t)(_radio->getLastRSSI()),
+                                     pkt->payload, pkt->payload_len);
         uint8_t magic = pkt->payload[0];
 
         if (magic == VOICE_PKT_MAGIC || magic == VOICE_FETCH_MAGIC) {
@@ -4778,6 +5091,13 @@ private:
     P4RTCClock& _rtc_ref;
     P4DataStore* _store;
     P4NodePrefs* _prefs;
+
+    // Rx Log ring buffer (PSRAM, size P4_RXLOG_SIZE). RAM only.
+    P4RxLogEntry* _rxlog;
+    int _rxlog_head;                 // index where the next entry will be written
+    int _rxlog_count;                // number of valid entries (<= P4_RXLOG_SIZE)
+    volatile uint32_t _rxlog_seq;    // bumped on every ring change (screen refresh check)
+    SemaphoreHandle_t _rxlog_mutex;
 
     P4ChannelMessage* _msgs_ch[MAX_GROUP_CHANNELS];
     int _msg_count_ch[MAX_GROUP_CHANNELS];
@@ -4943,6 +5263,15 @@ private:
     uint32_t _companion_pending_login_pk   = 0;
     uint32_t _companion_pending_status_tag = 0;
     uint32_t _companion_pending_binary_tag = 0;
+    // Tags of the app's pending telemetry (39) and path discovery (52) requests
+    uint32_t _companion_pending_telemetry_tag = 0;
+    uint32_t _companion_pending_discovery_tag = 0;
+
+#if MECK_BLE_GARMIN
+    // Garmin watch "Heard by": recent channel sends and their echoes
+    P4SentTrack _sent_track[P4_SENT_TRACK_SIZE] = {};
+    int _sent_track_idx = 0;   // next slot in the circular buffer
+#endif
 
     // ---- Neighbours pagination state ----
     // _pending_neighbours_tag matches REQ_TYPE_GET_NEIGHBOURS replies
