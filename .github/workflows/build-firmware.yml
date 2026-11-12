@@ -45,6 +45,11 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           . "${IDF_PATH:-/opt/esp/idf}/export.sh"
+          # The component manager in this ESP-IDF image is too old to read the
+          # "$CONFIG{ENABLE_USB_DISPLAY}" condition in main/idf_component.yml
+          # (it stops with: Environment variable "CONFIG" is not set).
+          # Bring it up to the newest 2.x release, the range ESP-IDF 5.4 allows.
+          python -m pip install --upgrade "idf-component-manager~=2.0"
           bash tools/ci/build-variant.sh "${{ matrix.variant }}"
 
       - name: Keep the firmware file
