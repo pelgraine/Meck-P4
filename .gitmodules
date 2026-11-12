@@ -1,6 +1,3 @@
-[submodule "components/cpp_bus_driver"]
-	path = components/cpp_bus_driver
-	url = https://github.com/Llgok/cpp_bus_driver.git
 [submodule "main/examples/esp-at"]
 	path = main/examples/esp-at
 	url = https://github.com/espressif/esp-at.git
