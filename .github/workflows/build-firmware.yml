@@ -1,0 +1,66 @@
+# Builds every Meck-P4 release variant when you press the "Run workflow"
+# button: GitHub > Actions tab > "Build firmware" > Run workflow.
+# It does not run by itself and has nothing to do with releases.
+#
+# Download the finished files from the workflow run (the run's page >
+# Artifacts > meck-p4-firmware).
+#
+# File names: meck-p4-<version>-<variant>-merged.bin, where <version> is
+# MECK_FIRMWARE_VERSION in components/meshcore/meck.h and <variant> is one
+# of the names below. Each variant's settings are in
+# tools/ci/variants/<variant>.conf, applied on top of tools/ci/sdkconfig.base
+# by tools/ci/build-variant.sh.
+
+name: Build firmware
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.1
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - amoled-LR2021-ble
+          - amoled-LR2021-nokeyboard-ble
+          - amoled-LR2021-ble-garmin
+          - tft-ble
+          - tft-nokeyboard-ble
+          - amoled-ble
+          - amoled-nokeyboard-ble
+          - amoled-wifi
+          - amoled-nokeyboard-wifi
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build ${{ matrix.variant }}
+        shell: bash
+        run: |
+          git config --global --add safe.directory '*'
+          . "${IDF_PATH:-/opt/esp/idf}/export.sh"
+          bash tools/ci/build-variant.sh "${{ matrix.variant }}"
+
+      - name: Keep the firmware file
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.variant }}
+          path: release/*.bin
+          if-no-files-found: error
+
+  collect:
+    name: Collect all files into one download
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact/merge@v4
+        with:
+          name: meck-p4-firmware
+          delete-merged: true
