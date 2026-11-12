@@ -20,11 +20,10 @@ static void strzcpy(char* dest, const char* src, size_t n) {
     dest[n - 1] = '\0';
 }
 
-// ---- Client repeat mode (upstream MeshCore v9), as the Meck Watch has it ----
-// Frequencies (kHz ranges) on which the app may switch client repeat on.
-// Upstream's three exact rows, plus the Meck Watch's band rows so it can be
-// switched on at the preset frequencies, including the 2.4 GHz ISM band
-// (LR2021 build).
+// ---- Client repeat mode (upstream MeshCore v9) ----
+// Frequencies (kHz ranges) on which the app may switch client repeat on:
+// the MeshCore app's three exact frequencies (433.0, 869.495 and 918.0 MHz),
+// plus the 2.4 GHz ISM band (LR2021 build) for the much smaller 2.4 GHz mesh.
 struct FreqRange {
     uint32_t lower_freq, upper_freq;
 };
@@ -33,11 +32,12 @@ static const FreqRange repeat_freq_ranges[] = {
     { 433000, 433000 },
     { 869495, 869495 },
     { 918000, 918000 },
-    { 433050, 434790 },    // 433 MHz ISM -- covers the 433.375 / 433.650 presets
-    { 863000, 870000 },    // EU 863-870 SRD -- covers 869.432 / 869.525 / 869.618
-    { 902000, 928000 },    // 902-928 MHz ISM (AU/NZ/US) -- covers 910.525 through 923.125, incl. Sydney 916.575 / 915.075
     { 2400000, 2500000 }   // 2.4 GHz ISM band (LR2021 build)
 };
+
+// Queues a radio re-tune that meck_task applies at the top of its loop
+// (target.cpp); the same call the Settings screen and the Companion CLI use.
+extern "C" void radio_request_reconfig(float freq, float bw, uint8_t sf, uint8_t cr, uint8_t tx_power);
 
 static bool isValidClientRepeatFreq(uint32_t f) {
     for (size_t i = 0; i < sizeof(repeat_freq_ranges) / sizeof(repeat_freq_ranges[0]); i++) {
@@ -682,7 +682,9 @@ void MeckCompanion::handleCmdFrame(size_t len) {
                 printf("Companion: TX lowered to %d dBm for this band\n", (int)max_tx);
             }
             _mesh->savePrefs();
-            printf("Companion: SET_RADIO_PARAMS freq=%.3f bw=%.1f sf=%d cr=%d repeat=%d (radio: reboot to apply)\n",
+            // Re-tune the radio now, as Meck does (no reboot needed)
+            radio_request_reconfig(prefs->freq, prefs->bw, prefs->sf, prefs->cr, prefs->tx_power_dbm);
+            printf("Companion: SET_RADIO_PARAMS freq=%.3f bw=%.1f sf=%d cr=%d repeat=%d\n",
                    prefs->freq, prefs->bw, (int)sf, (int)cr, (int)prefs->client_repeat);
             writeOKFrame();
         } else {
@@ -699,7 +701,9 @@ void MeckCompanion::handleCmdFrame(size_t len) {
         if (power >= -9 && power <= meck_radio_max_tx_dbm(prefs->freq)) {
             prefs->tx_power_dbm = power;
             _mesh->savePrefs();
-            printf("Companion: SET_RADIO_TX_POWER %d dBm (reboot to apply)\n", (int)power);
+            // Apply to the radio now, as Meck does (no reboot needed)
+            radio_request_reconfig(prefs->freq, prefs->bw, prefs->sf, prefs->cr, prefs->tx_power_dbm);
+            printf("Companion: SET_RADIO_TX_POWER %d dBm\n", (int)power);
             writeOKFrame();
         } else {
             writeErrFrame(ERR_CODE_ILLEGAL_ARG);
