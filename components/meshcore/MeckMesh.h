@@ -4317,6 +4317,14 @@ protected:
 
     void onDiscoveredContact(ContactInfo& contact, bool is_new,
                               uint8_t path_len, const uint8_t* path) override {
+        // Tell a connected app about the advert, as Meck: the full contact
+        // for a new node (PUSH_CODE_NEW_ADVERT), else just the key
+        // (PUSH_CODE_ADVERT) so the app refreshes that contact.
+        if (is_new) {
+            meck_companion_push_new_advert(&contact);
+        } else {
+            meck_companion_push_advert(contact.id.pub_key);
+        }
         if (is_new) {
             printf("Meck: new contact '%s' [%02X%02X] hops=%d\n",
                    contact.name, contact.id.pub_key[0], contact.id.pub_key[1], path_len);
@@ -4337,6 +4345,8 @@ protected:
                contact.name,
                contact.out_path_len == OUT_PATH_UNKNOWN
                    ? 0 : (contact.out_path_len & 0x3F));
+        // Tell a connected app the contact's path changed (PUSH_CODE_PATH_UPDATED), as Meck
+        meck_companion_push_path_updated(contact.id.pub_key);
     }
 
     // NOTE: do NOT override onContactPathRecv here. The base class
