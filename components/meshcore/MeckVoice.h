@@ -282,8 +282,15 @@ public:
     bool startRecording() {
         if (!_lock) begin();
         if (!tasksReady()) return false;
-        if (_recState.load() != REC_IDLE) return false;
         if (!ensureCaptureBuffer()) return false;
+
+        // The buffer is also used to save incoming notes: only take it when
+        // the work task is not using it (isBusy()).
+        xSemaphoreTake(_lock, portMAX_DELAY);
+        bool free = (_recState.load() == REC_IDLE) && !_bufBusy.load();
+        if (free) _recState = REC_RECORDING;
+        xSemaphoreGive(_lock);
+        if (!free) return false;
 
         // Stop any active playback before capturing; that also puts the
         // codec to sleep, with both I2S channels disabled.
@@ -294,16 +301,21 @@ public:
         if (!meck_audio_mic_start(VOICE_SAMPLE_RATE)) {
             printf("MeckVoice: mic start failed\n");
             meck_audio_codec_sleep();
+            _recState = REC_IDLE;
+            xTaskNotifyGive(_workTask);   // anything that waited for the buffer
             return false;
         }
 
         _capValues = 0;
         _stopReq = false;
-        _recState = REC_RECORDING;
         xTaskNotifyGive(_capTask);
         printf("MeckVoice: recording started\n");
         return true;
     }
+
+    // The work task is saving an incoming note (or preparing an older
+    // recording) in the shared buffer: a recording cannot start just now.
+    bool isBusy() const { return _bufBusy.load(); }
 
     // Stops the recording (Stop button, keyboard). The capture task ends its
     // loop within one read and hands the audio to the work task, exactly as
@@ -671,29 +683,47 @@ private:
         xSemaphoreGive(_lock);
     }
 
-    // ---- PSRAM buffers (allocated on first use, kept) ----
+    // ---- The one PSRAM buffer (allocated on first use, kept) ----
+    // 2.1 MB: the stereo capture, 44.1 kHz x 2 x 12 s. Once a recording has
+    // been reduced to mono, only its first half holds audio, so the filter
+    // chain works in the second half: _pcm16 (16 kHz) and _pcm8k (8 kHz)
+    // point there. Saving incoming notes uses the same two areas; _recState
+    // and _bufBusy (under _lock) keep the capture task and the work task
+    // from using the buffer at the same time.
+    static_assert(VOICE_44K_SAMPLES + VOICE_16K_SAMPLES + VOICE_8K_SAMPLES <= VOICE_BUF_SAMPLES,
+                  "filter areas must fit after the mono audio in the capture buffer");
+
     bool ensureCaptureBuffer() {
-        if (_recBuffer) return true;
-        _recBuffer = (int16_t *)heap_caps_calloc(
-            VOICE_BUF_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        xSemaphoreTake(_lock, portMAX_DELAY);
         if (!_recBuffer) {
-            printf("MeckVoice: PSRAM alloc failed for rec buffer (%d bytes)\n",
-                   (int)VOICE_BUF_BYTES);
-            return false;
+            _recBuffer = (int16_t *)heap_caps_calloc(
+                VOICE_BUF_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            if (_recBuffer) {
+                _pcm16 = _recBuffer + VOICE_44K_SAMPLES;
+                _pcm8k = _pcm16 + VOICE_16K_SAMPLES;
+            } else {
+                printf("MeckVoice: PSRAM alloc failed for voice buffer (%d bytes; "
+                       "PSRAM free %u, largest block %u)\n",
+                       (int)VOICE_BUF_BYTES,
+                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                       (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+            }
         }
-        return true;
+        bool ok = (_recBuffer != nullptr);
+        xSemaphoreGive(_lock);
+        return ok;
     }
 
-    bool ensureWorkBuffers() {
-        if (!_pcm16) _pcm16 = (int16_t *)heap_caps_calloc(VOICE_16K_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        if (!_pcm8k) _pcm8k = (int16_t *)heap_caps_calloc(VOICE_8K_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        if (!_out44) _out44 = (int16_t *)heap_caps_calloc(VOICE_44K_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        if (!_pcm16 || !_pcm8k || !_out44) {
-            printf("MeckVoice: PSRAM alloc failed for work buffers\n");
-            return false;
-        }
-        return true;
+    // Work task: take the buffer for an incoming note or a prepare, unless a
+    // recording has it. releaseForWork() hands it back.
+    bool claimForWork() {
+        xSemaphoreTake(_lock, portMAX_DELAY);
+        bool ok = (_recState.load() == REC_IDLE) && !_bufBusy.load();
+        if (ok) _bufBusy = true;
+        xSemaphoreGive(_lock);
+        return ok;
     }
+    void releaseForWork() { _bufBusy = false; }
 
     // ========================================================================
     // Capture task
@@ -740,6 +770,7 @@ private:
                 r.seconds = n / (float)(VOICE_SAMPLE_RATE * 2);
                 postRecordResult(r);
                 _recState = REC_IDLE;
+                xTaskNotifyGive(_workTask);   // anything that waited for the buffer
                 continue;
             }
             _capFinal = n;
@@ -771,8 +802,10 @@ private:
                 rx = _rxJob.pending;
                 prep = _jobPrepare;
                 xSemaphoreGive(_lock);
-                if (rx)   { doIncoming(); again = true; }
-                if (prep) { doPrepare();  again = true; }
+                // While a recording holds the buffer these wait; the
+                // recording's end wakes this task again.
+                if (rx && claimForWork())   { doIncoming(); releaseForWork(); again = true; }
+                if (prep && claimForWork()) { doPrepare();  releaseForWork(); again = true; }
             }
         }
     }
@@ -794,12 +827,6 @@ private:
         uint8_t c2[VOICE_C2_MAX_BYTES];
         uint32_t c2Bytes = 0;
 
-        if (!ensureWorkBuffers()) {
-            r.outcome = REC_ENCODE_FAILED;
-            postRecordResult(r);
-            _recState = REC_IDLE;
-            return;
-        }
         uint32_t n44 = pickLouderChannel(_recBuffer, nStereo);
         uint32_t n16 = resample44to16(_recBuffer, n44, _pcm16);
         c2Bytes = encode16k(n16, c2);
@@ -843,7 +870,7 @@ private:
         r.durationSec = (uint8_t)((job.dataBytes / VOICE_C2_FRAME_BYTES) * VOICE_C2_FRAME_MS / 1000);
 
         bool saved = false;
-        if (ensureWorkBuffers()) {
+        if (ensureCaptureBuffer()) {
             struct stat st;
             if (stat(VOICE_FOLDER, &st) != 0) mkdir(VOICE_FOLDER, 0755);
             if (stat(VOICE_RX_FOLDER, &st) != 0) mkdir(VOICE_RX_FOLDER, 0755);
@@ -861,8 +888,8 @@ private:
         xSemaphoreGive(_lock);
     }
 
-    // Previous recording without a .c2 file: encode it from its WAV, using
-    // _out44 for the samples (the capture buffer may be recording).
+    // Previous recording without a .c2 file: encode it from its WAV, loaded
+    // into the first half of the buffer (claimed: no recording is running).
     void doPrepare() {
         char path[112];
         xSemaphoreTake(_lock, portMAX_DELAY);
@@ -876,10 +903,10 @@ private:
         strncpy(r.wavPath, path, sizeof(r.wavPath) - 1);
         uint8_t c2[VOICE_C2_MAX_BYTES];
         uint32_t c2Bytes = 0;
-        if (ensureWorkBuffers()) {
-            uint32_t n44 = loadWavMono(path, _out44, VOICE_44K_SAMPLES);
+        if (ensureCaptureBuffer()) {
+            uint32_t n44 = loadWavMono(path, _recBuffer, VOICE_44K_SAMPLES);
             if (n44 > 0) {
-                uint32_t n16 = resample44to16(_out44, n44, _pcm16);
+                uint32_t n16 = resample44to16(_recBuffer, n44, _pcm16);
                 c2Bytes = encode16k(n16, c2);
             }
         }
@@ -1055,9 +1082,9 @@ private:
     }
 
     // Codec2 -> _pcm8k -> _pcm16 (zero-stuff + the 3.6 kHz low-pass, x2, as
-    // the watch's upsampleForPlay) -> _out44 (linear). Returns the 44.1 kHz
-    // sample count.
-    uint32_t decodeTo44k(const uint8_t *c2, uint32_t c2Bytes) {
+    // the watch's upsampleForPlay). Returns the 16 kHz sample count; the
+    // WAV writer resamples it to 44.1 kHz as it writes.
+    uint32_t decodeTo16k(const uint8_t *c2, uint32_t c2Bytes) {
 #ifdef HAVE_CODEC2
         struct CODEC2 *codec = codec2_create(CODEC2_MODE_1200);
         if (!codec) return 0;
@@ -1081,19 +1108,7 @@ private:
             _pcm16[m] = clip16(2.0f * acc);
         }
         yieldNow();
-
-        uint32_t n44 = (uint32_t)((uint64_t)n16 * VOICE_SAMPLE_RATE / VOICE_RATE_16K);
-        if (n44 > VOICE_44K_SAMPLES) n44 = VOICE_44K_SAMPLES;
-        const float step = (float)VOICE_RATE_16K / VOICE_SAMPLE_RATE;
-        for (uint32_t m = 0; m < n44; m++) {
-            float s = m * step;
-            uint32_t j = (uint32_t)s;
-            float f = s - j;
-            float a = (j < n16) ? _pcm16[j] : 0.0f;
-            float b = (j + 1 < n16) ? _pcm16[j + 1] : a;
-            _out44[m] = clip16((1.0f - f) * a + f * b);
-        }
-        return n44;
+        return n16;
 #else
         (void)c2; (void)c2Bytes;
         return 0;
@@ -1126,10 +1141,13 @@ private:
     }
 
     // Decodes c2 and writes it as a 44.1 kHz stereo WAV (the I2S bus is
-    // stereo-only, so each sample goes to both channels).
+    // stereo-only, so each sample goes to both channels). The 16 kHz audio is
+    // resampled (linear) a chunk at a time as it is written, so no 44.1 kHz
+    // copy of the note is held in memory.
     bool writeDecodedWav(const uint8_t *c2, uint32_t c2Bytes, const char *path) {
-        uint32_t n44 = decodeTo44k(c2, c2Bytes);
-        if (n44 == 0) return false;
+        uint32_t n16 = decodeTo16k(c2, c2Bytes);
+        if (n16 == 0) return false;
+        uint32_t n44 = (uint32_t)((uint64_t)n16 * VOICE_SAMPLE_RATE / VOICE_RATE_16K);
         FILE *f = fopen(path, "wb");
         if (!f) {
             printf("MeckVoice: fopen(%s) failed\n", path);
@@ -1137,15 +1155,22 @@ private:
         }
         uint32_t dataBytes = n44 * sizeof(int16_t) * 2;
         meck_voice_write_wav_header(f, dataBytes, VOICE_SAMPLE_RATE, VOICE_BITS, 2);
+        const float step = (float)VOICE_RATE_16K / VOICE_SAMPLE_RATE;
         int16_t chunk[1024];
-        uint32_t pos = 0;
+        uint32_t m = 0;
         bool ok = true;
-        while (pos < n44 && ok) {
+        while (m < n44 && ok) {
             int ci = 0;
-            while (ci < 1024 && pos < n44) {
-                chunk[ci++] = _out44[pos];
-                chunk[ci++] = _out44[pos];
-                pos++;
+            while (ci < 1024 && m < n44) {
+                float s = m * step;
+                uint32_t j = (uint32_t)s;
+                float fr = s - j;
+                float a = (j < n16) ? _pcm16[j] : 0.0f;
+                float b = (j + 1 < n16) ? _pcm16[j + 1] : a;
+                int16_t v = clip16((1.0f - fr) * a + fr * b);
+                chunk[ci++] = v;
+                chunk[ci++] = v;
+                m++;
             }
             ok = fwrite(chunk, sizeof(int16_t), ci, f) == (size_t)ci;
         }
@@ -1214,11 +1239,11 @@ private:
     std::atomic<uint32_t> _capValues{0};
     uint32_t              _capFinal = 0;
     std::atomic<bool>     _jobRecord{false};
+    std::atomic<bool>     _bufBusy{false};   // work task has the buffer (under _lock)
 
-    // Work task buffers
+    // Filter areas inside _recBuffer (see ensureCaptureBuffer)
     int16_t *_pcm16 = nullptr;
     int16_t *_pcm8k = nullptr;
-    int16_t *_out44 = nullptr;
     float    _fir[VOICE_FIR_TAPS];
     float    _aa[VOICE_AA_TAPS];
 

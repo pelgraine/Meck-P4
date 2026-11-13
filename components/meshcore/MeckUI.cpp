@@ -13010,6 +13010,9 @@ static void on_voice_record_tap(lv_event_t *e) {
             g_voice_preparing = false;
             g_voice_send_in_flight = false;
             g_voice_last_wav_path[0] = '\0';
+        } else if (voice->isBusy()) {
+            // An incoming note (or an older recording) is being saved
+            voice_set_status("Busy saving a note, try again", lv_palette_main(LV_PALETTE_ORANGE));
         } else {
             voice_set_status("Microphone not available", lv_palette_main(LV_PALETTE_RED));
         }
