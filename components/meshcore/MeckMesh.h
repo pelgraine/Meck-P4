@@ -112,6 +112,17 @@ extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
 #define VOICE_PKT_MAGIC     0x56  // 'V' — voice data packet (RAW_CUSTOM)
 #define VOICE_FETCH_MAGIC   0x72  // 'r' — voice fetch request (RAW_CUSTOM)
 
+// Voice over LoRa by flood (Nov 2026, same as Meck Watch's SX1280 builds).
+// Every flood is scoped to MECK_VOICE_REGION, so only repeaters that list it
+// carry voice. Channel: channel data (MECK_VOICE_DATA_TYPE, MeshCore's
+// testing range FF00-FFFF) on the MECK_VOICE_CHANNEL hashtag channel.
+// Contact: encrypted requests whose first byte is MECK_VOICE_REQ_TYPE
+// (upstream request types run 0x00-0x09); the contact replies with a report.
+#define MECK_VOICE_CHANNEL      "#meck-voice"
+#define MECK_VOICE_REGION       "au-nsw-voice"
+#define MECK_VOICE_DATA_TYPE    0xFF56
+#define MECK_VOICE_REQ_TYPE     0x56
+
 // ============================================================================
 // RepeaterStats — payload format for REQ_TYPE_GET_STATUS responses
 // ----------------------------------------------------------------------------
@@ -1082,6 +1093,73 @@ public:
         }
         xSemaphoreGive(_mutex);
         return ok;
+    }
+
+    // =====================================================================
+    // Voice over LoRa by flood (meck_task). See MECK_VOICE_* at the top.
+    // The handlers are set by meck_app.cpp, which owns the MeckVoice state;
+    // all three are called from the mesh loop, on meck_task.
+    // =====================================================================
+    typedef void (*VoiceChannelHandler)(const uint8_t* data, uint8_t len);
+    // Returns the reply length written to 'reply' (0 = no reply).
+    typedef uint8_t (*VoiceRequestHandler)(const ContactInfo& from, const uint8_t* data,
+                                           uint8_t len, uint8_t* reply);
+    // Returns true if the response was a voice report (consumed).
+    typedef bool (*VoiceResponseHandler)(const ContactInfo& from, const uint8_t* data, uint8_t len);
+    void setVoiceChannelHandler(VoiceChannelHandler h)   { _voiceChanHandler = h; }
+    void setVoiceRequestHandler(VoiceRequestHandler h)   { _voiceReqHandler = h; }
+    void setVoiceResponseHandler(VoiceResponseHandler h) { _voiceRespHandler = h; }
+
+    // Index of the MECK_VOICE_CHANNEL channel, or -1 if it hasn't been added.
+    int findVoiceChannel() {
+        ChannelDetails ch;
+        for (uint8_t i = 0; i < MAX_GROUP_CHANNELS; i++) {
+            if (getChannel(i, ch) && strcasecmp(ch.name, MECK_VOICE_CHANNEL) == 0) return i;
+        }
+        return -1;
+    }
+
+    // Channel data on the voice channel, flood-scoped to MECK_VOICE_REGION.
+    bool voiceSendChannel(int channel_idx, const uint8_t* data, uint8_t len,
+                          uint32_t delay_millis) {
+        ChannelDetails ch;
+        if (channel_idx < 0 || !getChannel(channel_idx, ch)) return false;
+        if (len > MAX_GROUP_DATA_LENGTH) return false;
+        // Same layout as BaseChatMesh::sendGroupData: data_type (LE), data_len, data.
+        uint8_t temp[3 + MAX_GROUP_DATA_LENGTH];
+        temp[0] = (uint8_t)(MECK_VOICE_DATA_TYPE & 0xFF);
+        temp[1] = (uint8_t)(MECK_VOICE_DATA_TYPE >> 8);
+        temp[2] = len;
+        memcpy(&temp[3], data, len);
+        mesh::Packet* pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_DATA, ch.channel, temp, 3 + len);
+        if (!pkt) return false;
+        TransportKey scope;
+        deriveScopeKey(MECK_VOICE_REGION, scope.key);
+        sendFloodWithScope(scope, pkt, delay_millis);
+        return true;
+    }
+
+    // Encrypted request to a contact: direct along its path if 'direct' and it
+    // has one, otherwise flood-scoped to MECK_VOICE_REGION.
+    bool voiceSendRequest(const ContactInfo& to, const uint8_t* data, uint8_t len,
+                          uint32_t delay_millis, bool direct) {
+        if (4 + (int)len > MAX_PACKET_PAYLOAD - CIPHER_MAC_SIZE - (CIPHER_BLOCK_SIZE - 1)) return false;
+        // Same layout as BaseChatMesh::sendRequest: 4-byte tag, then the request.
+        uint8_t temp[MAX_PACKET_PAYLOAD];
+        uint32_t tag = getRTCClock()->getCurrentTimeUnique();
+        memcpy(temp, &tag, 4);
+        memcpy(&temp[4], data, len);
+        mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_REQ, to.id, to.getSharedSecret(self_id),
+                                           temp, 4 + len);
+        if (!pkt) return false;
+        if (direct && to.out_path_len != OUT_PATH_UNKNOWN) {
+            sendDirect(pkt, to.out_path, to.out_path_len, delay_millis);
+        } else {
+            TransportKey scope;
+            deriveScopeKey(MECK_VOICE_REGION, scope.key);
+            sendFloodWithScope(scope, pkt, delay_millis);
+        }
+        return true;
     }
 
     // ---- Picture chunk pending ring ----
@@ -3782,6 +3860,12 @@ protected:
 
     uint8_t onContactRequest(const ContactInfo& contact, uint32_t sender_timestamp,
                               const uint8_t* data, uint8_t len, uint8_t* reply) override {
+        // Voice note packet or status request from a contact (voice by flood).
+        if (data && len >= 1 && data[0] == MECK_VOICE_REQ_TYPE && _voiceReqHandler) {
+            memcpy(reply, &sender_timestamp, 4);   // reflect the tag, as other replies do
+            uint8_t n = _voiceReqHandler(contact, data, len, &reply[4]);
+            return n ? 4 + n : 0;
+        }
         uint8_t req_type = (data && len > 0) ? data[0] : 0xFF;
         printf("Meck: onContactRequest from %s req_type=0x%02X len=%u (not handled)\n",
                contact.name, (unsigned)req_type, (unsigned)len);
@@ -3825,6 +3909,12 @@ protected:
 
         uint32_t tag;
         memcpy(&tag, data, 4);
+
+        // Voice report (what a contact received of a note we sent).
+        if (len > 4 && data[4] == MECK_VOICE_REQ_TYPE && _voiceRespHandler &&
+            _voiceRespHandler(contact, &data[4], len - 4)) {
+            return;
+        }
 
         // Set by any companion branch below that forwards this response to
         // the app, so the unmatched-response push at the end of this
@@ -4591,6 +4681,14 @@ protected:
     // RESP_CODE_CHANNEL_DATA_RECV (as Meck). Not shown on the device.
     void onChannelDataRecv(const mesh::GroupChannel& channel, mesh::Packet* pkt,
                            uint16_t data_type, const uint8_t* data, size_t data_len) override {
+        // Voice notes on the voice channel stay on the P4 (not passed to the app).
+        if (data_type == MECK_VOICE_DATA_TYPE && _voiceChanHandler && data_len <= 255) {
+            int vidx = findVoiceChannel();
+            if (vidx >= 0 && findChannelIdx(channel) == vidx) {
+                _voiceChanHandler(data, (uint8_t)data_len);
+                return;
+            }
+        }
         meck_companion_push_channel_data((int8_t)(pkt->getSNR() * 4), findChannelIdx(channel),
                                          pkt->isRouteFlood() ? (uint8_t)pkt->path_len : 0xFF,
                                          data_type, data, (int)data_len);
@@ -5209,6 +5307,11 @@ private:
     int  _pending_voice_pkt_head  = 0;
     int  _pending_voice_pkt_tail  = 0;
     int  _pending_voice_pkt_count = 0;
+
+    // ---- Voice by flood: handlers set by meck_app.cpp ----
+    VoiceChannelHandler  _voiceChanHandler = nullptr;
+    VoiceRequestHandler  _voiceReqHandler  = nullptr;
+    VoiceResponseHandler _voiceRespHandler = nullptr;
 
     // ---- Pending picture chunk ring ----
     PendingPicChunk _pending_pic_chunk[P4_PENDING_PIC_RING] = {};

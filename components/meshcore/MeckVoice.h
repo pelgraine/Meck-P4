@@ -14,9 +14,10 @@
  *     or the 12 s limit) ends the same loop, and every stop goes the same way.
  *   - "voice_work" task: filters, encodes, decodes and writes the WAV files
  *     (own recordings and incoming notes), off the UI and radio tasks.
- *   - meck_task: VE3 send (prepareOutSession / buildVoicePacket), fetch
- *     serving, and incoming packet reassembly (onVE3Received /
- *     onVoicePacketReceived / pollIncomingHandoff).
+ *   - meck_task: send (prepareOutSession / buildFlood*), VE3 fetch serving,
+ *     and incoming packet reassembly (onVE3Received / onVoicePacketReceived
+ *     for raw VE3; onChannelVoice / onContactVoice for voice by flood;
+ *     pollIncomingHandoff).
  *   Everything shared between those tasks is guarded by _lock.
  *
  * Audio path (Meck Watch "version B", run at the P4's rates):
@@ -80,6 +81,22 @@ extern "C" {
 #define VOICE_SESSION_TTL_MS  900000  // 15 minutes cache TTL
 #define VOICE_C2_MODE_ID      1     // Codec2 1200bps mode ID for VE3 protocol
 #define VOICE_MAX_PACKETS     16    // receivers track packets in a 16-bit map
+
+// Voice by flood (Nov 2026, same format as Meck Watch). Carried as channel
+// data on #meck-voice or as encrypted requests to a contact (MeckMesh.h).
+// Every message starts VOICE_PKT_MAGIC, then one of these:
+//   'H' header  [V][H][sid:4][total][dur][sender name...]   (channel only)
+//   'D' data    [V][D][sid:4][idx][total][len][Codec2 x len]
+//   '?' status  [V][?][sid:4]                                (contact only)
+//   'R' report  [V][R][sid:4][received bitmap:2 LE][total]   (contact's reply)
+// idx | VOICE_FLAG_REPORT on a contact data packet asks for a report back.
+#define VOICE_MSG_HEADER      'H'
+#define VOICE_MSG_DATA        'D'
+#define VOICE_MSG_STATUS      '?'
+#define VOICE_MSG_REPORT      'R'
+#define VOICE_FLAG_REPORT     0x80
+#define VOICE_DATA_HDR_SIZE   9      // V D sid(4) idx total len
+#define VOICE_REPORT_SIZE     9      // V R sid(4) bitmap(2) total
 
 // ============================================================================
 // Recording Configuration
@@ -160,23 +177,6 @@ static inline void meck_voice_write_wav_header(FILE *f, uint32_t dataBytes,
 // ============================================================================
 // VE3 Base36 helpers (compact wire format, matches upstream)
 // ============================================================================
-
-static inline int meck_voice_to_base36(uint32_t val, char *buf, int bufLen)
-{
-    if (bufLen < 2) return 0;
-    if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return 1; }
-    char tmp[16];
-    int pos = 0;
-    while (val > 0 && pos < 15) {
-        uint8_t d = val % 36;
-        tmp[pos++] = d < 10 ? ('0' + d) : ('a' + d - 10);
-        val /= 36;
-    }
-    int len = pos < bufLen - 1 ? pos : bufLen - 1;
-    for (int i = 0; i < len; i++) buf[i] = tmp[pos - 1 - i];
-    buf[len] = '\0';
-    return len;
-}
 
 static inline uint32_t meck_voice_from_base36(const char *s)
 {
@@ -432,24 +432,6 @@ public:
         return total;
     }
 
-    // VE3:{sid}:{mode}:{total}:{durS} for the outgoing session.
-    void formatEnvelope(char *buf, int bufLen, uint32_t sessionId) {
-        uint32_t bytes = 0;
-        if (_lock) {
-            xSemaphoreTake(_lock, portMAX_DELAY);
-            bytes = (_out.active && _out.sessionId == sessionId) ? _out.dataBytes : 0;
-            xSemaphoreGive(_lock);
-        }
-        char sid[12], mode[4], total[4], dur[4];
-        int totalPackets = (bytes + VOICE_MESH_PAYLOAD - 1) / VOICE_MESH_PAYLOAD;
-        int durationSec = (int)((bytes / VOICE_C2_FRAME_BYTES) * VOICE_C2_FRAME_MS / 1000);
-        meck_voice_to_base36(sessionId, sid, sizeof(sid));
-        meck_voice_to_base36(VOICE_C2_MODE_ID, mode, sizeof(mode));
-        meck_voice_to_base36(totalPackets, total, sizeof(total));
-        meck_voice_to_base36(durationSec, dur, sizeof(dur));
-        snprintf(buf, bufLen, "VE3:%s:%s:%s:%s", sid, mode, total, dur);
-    }
-
     // Build a voice data packet: [0x56][sessionId:4B][index:1B][codec2 data...]
     // from the outgoing session.
     int buildVoicePacket(uint8_t *buf, int bufLen, uint32_t sessionId, int pktIndex) {
@@ -490,6 +472,79 @@ public:
                   (nowMs() - _out.cachedAt) < VOICE_SESSION_TTL_MS;
         xSemaphoreGive(_lock);
         return ok;
+    }
+
+    // ---- Voice by flood: messages for the outgoing session ----
+
+    int buildFloodHeader(uint8_t *buf, int bufLen, const char *myName) {
+        if (!_lock) return 0;
+        int nameLen = myName ? (int)strnlen(myName, 31) : 0;
+        if (8 + nameLen > bufLen) return 0;
+        int n = 0;
+        xSemaphoreTake(_lock, portMAX_DELAY);
+        if (_out.active) {
+            buf[0] = VOICE_PKT_MAGIC;
+            buf[1] = VOICE_MSG_HEADER;
+            memcpy(&buf[2], &_out.sessionId, 4);
+            buf[6] = _out.totalPackets;
+            buf[7] = (uint8_t)((_out.dataBytes / VOICE_C2_FRAME_BYTES) * VOICE_C2_FRAME_MS / 1000);
+            if (nameLen) memcpy(&buf[8], myName, nameLen);
+            n = 8 + nameLen;
+        }
+        xSemaphoreGive(_lock);
+        return n;
+    }
+
+    int buildFloodData(uint8_t *buf, int bufLen, int pktIndex, bool wantReport) {
+        if (!_lock || pktIndex < 0) return 0;
+        int n = 0;
+        xSemaphoreTake(_lock, portMAX_DELAY);
+        uint32_t offset = (uint32_t)pktIndex * VOICE_MESH_PAYLOAD;
+        if (_out.active && offset < _out.dataBytes) {
+            uint32_t chunk = _out.dataBytes - offset;
+            if (chunk > VOICE_MESH_PAYLOAD) chunk = VOICE_MESH_PAYLOAD;
+            if ((int)(VOICE_DATA_HDR_SIZE + chunk) <= bufLen) {
+                buf[0] = VOICE_PKT_MAGIC;
+                buf[1] = VOICE_MSG_DATA;
+                memcpy(&buf[2], &_out.sessionId, 4);
+                buf[6] = (uint8_t)pktIndex | (wantReport ? VOICE_FLAG_REPORT : 0);
+                buf[7] = _out.totalPackets;
+                buf[8] = (uint8_t)chunk;
+                memcpy(&buf[VOICE_DATA_HDR_SIZE], &_out.data[offset], chunk);
+                n = VOICE_DATA_HDR_SIZE + chunk;
+            }
+        }
+        xSemaphoreGive(_lock);
+        return n;
+    }
+
+    int buildStatusRequest(uint8_t *buf, int bufLen) {
+        if (!_lock || bufLen < 6) return 0;
+        int n = 0;
+        xSemaphoreTake(_lock, portMAX_DELAY);
+        if (_out.active) {
+            buf[0] = VOICE_PKT_MAGIC;
+            buf[1] = VOICE_MSG_STATUS;
+            memcpy(&buf[2], &_out.sessionId, 4);
+            n = 6;
+        }
+        xSemaphoreGive(_lock);
+        return n;
+    }
+
+    // A contact's report on the current outgoing note. False if it isn't one.
+    bool parseReport(const uint8_t *d, uint8_t len, uint16_t &bitmap, uint8_t &total) {
+        if (!_lock || len < VOICE_REPORT_SIZE || d[0] != VOICE_PKT_MAGIC || d[1] != VOICE_MSG_REPORT)
+            return false;
+        uint32_t sid;
+        memcpy(&sid, &d[2], 4);
+        xSemaphoreTake(_lock, portMAX_DELAY);
+        bool ok = _out.active && sid == _out.sessionId;
+        xSemaphoreGive(_lock);
+        if (!ok) return false;
+        bitmap = (uint16_t)d[6] | ((uint16_t)d[7] << 8);
+        total = d[8];
+        return true;
     }
 
     // ========================================================================
@@ -539,50 +594,67 @@ public:
             printf("MeckVoice: invalid VE3: %s\n", ve3Text);
             return;
         }
-        if (total == 0 || total > VOICE_MAX_PACKETS) {
-            printf("MeckVoice: VE3 invalid packet count %d\n", total);
-            return;
-        }
         // The sender retries the envelope until it is acknowledged: a repeat
-        // of the session already being received keeps the packets so far.
+        // of the session already being received keeps the packets so far
+        // (startIncoming leaves it alone).
         if (_in.active && _in.sessionId == sid) {
             printf("MeckVoice: VE3 repeat for session 0x%08lX\n", (unsigned long)sid);
             return;
         }
+        if (startIncoming(sid, total, senderName, false)) {
+            printf("MeckVoice: VE3 from %s: session=0x%08lX, %d pkts, %ds\n",
+                   senderName, (unsigned long)sid, total, dur);
+        }
+    }
 
+    // Starts receiving a note, unless it is the one already in progress or
+    // the last one finished. Returns true if a new note was started.
+    bool startIncoming(uint32_t sid, uint8_t total, const char *senderName, bool viaChannel) {
+        if (total == 0 || total > VOICE_MAX_PACKETS) {
+            printf("MeckVoice: invalid packet count %d\n", total);
+            return false;
+        }
+        if (_lastSid != 0 && sid == _lastSid) return false;
+        if (_in.active && _in.sessionId == sid) {
+            // Already receiving it: a later channel header fills in the name.
+            if (senderName && senderName[0] && strcmp(_in.senderName, "?") == 0) {
+                setInSender(senderName, _in.viaChannel);
+            }
+            return false;
+        }
         memset(&_in, 0, sizeof(_in));
         _in.sessionId = sid;
         _in.totalPackets = total;
         _in.active = true;
         _in.startedAt = nowMs();
-        strncpy(_in.senderName, senderName, 31);
-        _in.senderName[31] = '\0';
-
-        printf("MeckVoice: VE3 from %s: session=0x%08lX, %d pkts, %ds\n",
-               senderName, (unsigned long)sid, total, dur);
+        _in.viaChannel = viaChannel;
+        setInSender((senderName && senderName[0]) ? senderName : "?", viaChannel);
+        printf("MeckVoice: incoming 0x%08lX from %s, %d pkts%s\n",
+               (unsigned long)sid, _in.senderName, total, viaChannel ? " on channel" : "");
+        return true;
     }
 
-    // Called when a 0x56 voice data packet arrives
+    // Called when a raw VE3 0x56 voice data packet arrives
     void onVoicePacketReceived(const uint8_t *payload, uint8_t len) {
         if (len <= VOICE_PKT_HDR_SIZE) return;
-
         uint32_t sid;
         memcpy(&sid, &payload[1], 4);
-        uint8_t idx = payload[5];
+        addPacket(sid, payload[5], &payload[VOICE_PKT_HDR_SIZE], len - VOICE_PKT_HDR_SIZE);
+    }
 
+    void addPacket(uint32_t sid, uint8_t idx, const uint8_t *data, int dataLen) {
         if (!_in.active || sid != _in.sessionId) {
-            printf("MeckVoice: voice pkt for unknown session 0x%08lX\n", (unsigned long)sid);
+            if (sid != _lastSid)
+                printf("MeckVoice: voice pkt for unknown session 0x%08lX\n", (unsigned long)sid);
             return;
         }
         if (idx >= VOICE_MAX_PACKETS || idx >= _in.totalPackets) return;
         if (_in.receivedBitmap & (1 << idx)) return;  // duplicate
-
-        int dataLen = len - VOICE_PKT_HDR_SIZE;
-        if (_in.dataBytes + dataLen > VOICE_C2_MAX_BYTES) return;
+        if (dataLen <= 0 || _in.dataBytes + dataLen > VOICE_C2_MAX_BYTES) return;
 
         _in.pktOffset[idx] = (uint16_t)_in.dataBytes;
         _in.pktSize[idx] = (uint16_t)dataLen;
-        memcpy(&_in.data[_in.dataBytes], &payload[6], dataLen);
+        memcpy(&_in.data[_in.dataBytes], data, dataLen);
         _in.dataBytes += dataLen;
         _in.receivedBitmap |= (1 << idx);
         _in.receivedCount++;
@@ -595,6 +667,71 @@ public:
             _in.complete = true;
             printf("MeckVoice: session 0x%08lX complete!\n", (unsigned long)sid);
         }
+    }
+
+    // ---- Voice by flood (Meck Watch's format; see VOICE_MSG_* at the top) ----
+
+    // Data message ('D'). Returns true if it started a new note.
+    bool onFloodData(const uint8_t *d, uint8_t len, const char *senderName, bool viaChannel) {
+        if (len < VOICE_DATA_HDR_SIZE + 1) return false;
+        uint32_t sid;
+        memcpy(&sid, &d[2], 4);
+        uint8_t idx = d[6] & ~VOICE_FLAG_REPORT;
+        uint8_t total = d[7];
+        uint8_t dlen = d[8];
+        if (VOICE_DATA_HDR_SIZE + dlen > len) return false;   // malformed
+        bool started = startIncoming(sid, total, senderName, viaChannel);
+        addPacket(sid, idx, &d[VOICE_DATA_HDR_SIZE], dlen);
+        return started;
+    }
+
+    // Voice channel message (header or data).
+    void onChannelVoice(const uint8_t *d, uint8_t len) {
+        if (len < 6 || d[0] != VOICE_PKT_MAGIC) return;
+        if (d[1] == VOICE_MSG_HEADER && len >= 8) {
+            uint32_t sid;
+            memcpy(&sid, &d[2], 4);
+            char name[32];
+            int n = len - 8;
+            if (n > 31) n = 31;
+            memcpy(name, &d[8], n);
+            name[n] = '\0';
+            startIncoming(sid, d[6], name, true);
+        } else if (d[1] == VOICE_MSG_DATA) {
+            onFloodData(d, len, "?", true);
+        }
+    }
+
+    // Report on a note, written to 'reply' (VOICE_REPORT_SIZE bytes).
+    uint8_t buildReport(uint32_t sid, uint8_t *reply) const {
+        uint16_t bitmap = 0;
+        uint8_t total = 0;
+        if (_in.active && _in.sessionId == sid) {
+            bitmap = _in.receivedBitmap; total = _in.totalPackets;
+        } else if (sid == _lastSid) {
+            bitmap = _lastBitmap; total = _lastTotal;
+        }
+        reply[0] = VOICE_PKT_MAGIC;
+        reply[1] = VOICE_MSG_REPORT;
+        memcpy(&reply[2], &sid, 4);
+        reply[6] = (uint8_t)(bitmap & 0xFF);
+        reply[7] = (uint8_t)(bitmap >> 8);
+        reply[8] = total;
+        return VOICE_REPORT_SIZE;
+    }
+
+    // Voice request from a contact (data or status). Returns the reply length.
+    uint8_t onContactVoice(const char *senderName, const uint8_t *d, uint8_t len, uint8_t *reply) {
+        if (len < 6 || d[0] != VOICE_PKT_MAGIC) return 0;
+        uint32_t sid;
+        memcpy(&sid, &d[2], 4);
+        if (d[1] == VOICE_MSG_DATA) {
+            onFloodData(d, len, senderName, false);
+            if (len > 6 && (d[6] & VOICE_FLAG_REPORT)) return buildReport(sid, reply);
+            return 0;
+        }
+        if (d[1] == VOICE_MSG_STATUS) return buildReport(sid, reply);
+        return 0;
     }
 
     // Called every meck_task pass: a complete note is reassembled in packet
@@ -620,6 +757,11 @@ public:
         }
         xSemaphoreGive(_lock);
         if (handed) {
+            // Remembered so late copies of it are ignored and a status
+            // request for it is still answered.
+            _lastSid = _in.sessionId;
+            _lastBitmap = _in.receivedBitmap;
+            _lastTotal = _in.totalPackets;
             _in.active = false;
             _in.complete = false;
             xTaskNotifyGive(_workTask);
@@ -663,7 +805,14 @@ private:
         uint32_t startedAt;
         bool     active;
         bool     complete;
+        bool     viaChannel;   // arrived on the voice channel
     };
+
+    // The sender as the inbox shows it; channel notes read "Ch <name>".
+    void setInSender(const char *name, bool viaChannel) {
+        if (viaChannel) snprintf(_in.senderName, sizeof(_in.senderName), "Ch %s", name);
+        else            snprintf(_in.senderName, sizeof(_in.senderName), "%s", name);
+    }
 
     // A complete incoming note waiting for the work task.
     struct RxJob {
@@ -1264,4 +1413,7 @@ private:
     OutSession _out;     // under _lock (meck_task, LVGL task)
     InSession  _in;      // meck_task only
     RxJob      _rxJob;   // under _lock (meck_task -> work task)
+    uint32_t   _lastSid = 0;      // last note handed off (meck_task only)
+    uint16_t   _lastBitmap = 0;
+    uint8_t    _lastTotal = 0;
 };

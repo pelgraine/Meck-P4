@@ -51,13 +51,17 @@ extern "C" void meck_request_picture_send(uint8_t ch_idx, const char *filepath);
 extern MeckVoice* meck_get_voice_instance(void);
 extern "C" int meck_voice_send_get_status(void);
 extern "C" int meck_voice_send_get_packets(void);
+extern "C" int meck_voice_send_get_confirmed(void);
+// Same values as meck_app.cpp
 #define VOICE_SEND_IDLE           0
-#define VOICE_SEND_WAITING_ACK    1
-#define VOICE_SEND_PACKETS_QUEUED 2
-#define VOICE_SEND_ACK_TIMEOUT    3
-#define VOICE_SEND_NO_PATH        4
-#define VOICE_SEND_PARTIAL        5
+#define VOICE_SEND_SENDING        1   // to a contact: queued, waiting for its report
+#define VOICE_SEND_CHANNEL_SENT   2   // to #meck-voice: every packet queued
+#define VOICE_SEND_DELIVERED      3
+#define VOICE_SEND_NO_REPLY       4
+#define VOICE_SEND_PARTIAL        5   // the contact confirmed some packets
 #define VOICE_SEND_FAILED         6
+#define VOICE_SEND_NO_CHANNEL     7   // #meck-voice not added
+#define VOICE_PICK_CHANNEL        (-2)  // send-to list row for #meck-voice
 #include "NotifSounds.h"
 #include "MeckMapScreen.h"
 #include "MeckCli.h"
@@ -13270,7 +13274,11 @@ static void on_voice_contact_select(lv_event_t *e) {
     ContactInfo ci;
     ci.name[0] = '\0';
     Meck *mesh = meck_get_instance();
-    if (mesh && mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
+    if (contact_idx == VOICE_PICK_CHANNEL) {
+        strncpy(ci.name, MECK_VOICE_CHANNEL, sizeof(ci.name) - 1);
+        ci.name[sizeof(ci.name) - 1] = '\0';
+        printf("Voice: sending to %s\n", ci.name);
+    } else if (mesh && mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
         printf("Voice: sending to %s\n", ci.name);
     }
 
@@ -13287,7 +13295,7 @@ static void on_voice_contact_select(lv_event_t *e) {
     voice_set_status(buf, lv_palette_main(LV_PALETTE_ORANGE));
 }
 
-// Send-to list entry: direct-path contacts first (as Meck and the watch).
+// Send-to list entry: direct-path contacts first (as the watch).
 struct VoicePickEntry {
     int  idx;
     char name[32];
@@ -13367,9 +13375,31 @@ static void on_voice_send_tap(lv_event_t *e) {
     lv_obj_set_style_pad_all(obj_voice_contact_scroll, 0, 0);
     lv_obj_set_scroll_dir(obj_voice_contact_scroll, LV_DIR_VER);
 
-    // Chat contacts, those with a direct path first (they get the packets at
-    // once; the others are tried by finding a path with the envelope DM),
-    // then alphabetical within each group.
+    // The voice channel first, then chat contacts: those with a direct path
+    // first (sent along it), the others by private flood, then alphabetical
+    // within each group (as Meck Watch).
+    int y = 0;
+    {
+        lv_obj_t *row = lv_button_create(obj_voice_contact_scroll);
+        lv_obj_set_size(row, lv_obj_get_width(obj_voice_contact_scroll) - 10, 50);
+        lv_obj_set_pos(row, 5, y);
+        lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_add_event_cb(row, on_voice_contact_select, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)VOICE_PICK_CHANNEL);
+        lv_obj_t *name = lv_label_create(row);
+        lv_label_set_text(name, MECK_VOICE_CHANNEL);
+        lv_obj_set_style_text_color(name, lv_palette_main(LV_PALETTE_ORANGE), 0);
+        meck_set_font(name, &meck_montserrat_16, 0);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, 10, 0);
+        lv_obj_t *kind = lv_label_create(row);
+        lv_label_set_text(kind, "channel");
+        lv_obj_set_style_text_color(kind, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(kind, &meck_montserrat_14, 0);
+        lv_obj_align(kind, LV_ALIGN_RIGHT_MID, -10, 0);
+        y += 55;
+    }
+
     int num_contacts = mesh->getNumContacts();
     VoicePickEntry *list = (VoicePickEntry *)heap_caps_malloc(
         sizeof(VoicePickEntry) * (num_contacts > 0 ? num_contacts : 1), MALLOC_CAP_SPIRAM);
@@ -13389,7 +13419,6 @@ static void on_voice_send_tap(lv_event_t *e) {
     if (list && n > 1) qsort(list, n, sizeof(VoicePickEntry), voice_pick_cmp);
     printf("Voice send: %d chat contacts of %d\n", n, num_contacts);
 
-    int y = 0;
     for (int i = 0; i < n; i++) {
         const VoicePickEntry &c = list[i];
         lv_obj_t *row = lv_button_create(obj_voice_contact_scroll);
@@ -13412,7 +13441,7 @@ static void on_voice_send_tap(lv_event_t *e) {
         lv_obj_align(name, LV_ALIGN_LEFT_MID, 10, 0);
 
         lv_obj_t *path = lv_label_create(row);
-        lv_label_set_text(path, c.direct ? "direct" : "no path yet");
+        lv_label_set_text(path, c.direct ? "direct" : "flood");
         lv_obj_set_style_text_color(path, lv_palette_main(LV_PALETTE_GREY), 0);
         meck_set_font(path, &meck_montserrat_14, 0);
         lv_obj_align(path, LV_ALIGN_RIGHT_MID, -10, 0);
@@ -13421,12 +13450,12 @@ static void on_voice_send_tap(lv_event_t *e) {
     }
     if (list) heap_caps_free(list);
 
-    if (y == 0) {
+    if (n == 0) {   // only the channel row
         lv_obj_t *empty = lv_label_create(obj_voice_contact_scroll);
         lv_label_set_text(empty, "No chat contacts");
         lv_obj_set_style_text_color(empty, lv_palette_main(LV_PALETTE_GREY), 0);
         meck_set_font(empty, &meck_montserrat_16, 0);
-        lv_obj_set_pos(empty, 20, 20);
+        lv_obj_set_pos(empty, 20, y + 20);
         printf("Voice send: no ADV_TYPE_CHAT contacts found\n");
     }
 }
@@ -16276,9 +16305,18 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         if (g_voice_send_in_flight && lbl_voice_status) {
             int vs = meck_voice_send_get_status();
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
-            if (vs == VOICE_SEND_PACKETS_QUEUED) {
-                // Every packet is queued with sendDirect, the first at 3 s
-                // and then 3 s apart: done shortly after the last one.
+            if (vs == VOICE_SEND_SENDING) {
+                // To a contact: queued; meck_task now waits for its report.
+                if (g_voice_send_complete_ms == 0) {
+                    g_voice_send_complete_ms = 1;   // shown once
+                    int n = meck_voice_send_get_packets();
+                    char buf[48];
+                    snprintf(buf, sizeof(buf), "Sending %d packet%s...", n, n == 1 ? "" : "s");
+                    voice_set_status(buf, lv_palette_main(LV_PALETTE_ORANGE));
+                }
+            } else if (vs == VOICE_SEND_CHANNEL_SENT) {
+                // To #meck-voice: header now, packets from 3 s, then 3 s
+                // apart. No confirmation comes back.
                 if (g_voice_send_complete_ms == 0) {
                     int n = meck_voice_send_get_packets();
                     if (n < 1) n = 1;
@@ -16288,21 +16326,24 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                     voice_set_status(buf, lv_palette_main(LV_PALETTE_ORANGE));
                 } else if (now_ms >= g_voice_send_complete_ms) {
                     g_voice_send_in_flight = false;
-                    voice_set_status("Voice sent!", lv_palette_main(LV_PALETTE_GREEN));
-                    printf("Voice: send complete (all packets transmitted)\n");
+                    voice_set_status("Sent to " MECK_VOICE_CHANNEL, lv_palette_main(LV_PALETTE_GREEN));
+                    printf("Voice: channel send complete (all packets transmitted)\n");
                 }
+            } else if (vs == VOICE_SEND_DELIVERED) {
+                g_voice_send_in_flight = false;
+                voice_set_status("Voice delivered", lv_palette_main(LV_PALETTE_GREEN));
             } else if (vs == VOICE_SEND_PARTIAL) {
                 g_voice_send_in_flight = false;
-                voice_set_status("Send partial", lv_palette_main(LV_PALETTE_ORANGE));
-                printf("Voice: UI updated - not every packet could be queued\n");
-            } else if (vs == VOICE_SEND_ACK_TIMEOUT) {
+                char buf[48];
+                snprintf(buf, sizeof(buf), "Delivered %d/%d",
+                         meck_voice_send_get_confirmed(), meck_voice_send_get_packets());
+                voice_set_status(buf, lv_palette_main(LV_PALETTE_ORANGE));
+            } else if (vs == VOICE_SEND_NO_REPLY) {
                 g_voice_send_in_flight = false;
-                voice_set_status("Send failed: no path", lv_palette_main(LV_PALETTE_RED));
-                printf("Voice: UI updated - ACK timeout, no path\n");
-            } else if (vs == VOICE_SEND_NO_PATH) {
+                voice_set_status("No reply from contact", lv_palette_main(LV_PALETTE_RED));
+            } else if (vs == VOICE_SEND_NO_CHANNEL) {
                 g_voice_send_in_flight = false;
-                voice_set_status("Send failed: path unknown", lv_palette_main(LV_PALETTE_RED));
-                printf("Voice: UI updated - ACK received but no path\n");
+                voice_set_status("Add " MECK_VOICE_CHANNEL " first", lv_palette_main(LV_PALETTE_RED));
             } else if (vs == VOICE_SEND_FAILED) {
                 g_voice_send_in_flight = false;
                 voice_set_status("Send failed!", lv_palette_main(LV_PALETTE_RED));
