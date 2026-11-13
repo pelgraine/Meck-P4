@@ -245,7 +245,18 @@ bool meck_audio_mic_start(uint32_t sample_rate)
      * clock, causing a rate mismatch. We capture at 44100Hz and
      * downsample in software for Codec2. */
     (void)sample_rate;
-    g_mic_rate = g_current_rate;  /* use whatever I2S is running at */
+    g_mic_rate = 44100;  /* the bus rate; nothing reconfigures the P4's I2S clock */
+
+    /* A track played earlier may have left the codec's clock coefficients
+     * at the file's rate (meck_audio_i2s_reconfig); put them back to the
+     * bus rate, as at boot, so the ADC runs at 44100Hz. */
+    ES8311->set_clock_coeff(i2s_mclk_multiple_t::I2S_MCLK_MULTIPLE_256, g_mic_rate);
+
+    /* The caller wakes the codec to enable the I2S channels, which also
+     * powers the DAC. Nothing is played while recording, so keep the DAC
+     * off: whatever the TX DMA still holds must not reach the speaker (and
+     * the mic). The next playback's meck_audio_codec_wake() powers it on. */
+    ES8311->set_dac_power(false);
 
     /* Configure mic input: electret condenser on MIC1P/MIC1N */
     ES8311->set_mic(Cpp_Bus_Driver::Es8311::Mic_Type::ANALOG_MIC,

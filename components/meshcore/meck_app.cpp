@@ -939,7 +939,9 @@ extern "C" bool meck_app_init() {
 }
 
 // ---- Forward declarations for functions defined later ----
+extern "C" void meck_drain_pending_voice(void);
 static void meck_apply_pending_voice_send(void);
+static void meck_voice_begin(void);
 static void meck_apply_pending_picture_send(void);
 
 // ---- Mesh task ----
@@ -954,8 +956,11 @@ static void meck_task(void* arg) {
         meck_apply_pending_admin_cli();
         meck_apply_pending_admin_telemetry();
         meck_apply_pending_admin_neighbours();
-        // Voice and picture transfer disabled for v0.3.8
-        // meck_apply_pending_voice_send();
+        // Voice over LoRa: incoming envelopes and packets (and fetch
+        // requests) first, then any send the UI has asked for.
+        meck_drain_pending_voice();
+        meck_apply_pending_voice_send();
+        // Picture transfer disabled for v0.3.8
         // meck_apply_pending_picture_send();
         // USB drive mode: hand the SD card to the computer or take it back.
         // Runs here, between meck_task's own SD saves (MeckUsbDrive.cpp).
@@ -994,6 +999,7 @@ extern "C" void meck_app_start() {
         printf("meck_app_start: Meck not initialized, skipping task spawn\n");
         return;
     }
+    meck_voice_begin();   // voice capture + work tasks, before meck_task uses them
     xTaskCreate(meck_task, "meck_task", 16 * 1024, NULL, 3, NULL);
 }
 
@@ -1742,20 +1748,19 @@ extern "C" void meck_apply_pending_save() {
 // ============================================================================
 
 // ============================================================================
-// Voice over LoRa bridge
+// Voice over LoRa bridge (all on meck_task)
 // ----------------------------------------------------------------------------
-// Receive-side: the LVGL task calls meck_drain_pending_voice() periodically,
-// which pops VE3 envelopes and 0x56 voice data packets from the Meck pending
-// rings and feeds them to the global MeckVoice instance.
+// Receive: meck_drain_pending_voice() pops VE3 envelopes and raw 0x56 / 0x72
+// packets from the Meck pending rings. Voice packets are reassembled by
+// MeckVoice; a complete note goes to MeckVoice's work task, which decodes it
+// into the inbox. Fetch requests (0x72) are served here from the cached
+// outgoing session, as Meck (T-Deck) and Meck Watch serve them.
 //
-// Send-side: the LVGL task queues a voice send via meck_request_voice_send().
-// meck_task drains via meck_apply_pending_voice_send(), which sends the VE3
-// envelope DM followed by staggered raw voice data packets. The Dispatcher's
-// delay parameter handles the stagger timing: first data packet at 3s (after
-// VE3 + ACK settle), subsequent packets every 3s.
-//
-// Fetch-serve: when a 0x72 fetch request arrives, the LVGL task responds
-// by re-sending the requested packets from the cached outgoing session.
+// Send: the LVGL task queues a send with meck_request_voice_send().
+// meck_apply_pending_voice_send() sends the VE3 envelope DM, then every voice
+// packet with sendDirect and the Dispatcher's delay: first at 3 s, then 3 s
+// apart (as Meck and Meck Watch). With no path to the contact yet, it waits
+// for the envelope's ACK, which brings the path back, retrying the DM.
 // ============================================================================
 
 #include "MeckVoice.h"
@@ -1764,16 +1769,22 @@ static MeckVoice g_meck_voice;
 
 MeckVoice* meck_get_voice_instance() { return &g_meck_voice; }
 
+static void meck_voice_begin(void) { g_meck_voice.begin(); }
+
 // Voice send status for UI polling
 #define VOICE_SEND_IDLE           0
 #define VOICE_SEND_WAITING_ACK    1
 #define VOICE_SEND_PACKETS_QUEUED 2
 #define VOICE_SEND_ACK_TIMEOUT    3
 #define VOICE_SEND_NO_PATH        4
+#define VOICE_SEND_PARTIAL        5
+#define VOICE_SEND_FAILED         6
 static volatile int g_voice_send_status = VOICE_SEND_IDLE;
+static volatile int g_voice_send_total  = 0;   // packets in the note being sent
 extern "C" int meck_voice_send_get_status() { return g_voice_send_status; }
+extern "C" int meck_voice_send_get_packets() { return g_voice_send_total; }
 
-// ---- Receive drain (called from LVGL task via ui_update_timer_cb) ----
+// ---- Receive drain + fetch serving (meck_task) ----
 extern "C" void meck_drain_pending_voice() {
     if (!g_the_mesh) return;
 
@@ -1783,41 +1794,50 @@ extern "C" void meck_drain_pending_voice() {
         g_meck_voice.onVE3Received(ve.senderName, ve.ve3Text);
     }
 
-    // Drain voice data packets
+    // Drain voice data packets and fetch requests
     Meck::PendingVoicePacket pkt;
     while (g_the_mesh->drainPendingVoicePacket(pkt)) {
         uint8_t magic = pkt.data[0];
         if (magic == VOICE_PKT_MAGIC && pkt.len > 6) {
             g_meck_voice.onVoicePacketReceived(pkt.data, pkt.len);
         } else if (magic == VOICE_FETCH_MAGIC && pkt.len >= 6) {
-            // Fetch request — serve from cached outgoing session
+            // Fetch request: [0x72][sessionId:4B][flags:1B][requesterKey6:6B]
+            // [missingCount:1B][indices...]. Served in full, as Meck does.
             uint32_t sessionId;
             memcpy(&sessionId, &pkt.data[1], 4);
-            if (g_meck_voice.hasValidOutSession() &&
-                g_meck_voice.getOutSessionId() == sessionId) {
-                printf("Voice: serving fetch for session 0x%08lX\n", (unsigned long)sessionId);
-                // Re-send all packets from cache
-                // Note: fetch serving requires sendDirect which touches
-                // the radio. We'd need to queue this for meck_task. For
-                // now, log it — full fetch support comes in a later pass.
-                printf("Voice: fetch serve deferred (TODO: queue for meck_task)\n");
+            printf("Voice: fetch request for session 0x%08lX\n", (unsigned long)sessionId);
+            if (!g_meck_voice.hasOutSession(sessionId)) {
+                printf("Voice: no cached session 0x%08lX for fetch\n", (unsigned long)sessionId);
+                continue;
             }
+            if (pkt.len < 12) continue;
+            ContactInfo* requester = g_the_mesh->lookupContactByPubKey(&pkt.data[6], 6);
+            if (!requester || requester->out_path_len == OUT_PATH_UNKNOWN) {
+                printf("Voice: fetch requester not found or no direct path\n");
+                continue;
+            }
+            int totalPkts = g_meck_voice.outPacketCount();
+            for (int p = 0; p < totalPkts; p++) {
+                uint8_t pktBuf[184];
+                int pktLen = g_meck_voice.buildVoicePacket(pktBuf, sizeof(pktBuf), sessionId, p);
+                if (pktLen <= 0) continue;
+                mesh::Packet* raw = g_the_mesh->createRawData(pktBuf, pktLen);
+                if (raw) g_the_mesh->sendDirect(raw, requester->out_path,
+                                                requester->out_path_len, p * 100);
+            }
+            printf("Voice: served %d packets to %s\n", totalPkts, requester->name);
         }
     }
+
+    // A complete incoming note goes to the work task to be decoded and saved.
+    g_meck_voice.pollIncomingHandoff();
 }
 
 // ---- Voice send queue (LVGL -> meck_task) ----
-// Two-phase send:
-//   Phase 1: Send VE3 envelope DM (floods normally, gets ACKed)
-//   Phase 2: Poll for ACK. Once ACK arrives (establishing the return path),
-//            send raw voice packets via sendDirect ONLY.
-//            RAW_CUSTOM packets cannot flood in MeshCore (Mesh.cpp has flood
-//            routing commented out for raw packets).
-
 static volatile bool g_voice_send_pending       = false;
 static volatile int  g_voice_send_contact_idx   = -1;
 
-// Phase 2 state: waiting for DM ACK before sending raw packets
+// Waiting for the envelope DM's ACK before sending the raw packets
 static bool     g_voice_ack_waiting     = false;
 static uint32_t g_voice_ack_expected    = 0;
 static uint32_t g_voice_ack_session_id  = 0;
@@ -1828,22 +1848,20 @@ static int      g_voice_ack_retries     = 0;
 static const int VOICE_DM_MAX_RETRIES   = 5;      // retry DM to establish path
 
 extern "C" void meck_request_voice_send(int contact_idx) {
+    g_voice_send_status = VOICE_SEND_IDLE;   // a new send: forget the last result
     g_voice_send_contact_idx = contact_idx;
     g_voice_send_pending = true;
     printf("meck_request_voice_send: queued to contact[%d]\n", contact_idx);
 }
 
-// Send raw voice packets via sendDirect (called after path is confirmed)
-static void meck_voice_send_direct(int contact_idx, uint32_t sessionId,
-                                    ContactInfo* recipient) {
-    int totalPkts = g_meck_voice.getPacketCount();
+// Queue every voice packet via sendDirect: first at 3 s, then 3 s apart.
+// Returns how many were queued.
+static int meck_voice_send_direct(uint32_t sessionId, ContactInfo* recipient) {
+    int totalPkts = g_meck_voice.outPacketCount();
     int sentPkts = 0;
 
-    ContactInfo ci;
-    g_the_mesh->getContactByIdx((uint32_t)contact_idx, ci);
-
     printf("Voice: sending %d packets DIRECT to %s (path_len=%d)\n",
-           totalPkts, ci.name, (int)recipient->out_path_len);
+           totalPkts, recipient->name, (int)recipient->out_path_len);
 
     for (int p = 0; p < totalPkts; p++) {
         uint8_t pktBuf[184];
@@ -1854,8 +1872,7 @@ static void meck_voice_send_direct(int contact_idx, uint32_t sessionId,
         mesh::Packet* raw = g_the_mesh->createRawData(pktBuf, pktLen);
         if (!raw) continue;
 
-        // First packet at 1.5s after path confirmed, subsequent 3s apart
-        uint32_t delayMs = 1500 + (uint32_t)p * 3000;
+        uint32_t delayMs = 3000 + (uint32_t)p * 3000;
         g_the_mesh->sendDirect(raw, recipient->out_path,
                                recipient->out_path_len, delayMs);
         sentPkts++;
@@ -1863,27 +1880,36 @@ static void meck_voice_send_direct(int contact_idx, uint32_t sessionId,
                p + 1, totalPkts, (unsigned long)delayMs);
     }
 
-    printf("Voice: sent %d/%d packets to %s\n",
-           sentPkts, totalPkts, ci.name);
+    printf("Voice: queued %d/%d packets to %s\n",
+           sentPkts, totalPkts, recipient->name);
+    return sentPkts;
 }
 
-// Phase 1: Send VE3 envelope DM, start waiting for ACK
+static void meck_voice_send_now(uint32_t sessionId, ContactInfo* recipient) {
+    int total = g_meck_voice.outPacketCount();
+    int sent = meck_voice_send_direct(sessionId, recipient);
+    g_voice_send_status = (sent == total && total > 0) ? VOICE_SEND_PACKETS_QUEUED
+                                                       : VOICE_SEND_PARTIAL;
+}
+
+// Send the VE3 envelope DM, then the packets (or wait for the ACK first)
 static void meck_voice_send_phase1() {
     if (!g_voice_send_pending) return;
     g_voice_send_pending = false;
     if (!g_the_mesh) return;
 
     int contact_idx = g_voice_send_contact_idx;
-    if (!g_meck_voice.isCodec2Valid()) {
+
+    // Generate session ID; cache the selected note as the outgoing session
+    // (kept 15 minutes for fetch requests).
+    uint32_t sessionId = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFF);
+    int total = g_meck_voice.prepareOutSession(sessionId);
+    if (total <= 0) {
         printf("Voice: no valid Codec2 data to send\n");
+        g_voice_send_status = VOICE_SEND_FAILED;
         return;
     }
-
-    // Generate session ID
-    uint32_t sessionId = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFF);
-
-    // Cache outgoing session for fetch requests
-    g_meck_voice.cacheOutSession(sessionId);
+    g_voice_send_total = total;
 
     // Format and send VE3 envelope as a DM
     char envelope[64];
@@ -1896,6 +1922,7 @@ static void meck_voice_send_phase1() {
 
     if (!dmOk) {
         printf("Voice: envelope send failed, aborting\n");
+        g_voice_send_status = VOICE_SEND_FAILED;
         return;
     }
 
@@ -1907,13 +1934,11 @@ static void meck_voice_send_phase1() {
     bool hasDirect = (recipient && recipient->out_path_len != OUT_PATH_UNKNOWN);
 
     if (hasDirect) {
-        // Path already known, send immediately
         printf("Voice: path already known (path_len=%d), sending direct\n",
                (int)recipient->out_path_len);
-        meck_voice_send_direct(contact_idx, sessionId, recipient);
-        g_voice_send_status = VOICE_SEND_PACKETS_QUEUED;
+        meck_voice_send_now(sessionId, recipient);
     } else {
-        // Enter phase 2: wait for ACK to establish path
+        // Wait for the ACK to bring back the path
         g_voice_ack_waiting = true;
         g_voice_ack_expected = expected_ack;
         g_voice_ack_session_id = sessionId;
@@ -1927,14 +1952,13 @@ static void meck_voice_send_phase1() {
     }
 }
 
-// Phase 2: Poll for ACK (called every meck_task tick, ~10ms)
+// Poll for the envelope's ACK (called every meck_task tick, ~10ms)
 static void meck_voice_send_poll_ack() {
     if (!g_voice_ack_waiting) return;
 
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
     uint32_t elapsed = now_ms - g_voice_ack_sent_ms;
 
-    // Check ACK status
     bool acked = false;
     unsigned long msg_sent_millis = 0;
     uint32_t est_timeout = 0;
@@ -1942,7 +1966,6 @@ static void meck_voice_send_poll_ack() {
     if (g_the_mesh->lookupDMAckStatus(g_voice_ack_expected,
                                        acked, msg_sent_millis, est_timeout)) {
         if (acked) {
-            // ACK received! Path should now be known.
             g_voice_ack_waiting = false;
 
             ContactInfo ci;
@@ -1953,9 +1976,7 @@ static void meck_voice_send_poll_ack() {
             if (recipient && recipient->out_path_len != OUT_PATH_UNKNOWN) {
                 printf("Voice: ACK received after %lums, path established (path_len=%d)\n",
                        (unsigned long)elapsed, (int)recipient->out_path_len);
-                meck_voice_send_direct(g_voice_ack_contact_idx,
-                                        g_voice_ack_session_id, recipient);
-                g_voice_send_status = VOICE_SEND_PACKETS_QUEUED;
+                meck_voice_send_now(g_voice_ack_session_id, recipient);
             } else {
                 g_voice_send_status = VOICE_SEND_NO_PATH;
                 printf("Voice: ACK received but path still unknown! Cannot send.\n");
@@ -1968,7 +1989,6 @@ static void meck_voice_send_poll_ack() {
     if (elapsed >= g_voice_ack_timeout_ms) {
         g_voice_ack_retries++;
         if (g_voice_ack_retries < VOICE_DM_MAX_RETRIES) {
-            // Retry: re-send the VE3 envelope DM
             printf("Voice: DM ACK timeout after %lums, retrying (attempt %d/%d)...\n",
                    (unsigned long)elapsed,
                    g_voice_ack_retries + 1, VOICE_DM_MAX_RETRIES);
@@ -1990,7 +2010,6 @@ static void meck_voice_send_poll_ack() {
                 g_voice_send_status = VOICE_SEND_ACK_TIMEOUT;
             }
         } else {
-            // All retries exhausted
             g_voice_ack_waiting = false;
             g_voice_send_status = VOICE_SEND_ACK_TIMEOUT;
             printf("Voice: DM ACK timeout after %d attempts. No path established.\n",

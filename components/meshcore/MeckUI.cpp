@@ -50,11 +50,14 @@ extern "C" void meck_request_voice_send(int contact_idx);
 extern "C" void meck_request_picture_send(uint8_t ch_idx, const char *filepath);
 extern MeckVoice* meck_get_voice_instance(void);
 extern "C" int meck_voice_send_get_status(void);
+extern "C" int meck_voice_send_get_packets(void);
 #define VOICE_SEND_IDLE           0
 #define VOICE_SEND_WAITING_ACK    1
 #define VOICE_SEND_PACKETS_QUEUED 2
 #define VOICE_SEND_ACK_TIMEOUT    3
 #define VOICE_SEND_NO_PATH        4
+#define VOICE_SEND_PARTIAL        5
+#define VOICE_SEND_FAILED         6
 #include "NotifSounds.h"
 #include "MeckMapScreen.h"
 #include "MeckCli.h"
@@ -767,11 +770,18 @@ static lv_obj_t *btn_voice_discard          = NULL;
 static lv_obj_t *obj_voice_contact_panel    = NULL;
 static lv_obj_t *obj_voice_contact_scroll   = NULL;
 static bool      g_voice_has_recording      = false;
-static char      g_voice_last_wav_path[96]  = {};
+static char      g_voice_last_wav_path[112] = {};
+static char      g_voice_rec_label[96]      = {};    // status text for the selected note
+static bool      g_voice_stop_requested     = false; // Stop pressed, capture task finishing
+static bool      g_voice_preparing          = false; // older recording being encoded for Send
 
 // Voice send status tracking
-static uint32_t  g_voice_send_complete_ms   = 0;     // millis when send should be done
+static uint32_t  g_voice_send_complete_ms   = 0;     // millis when send should be done (0: not yet queued)
 static bool      g_voice_send_in_flight     = false;
+
+// "Voice note from ..." popup (top layer, created on first use)
+static lv_obj_t   *lbl_voice_toast       = NULL;
+static lv_timer_t *g_voice_toast_timer   = NULL;
 
 // Previous recordings scroll area on record screen
 static lv_obj_t *obj_voice_prev_scroll      = NULL;
@@ -12856,6 +12866,11 @@ static void create_settings_position_screen() {
 
 // ============================================================================
 // Voice screen — recording, review, send
+// ----------------------------------------------------------------------------
+// Recording runs in MeckVoice's capture task and is saved by its work task
+// (MeckVoice.h), so nothing here waits on the mic, the encoder or the SD
+// card. The UI starts and stops it and picks up the result in
+// ui_update_timer_cb (voice_on_record_result / voice_on_inbox_result).
 // ============================================================================
 
 // Forward: MeckVoice instance accessor from meck_app.cpp
@@ -12864,29 +12879,63 @@ static void create_settings_position_screen() {
 // Forward: voice send request
 // (declared at file scope near includes)
 
+static void voice_toast_hide_cb(lv_timer_t *t) {
+    (void)t;
+    if (lbl_voice_toast) lv_obj_add_flag(lbl_voice_toast, LV_OBJ_FLAG_HIDDEN);
+    if (g_voice_toast_timer) { lv_timer_delete(g_voice_toast_timer); g_voice_toast_timer = NULL; }
+}
+
+// Popup over whatever screen is showing (as the watch's "Voice note from").
+static void voice_toast_show(const char *text) {
+    if (!lbl_voice_toast) {
+        lbl_voice_toast = lv_label_create(lv_layer_top());
+        lv_obj_set_style_bg_color(lbl_voice_toast, lv_color_make(20, 30, 45), 0);
+        lv_obj_set_style_bg_opa(lbl_voice_toast, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(lbl_voice_toast, lv_color_white(), 0);
+        lv_obj_set_style_border_width(lbl_voice_toast, 2, 0);
+        lv_obj_set_style_border_color(lbl_voice_toast, lv_palette_main(LV_PALETTE_TEAL), 0);
+        lv_obj_set_style_pad_all(lbl_voice_toast, 14, 0);
+        lv_obj_set_style_radius(lbl_voice_toast, 10, 0);
+        lv_obj_set_style_text_align(lbl_voice_toast, LV_TEXT_ALIGN_CENTER, 0);
+        meck_set_font(lbl_voice_toast, &meck_montserrat_22, 0);
+    }
+    if (g_voice_toast_timer) { lv_timer_delete(g_voice_toast_timer); g_voice_toast_timer = NULL; }
+    lv_label_set_text(lbl_voice_toast, text);
+    lv_obj_align(lbl_voice_toast, LV_ALIGN_TOP_MID, 0, 90);
+    lv_obj_remove_flag(lbl_voice_toast, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(lbl_voice_toast);
+    g_voice_toast_timer = lv_timer_create(voice_toast_hide_cb, 2500, NULL);
+}
+
+static void voice_set_status(const char *text, lv_color_t color) {
+    if (!lbl_voice_status) return;
+    lv_label_set_text(lbl_voice_status, text);
+    lv_obj_set_style_text_color(lbl_voice_status, color, 0);
+}
+
 static void voice_update_ui(void) {
     MeckVoice* voice = meck_get_voice_instance();
     if (!voice) return;
 
-    bool recording = voice->isRecording();
-    bool has_rec = g_voice_has_recording;
+    // Stop pressed: show "Saving" at once, while the capture task finishes.
+    bool recording = voice->isRecording() && !g_voice_stop_requested;
+    bool saving    = voice->isSaving() || (voice->isRecording() && g_voice_stop_requested);
+    bool has_rec   = g_voice_has_recording && !recording && !saving;
 
     // Status label
-    if (lbl_voice_status) {
-        if (recording) {
-            lv_label_set_text(lbl_voice_status, "Recording...");
-            lv_obj_set_style_text_color(lbl_voice_status,
-                lv_palette_main(LV_PALETTE_RED), 0);
-        } else if (has_rec) {
-            char buf[48];
-            snprintf(buf, sizeof(buf), "Recorded %.1fs", voice->getRecDurationSec());
-            lv_label_set_text(lbl_voice_status, buf);
-            lv_obj_set_style_text_color(lbl_voice_status,
-                lv_palette_main(LV_PALETTE_GREEN), 0);
-        } else {
-            lv_label_set_text(lbl_voice_status, "Tap Record to start");
-            lv_obj_set_style_text_color(lbl_voice_status,
-                lv_palette_main(LV_PALETTE_GREY), 0);
+    if (recording) {
+        voice_set_status("Recording...", lv_palette_main(LV_PALETTE_RED));
+    } else if (saving) {
+        voice_set_status("Saving...", lv_palette_main(LV_PALETTE_ORANGE));
+    } else if (has_rec && g_voice_preparing) {
+        voice_set_status("Preparing to send...", lv_palette_main(LV_PALETTE_ORANGE));
+    } else if (has_rec && !g_voice_send_in_flight) {
+        voice_set_status(g_voice_rec_label, lv_palette_main(LV_PALETTE_GREEN));
+    } else if (!has_rec && !g_voice_send_in_flight && lbl_voice_status) {
+        // Keep a result message ("Too short", an error) until the next action
+        const char *cur = lv_label_get_text(lbl_voice_status);
+        if (cur && (strncmp(cur, "Recording", 9) == 0 || strncmp(cur, "Saving", 6) == 0)) {
+            voice_set_status("Tap Record to start", lv_palette_main(LV_PALETTE_GREY));
         }
     }
 
@@ -12895,7 +12944,7 @@ static void voice_update_ui(void) {
         if (recording) {
             char buf[16];
             snprintf(buf, sizeof(buf), "%.1fs / %ds",
-                     voice->getRecDurationSec(), VOICE_MAX_SECONDS);
+                     voice->recordedSeconds(), VOICE_MAX_SECONDS);
             lv_label_set_text(lbl_voice_timer, buf);
         } else {
             lv_label_set_text(lbl_voice_timer, "");
@@ -12906,72 +12955,135 @@ static void voice_update_ui(void) {
     if (lbl_voice_record_btn) {
         if (recording)
             lv_label_set_text(lbl_voice_record_btn, "Stop");
+        else if (saving)
+            lv_label_set_text(lbl_voice_record_btn, "Saving");
         else if (has_rec)
             lv_label_set_text(lbl_voice_record_btn, "New");
         else
             lv_label_set_text(lbl_voice_record_btn, "Record");
     }
 
-    // Record button color
+    // Record button color; no taps while saving
     if (btn_voice_record) {
         lv_obj_set_style_bg_color(btn_voice_record,
             recording ? lv_color_make(180, 30, 30)
                       : lv_palette_main(LV_PALETTE_RED), 0);
+        if (saving) lv_obj_add_state(btn_voice_record, LV_STATE_DISABLED);
+        else        lv_obj_clear_state(btn_voice_record, LV_STATE_DISABLED);
     }
 
-    // Play + Send + Discard buttons: visible only after a recording
+    // Play + Send + Discard buttons: visible only with a recording selected
+    // (Play and Discard need its WAV on the SD card)
+    bool has_wav = has_rec && g_voice_last_wav_path[0] != '\0';
     if (btn_voice_play) {
-        if (has_rec && !recording)
-            lv_obj_clear_flag(btn_voice_play, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(btn_voice_play, LV_OBJ_FLAG_HIDDEN);
+        if (has_wav) lv_obj_clear_flag(btn_voice_play, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(btn_voice_play, LV_OBJ_FLAG_HIDDEN);
     }
     if (btn_voice_send) {
-        if (has_rec && !recording)
-            lv_obj_clear_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
+        if (has_rec) lv_obj_clear_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(btn_voice_send, LV_OBJ_FLAG_HIDDEN);
     }
     if (btn_voice_discard) {
-        if (has_rec && !recording)
-            lv_obj_clear_flag(btn_voice_discard, LV_OBJ_FLAG_HIDDEN);
-        else
-            lv_obj_add_flag(btn_voice_discard, LV_OBJ_FLAG_HIDDEN);
+        if (has_wav) lv_obj_clear_flag(btn_voice_discard, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(btn_voice_discard, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
+static void on_voice_contact_cancel(lv_event_t *e);
+
+// Record / Stop / New (button, Enter, and the K270 microphone key).
 static void on_voice_record_tap(lv_event_t *e) {
     (void)e;
     MeckVoice* voice = meck_get_voice_instance();
     if (!voice) return;
 
     if (voice->isRecording()) {
-        voice->stopRecording();
-        if (voice->getRecSamples() > 4000) {  // > 0.25s
-            g_voice_has_recording = true;
-            // Save to SD as WAV
-            uint32_t ts = (uint32_t)(esp_timer_get_time() / 1000000ULL);
-            char filename[48];
-            snprintf(filename, sizeof(filename), "voice_%06lu.wav",
-                     (unsigned long)(ts % 1000000UL));
-            voice->saveToWav(filename);
-            snprintf(g_voice_last_wav_path, sizeof(g_voice_last_wav_path),
-                     "%s/%s", VOICE_FOLDER, filename);
-#ifdef HAVE_CODEC2
-            voice->encodeCodec2();
-#endif
-        } else {
+        // Same stop as the 12 s limit: the capture task ends and hands the
+        // audio to the work task; the result arrives in ui_update_timer_cb.
+        g_voice_stop_requested = true;
+        voice->requestStop();
+    } else if (!voice->isSaving()) {
+        if (obj_voice_contact_panel) on_voice_contact_cancel(NULL);
+        g_voice_stop_requested = false;
+        if (voice->startRecording()) {
             g_voice_has_recording = false;
+            g_voice_preparing = false;
+            g_voice_send_in_flight = false;
+            g_voice_last_wav_path[0] = '\0';
+        } else {
+            voice_set_status("Microphone not available", lv_palette_main(LV_PALETTE_RED));
         }
-    } else {
-        g_voice_has_recording = false;
-        voice->startRecording();
     }
     voice_update_ui();
 }
 
+static void voice_prev_refresh(void);
+
+// Result of a recording (or of preparing an older one for Send), from the
+// work task. Called from ui_update_timer_cb.
+static void voice_on_record_result(const MeckVoice::RecordResult &r) {
+    g_voice_stop_requested = false;
+    switch (r.outcome) {
+        case MeckVoice::REC_OK:
+        case MeckVoice::REC_OK_NOT_SAVED:
+            g_voice_has_recording = true;
+            g_voice_preparing = false;
+            strncpy(g_voice_last_wav_path, r.wavPath, sizeof(g_voice_last_wav_path) - 1);
+            g_voice_last_wav_path[sizeof(g_voice_last_wav_path) - 1] = '\0';
+            snprintf(g_voice_rec_label, sizeof(g_voice_rec_label),
+                     (r.outcome == MeckVoice::REC_OK) ? "Recorded %.1fs"
+                                                      : "Recorded %.1fs (not saved to SD)",
+                     r.seconds);
+            voice_prev_refresh();
+            break;
+        case MeckVoice::REC_TOO_SHORT:
+            g_voice_has_recording = false;
+            voice_set_status("Too short, nothing kept", lv_palette_main(LV_PALETTE_GREY));
+            break;
+        case MeckVoice::REC_MIC_FAILED:
+            g_voice_has_recording = false;
+            voice_set_status("Microphone gave no audio", lv_palette_main(LV_PALETTE_RED));
+            break;
+        case MeckVoice::REC_ENCODE_FAILED:
+            g_voice_has_recording = false;
+            voice_set_status("Encoding failed", lv_palette_main(LV_PALETTE_RED));
+            break;
+        case MeckVoice::REC_PREPARED:
+        case MeckVoice::REC_PREPARE_FAILED:
+            // Only for the recording still selected
+            if (g_voice_preparing && strcmp(r.wavPath, g_voice_last_wav_path) == 0) {
+                g_voice_preparing = false;
+                if (r.outcome == MeckVoice::REC_PREPARE_FAILED) {
+                    g_voice_has_recording = false;
+                    voice_set_status("Could not read this recording", lv_palette_main(LV_PALETTE_RED));
+                }
+            }
+            break;
+        default:
+            break;
+    }
+    voice_update_ui();
+}
+
+// Incoming note decoded and saved by the work task. Called from
+// ui_update_timer_cb. Not played until opened from the inbox (as the watch).
+static void voice_on_inbox_result(const MeckVoice::InboxResult &r) {
+    char msg[80];
+    if (r.saved) {
+        voice_inbox_add(r.senderName, r.wavPath, r.timestamp, r.durationSec);
+        voice_inbox_update_badge();
+        if (scr_voice_inbox && lv_screen_active() == scr_voice_inbox) voice_inbox_refresh();
+        snprintf(msg, sizeof(msg), "Voice note from %s", r.senderName);
+    } else {
+        snprintf(msg, sizeof(msg), "Voice note from %s not saved (SD card?)", r.senderName);
+    }
+    voice_toast_show(msg);
+}
+
 static void on_voice_play_tap(lv_event_t *e) {
     (void)e;
+    MeckVoice* voice = meck_get_voice_instance();
+    if (voice && (voice->isRecording() || voice->isSaving())) return;
     if (g_voice_last_wav_path[0] == '\0') {
         printf("Voice: no WAV to play\n");
         return;
@@ -12982,58 +13094,75 @@ static void on_voice_play_tap(lv_event_t *e) {
     meck_audio_codec_wake();
     meck_audio_play_file(g_voice_last_wav_path, 0);
     meck_audio_resume();
-    if (lbl_voice_status) {
-        lv_label_set_text(lbl_voice_status, "Playing...");
-        lv_obj_set_style_text_color(lbl_voice_status,
-            lv_palette_main(LV_PALETTE_TEAL), 0);
-    }
+    voice_set_status("Playing...", lv_palette_main(LV_PALETTE_TEAL));
 }
 
 static void on_voice_discard_tap(lv_event_t *e) {
     (void)e;
-    // Delete the WAV file from SD if it exists
+    MeckVoice* voice = meck_get_voice_instance();
+    if (voice && (voice->isRecording() || voice->isSaving())) return;
+    // Delete the WAV file from SD if it exists, and its Codec2 (.c2) file
     if (g_voice_last_wav_path[0] != '\0') {
+        meck_audio_stop();
         if (remove(g_voice_last_wav_path) == 0) {
             printf("Voice: deleted %s\n", g_voice_last_wav_path);
         } else {
             printf("Voice: failed to delete %s\n", g_voice_last_wav_path);
         }
+        char c2path[120];
+        MeckVoice::sidecarPath(g_voice_last_wav_path, c2path, sizeof(c2path));
+        remove(c2path);
     }
+    if (voice) voice->clearSelection();
     g_voice_has_recording = false;
+    g_voice_preparing = false;
     g_voice_last_wav_path[0] = '\0';
-    if (lbl_voice_status) {
-        lv_label_set_text(lbl_voice_status, "Tap Record to start");
-        lv_obj_set_style_text_color(lbl_voice_status,
-            lv_palette_main(LV_PALETTE_GREY), 0);
-    }
+    voice_set_status("Tap Record to start", lv_palette_main(LV_PALETTE_GREY));
     voice_update_ui();
     voice_prev_refresh();  // refresh the list to reflect deletion
     printf("Voice: recording discarded\n");
+}
+
+// "voice_1763012345.wav" -> local time; "voice_u..." -> no clock; anything
+// else (older names) as it is.
+static void voice_prev_label(const char *base, char *out, size_t outLen) {
+    const char *p = base + 6;   // after "voice_"
+    if (strlen(p) >= 10 && p[0] >= '0' && p[0] <= '9' &&
+        strspn(p, "0123456789") == 10) {
+        char digits[11];
+        memcpy(digits, p, 10);
+        digits[10] = '\0';
+        format_local_time((uint32_t)strtoul(digits, NULL, 10), out, outLen);
+        return;
+    }
+    if (p[0] == 'u') {
+        snprintf(out, outLen, "Recorded (no clock)");
+        return;
+    }
+    snprintf(out, outLen, "%s", base);
 }
 
 // Load a previous recording from the list
 static void on_voice_prev_row_tap(lv_event_t *e) {
     const char *path = (const char *)lv_event_get_user_data(e);
     if (!path || !path[0]) return;
+    MeckVoice* voice = meck_get_voice_instance();
+    if (!voice || voice->isRecording() || voice->isSaving()) return;
 
     strncpy(g_voice_last_wav_path, path, sizeof(g_voice_last_wav_path) - 1);
     g_voice_last_wav_path[sizeof(g_voice_last_wav_path) - 1] = '\0';
     g_voice_has_recording = true;
+    g_voice_send_in_flight = false;
 
-    // Re-encode Codec2 from the loaded WAV is deferred until Send.
-    // For now, just let the user Play it. The Codec2 data from the
-    // original recording session may still be in MeckVoice if it
-    // was the most recent encode.
+    // Send sends this recording: its .c2 file if it has one, otherwise it is
+    // encoded from the WAV in the background ("Preparing to send...").
+    g_voice_preparing = !voice->selectRecording(path);
 
-    if (lbl_voice_status) {
-        const char *slash = strrchr(path, '/');
-        const char *base = slash ? slash + 1 : path;
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Loaded: %s", base);
-        lv_label_set_text(lbl_voice_status, buf);
-        lv_obj_set_style_text_color(lbl_voice_status,
-            lv_palette_main(LV_PALETTE_TEAL), 0);
-    }
+    const char *slash = strrchr(path, '/');
+    const char *base = slash ? slash + 1 : path;
+    char when[40];
+    voice_prev_label(base, when, sizeof(when));
+    snprintf(g_voice_rec_label, sizeof(g_voice_rec_label), "Loaded: %s", when);
     voice_update_ui();
     printf("Voice: loaded previous recording %s\n", path);
 }
@@ -13041,6 +13170,10 @@ static void on_voice_prev_row_tap(lv_event_t *e) {
 // Refresh the previous recordings list on the record screen
 static void voice_prev_refresh(void) {
     if (!obj_voice_prev_scroll) return;
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // The rows are rebuilt: a keyboard ring on this screen must not survive.
+    meck_row_ring_clear_if_on(scr_voice);
+#endif
     lv_obj_clean(obj_voice_prev_scroll);
 
     if (!p4_sdcard_is_mounted()) return;
@@ -13049,20 +13182,26 @@ static void voice_prev_refresh(void) {
     DIR *dir = opendir(VOICE_FOLDER);
     if (!dir) return;
 
-    // Collect filenames (max 16 most recent)
-    static char paths[16][96];
+    // Keep the 16 newest (names sort by time, newest = highest)
+    static char paths[16][112];
     int count = 0;
 
     struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL && count < 16) {
+    while ((ent = readdir(dir)) != NULL) {
         if (ent->d_type != DT_REG) continue;
         if (strncmp(ent->d_name, "voice_", 6) != 0) continue;
         const char *ext = strrchr(ent->d_name, '.');
         if (!ext || strcmp(ext, ".wav") != 0) continue;
 
-        snprintf(paths[count], sizeof(paths[count]), "%s/%s",
-                 VOICE_FOLDER, ent->d_name);
-        count++;
+        char p[112];
+        snprintf(p, sizeof(p), "%s/%s", VOICE_FOLDER, ent->d_name);
+        int pos = count;
+        while (pos > 0 && strcmp(p, paths[pos - 1]) > 0) pos--;
+        if (pos >= 16) continue;
+        int last = (count < 16) ? count : 15;
+        for (int k = last; k > pos; k--) memcpy(paths[k], paths[k - 1], sizeof(paths[0]));
+        memcpy(paths[pos], p, sizeof(paths[0]));
+        if (count < 16) count++;
     }
     closedir(dir);
 
@@ -13073,18 +13212,6 @@ static void voice_prev_refresh(void) {
         meck_set_font(empty, &meck_montserrat_14, 0);
         lv_obj_set_pos(empty, 10, 5);
         return;
-    }
-
-    // Sort newest first (filenames contain timestamps, reverse alpha works)
-    for (int i = 0; i < count - 1; i++) {
-        for (int j = i + 1; j < count; j++) {
-            if (strcmp(paths[i], paths[j]) < 0) {
-                char tmp[96];
-                memcpy(tmp, paths[i], 96);
-                memcpy(paths[i], paths[j], 96);
-                memcpy(paths[j], tmp, 96);
-            }
-        }
     }
 
     int y = 0;
@@ -13109,8 +13236,10 @@ static void voice_prev_refresh(void) {
                             (void*)paths[i]);  // static lifetime
 
         lv_obj_t *name = lv_label_create(row);
+        char when[40];
+        voice_prev_label(base, when, sizeof(when));
         char label[64];
-        snprintf(label, sizeof(label), "%s  (%ds)", base, durSec);
+        snprintf(label, sizeof(label), "%s  (%ds)", when, durSec);
         lv_label_set_text(name, label);
         lv_obj_set_style_text_color(name, lv_color_white(), 0);
         meck_set_font(name, &meck_montserrat_14, 0);
@@ -13123,6 +13252,9 @@ static void voice_prev_refresh(void) {
 static void on_voice_contact_cancel(lv_event_t *e) {
     (void)e;
     if (obj_voice_contact_panel) {
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+        meck_row_ring_clear_if_on(obj_voice_contact_scroll);
+#endif
         lv_obj_del(obj_voice_contact_panel);
         obj_voice_contact_panel = NULL;
         obj_voice_contact_scroll = NULL;
@@ -13131,9 +13263,9 @@ static void on_voice_contact_cancel(lv_event_t *e) {
 
 static void on_voice_contact_select(lv_event_t *e) {
     int contact_idx = (int)(intptr_t)lv_event_get_user_data(e);
-    meck_request_voice_send(contact_idx);
 
     ContactInfo ci;
+    ci.name[0] = '\0';
     Meck *mesh = meck_get_instance();
     if (mesh && mesh->getContactByIdx((uint32_t)contact_idx, ci)) {
         printf("Voice: sending to %s\n", ci.name);
@@ -13141,22 +13273,30 @@ static void on_voice_contact_select(lv_event_t *e) {
 
     on_voice_contact_cancel(NULL);
 
-    // Track send completion: ACK wait (up to 15s) + first packet at 1.5s
-    // + subsequent packets 3s apart. Use a generous estimate.
-    MeckVoice* voice = meck_get_voice_instance();
-    int numPkts = voice ? voice->getPacketCount() : 1;
-    // Worst case: 15s ACK wait + 1.5s + (numPkts-1)*3s + 2s margin
-    uint32_t maxDelay = 15000 + 1500 + (uint32_t)(numPkts - 1) * 3000 + 2000;
-    g_voice_send_complete_ms = (uint32_t)(esp_timer_get_time() / 1000ULL) + maxDelay;
+    // Completion time is set once meck_task reports the packets queued
+    // (see ui_update_timer_cb).
+    g_voice_send_complete_ms = 0;
     g_voice_send_in_flight = true;
+    meck_request_voice_send(contact_idx);
 
-    if (lbl_voice_status) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Sending to %s...", ci.name);
-        lv_label_set_text(lbl_voice_status, buf);
-        lv_obj_set_style_text_color(lbl_voice_status,
-            lv_palette_main(LV_PALETTE_ORANGE), 0);
-    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Sending to %s...", ci.name);
+    voice_set_status(buf, lv_palette_main(LV_PALETTE_ORANGE));
+}
+
+// Send-to list entry: direct-path contacts first (as Meck and the watch).
+struct VoicePickEntry {
+    int  idx;
+    char name[32];
+    bool direct;
+    bool fav;
+};
+
+static int voice_pick_cmp(const void *a, const void *b) {
+    const VoicePickEntry *x = (const VoicePickEntry *)a;
+    const VoicePickEntry *y = (const VoicePickEntry *)b;
+    if (x->direct != y->direct) return x->direct ? -1 : 1;
+    return strcasecmp(x->name, y->name);
 }
 
 static void on_voice_send_tap(lv_event_t *e) {
@@ -13165,38 +13305,22 @@ static void on_voice_send_tap(lv_event_t *e) {
     if (!mesh || !scr_voice) return;
 
     MeckVoice* voice = meck_get_voice_instance();
-    if (!voice) return;
+    if (!voice || voice->isRecording() || voice->isSaving()) return;
 
-    // If Codec2 isn't valid but we have a loaded WAV (previous recording),
-    // load it into the record buffer and encode now.
-    if (!voice->isCodec2Valid() && g_voice_has_recording
-        && g_voice_last_wav_path[0] != '\0') {
-        if (lbl_voice_status) {
-            lv_label_set_text(lbl_voice_status, "Encoding...");
-            lv_obj_set_style_text_color(lbl_voice_status,
-                lv_palette_main(LV_PALETTE_ORANGE), 0);
-        }
-        printf("Voice: loading WAV for send: %s\n", g_voice_last_wav_path);
-        if (voice->loadFromWav(g_voice_last_wav_path)) {
-            voice->encodeCodec2();
-        }
+    if (g_voice_preparing) {
+        voice_set_status("Still preparing, try again in a moment",
+                         lv_palette_main(LV_PALETTE_ORANGE));
+        return;
     }
-
     if (!voice->isCodec2Valid()) {
-        if (lbl_voice_status) {
-            lv_label_set_text(lbl_voice_status, "Record or select a message first");
-            lv_obj_set_style_text_color(lbl_voice_status,
-                lv_palette_main(LV_PALETTE_ORANGE), 0);
-        }
+        voice_set_status("Record or select a message first",
+                         lv_palette_main(LV_PALETTE_ORANGE));
         printf("Voice: send blocked, Codec2 not valid\n");
         return;
     }
 
     // Clean up any existing picker
-    if (obj_voice_contact_panel) {
-        lv_obj_del(obj_voice_contact_panel);
-        obj_voice_contact_panel = NULL;
-    }
+    on_voice_contact_cancel(NULL);
 
     // Build contact picker overlay (same pattern as channel share)
     obj_voice_contact_panel = lv_obj_create(scr_voice);
@@ -13240,57 +13364,59 @@ static void on_voice_send_tap(lv_event_t *e) {
     lv_obj_set_style_pad_all(obj_voice_contact_scroll, 0, 0);
     lv_obj_set_scroll_dir(obj_voice_contact_scroll, LV_DIR_VER);
 
+    // Chat contacts, those with a direct path first (they get the packets at
+    // once; the others are tried by finding a path with the envelope DM),
+    // then alphabetical within each group.
     int num_contacts = mesh->getNumContacts();
-    // Type distribution diagnostic
-    int type_counts[8] = {};
-    for (int ci = 0; ci < num_contacts && ci < 500; ci++) {
-        ContactInfo tc;
-        if (mesh->getContactByIdx(ci, tc) && tc.type < 8) type_counts[tc.type]++;
+    VoicePickEntry *list = (VoicePickEntry *)heap_caps_malloc(
+        sizeof(VoicePickEntry) * (num_contacts > 0 ? num_contacts : 1), MALLOC_CAP_SPIRAM);
+    int n = 0;
+    for (int ci = 0; list && ci < num_contacts; ci++) {
+        ContactInfo contact;
+        if (!mesh->getContactByIdx(ci, contact)) continue;
+        if (contact.type != 1) continue;  // ADV_TYPE_CHAT only
+        if (contact.name[0] == '\0') continue;
+        list[n].idx = ci;
+        strncpy(list[n].name, contact.name, sizeof(list[n].name) - 1);
+        list[n].name[sizeof(list[n].name) - 1] = '\0';
+        list[n].direct = (contact.out_path_len != OUT_PATH_UNKNOWN);
+        list[n].fav = (contact.flags & 0x01) != 0;
+        n++;
     }
-    printf("Voice send: %d contacts (types: 0=%d 1/chat=%d 2/rptr=%d 3/room=%d 4=%d 5=%d), scroll=%dx%d\n",
-           num_contacts,
-           type_counts[0], type_counts[1], type_counts[2], type_counts[3],
-           type_counts[4], type_counts[5],
-           (int)lv_obj_get_width(obj_voice_contact_scroll),
-           (int)lv_obj_get_height(obj_voice_contact_scroll));
+    if (list && n > 1) qsort(list, n, sizeof(VoicePickEntry), voice_pick_cmp);
+    printf("Voice send: %d chat contacts of %d\n", n, num_contacts);
+
     int y = 0;
+    for (int i = 0; i < n; i++) {
+        const VoicePickEntry &c = list[i];
+        lv_obj_t *row = lv_button_create(obj_voice_contact_scroll);
+        lv_obj_set_size(row, lv_obj_get_width(obj_voice_contact_scroll) - 10, 50);
+        lv_obj_set_pos(row, 5, y);
+        lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_add_event_cb(row, on_voice_contact_select, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)c.idx);
 
-    // Two passes: favourites first, then non-favourites
-    for (int pass = 0; pass < 2; pass++) {
-        for (int ci = 0; ci < num_contacts; ci++) {
-            ContactInfo contact;
-            if (!mesh->getContactByIdx(ci, contact)) continue;
-            if (contact.type != 1) continue;  // ADV_TYPE_CHAT only
+        lv_obj_t *name = lv_label_create(row);
+        char display[48];
+        if (c.fav) snprintf(display, sizeof(display), "%s %s", LV_SYMBOL_OK, c.name);
+        else       snprintf(display, sizeof(display), "%s", c.name);
+        lv_label_set_text(name, display);
+        lv_color_t col = c.fav ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white();
+        if (!c.direct) col = lv_palette_main(LV_PALETTE_GREY);
+        lv_obj_set_style_text_color(name, col, 0);
+        meck_set_font(name, &meck_montserrat_16, 0);
+        lv_obj_align(name, LV_ALIGN_LEFT_MID, 10, 0);
 
-            bool isFav = (contact.flags & 0x01) != 0;
-            if (pass == 0 && !isFav) continue;  // pass 0: favs only
-            if (pass == 1 && isFav) continue;    // pass 1: non-favs only
+        lv_obj_t *path = lv_label_create(row);
+        lv_label_set_text(path, c.direct ? "direct" : "no path yet");
+        lv_obj_set_style_text_color(path, lv_palette_main(LV_PALETTE_GREY), 0);
+        meck_set_font(path, &meck_montserrat_14, 0);
+        lv_obj_align(path, LV_ALIGN_RIGHT_MID, -10, 0);
 
-            lv_obj_t *row = lv_button_create(obj_voice_contact_scroll);
-            lv_obj_set_size(row, lv_obj_get_width(obj_voice_contact_scroll) - 10, 50);
-            lv_obj_set_pos(row, 5, y);
-            lv_obj_set_style_bg_color(row, lv_color_make(25, 25, 35), 0);
-            lv_obj_set_style_radius(row, 8, 0);
-            lv_obj_add_event_cb(row, on_voice_contact_select, LV_EVENT_CLICKED,
-                                (void*)(intptr_t)ci);
-
-            lv_obj_t *name = lv_label_create(row);
-            char display[48];
-            if (isFav) {
-                snprintf(display, sizeof(display), "%s %s", LV_SYMBOL_OK, contact.name);
-            } else {
-                snprintf(display, sizeof(display), "%s", contact.name);
-            }
-            lv_label_set_text(name, display);
-            lv_obj_set_style_text_color(name,
-                isFav ? lv_palette_main(LV_PALETTE_YELLOW) : lv_color_white(), 0);
-            meck_set_font(name, &meck_montserrat_16, 0);
-            lv_obj_align(name, LV_ALIGN_LEFT_MID, 10, 0);
-
-            y += 55;
-            printf("  [%d] %s (type=%d fav=%d)\n", ci, contact.name, contact.type, isFav);
-        }
+        y += 55;
     }
+    if (list) heap_caps_free(list);
 
     if (y == 0) {
         lv_obj_t *empty = lv_label_create(obj_voice_contact_scroll);
@@ -13411,6 +13537,10 @@ static void on_voice_inbox_row_tap(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= g_voice_inbox_count) return;
 
+    // Not while a recording is running or being saved (it owns the codec)
+    MeckVoice* voice = meck_get_voice_instance();
+    if (voice && (voice->isRecording() || voice->isSaving())) return;
+
     VoiceInboxEntry& entry = g_voice_inbox[idx];
     char path[128];
     snprintf(path, sizeof(path), "%s/%s", VOICE_INBOX_FOLDER, entry.filename);
@@ -13435,6 +13565,10 @@ static void on_voice_inbox_row_tap(lv_event_t *e) {
 static void voice_inbox_refresh(void) {
     if (!obj_voice_inbox_scroll) return;
 
+#if defined(CONFIG_BOARD_TYPE_T_DISPLAY_P4_KEYBOARD)
+    // The rows are rebuilt: a keyboard ring on them must not survive.
+    meck_row_ring_clear_if_on(obj_voice_inbox_scroll);
+#endif
     // Clear existing rows
     lv_obj_clean(obj_voice_inbox_scroll);
 
@@ -13632,9 +13766,9 @@ static void create_voice_landing_screen(void) {
     lv_obj_align(rec_lbl, LV_ALIGN_CENTER, 0, 25);
 
     lv_obj_add_event_cb(btn_voice_record_nav, [](lv_event_t *e) {
-        // Reset stale state if MeckVoice has no recording
+        // Reset stale state if no recording is selected
         MeckVoice* v = meck_get_voice_instance();
-        if (v && v->getRecSamples() == 0 && g_voice_last_wav_path[0] == '\0') {
+        if (v && !v->isCodec2Valid() && !g_voice_preparing) {
             g_voice_has_recording = false;
         }
         voice_update_ui();
@@ -13664,6 +13798,10 @@ static void create_voice_landing_screen(void) {
 // ============================================================================
 
 static void create_voice_record_screen(void) {
+    // The contact picker is a child of the old screen, deleted with it on an
+    // orientation rebuild.
+    obj_voice_contact_panel = NULL;
+    obj_voice_contact_scroll = NULL;
     scr_voice = lv_obj_create(NULL);
     lock_screen_scroll(scr_voice);
     lv_obj_set_style_bg_color(scr_voice, lv_color_black(), 0);
@@ -13680,9 +13818,13 @@ static void create_voice_record_screen(void) {
     meck_set_font(back_lbl, &meck_montserrat_24, 0);
     lv_obj_center(back_lbl);
     lv_obj_add_event_cb(btn_back, [](lv_event_t *e) {
-        // Stop recording if active
+        // Stop recording if active (it is still saved, as with Stop)
         MeckVoice* v = meck_get_voice_instance();
-        if (v && v->isRecording()) v->stopRecording();
+        if (v && v->isRecording()) {
+            g_voice_stop_requested = true;
+            v->requestStop();
+        }
+        on_voice_contact_cancel(NULL);
         if (scr_voice_landing) lv_screen_load(scr_voice_landing);
     }, LV_EVENT_CLICKED, NULL);
 
@@ -16081,79 +16223,33 @@ static void ui_update_timer_cb(lv_timer_t *t) {
     // queued (early-return on empty rings).
     meck_drain_pending_admin_responses();
 
-    // Voice over LoRa: drain pending VE3 envelopes and voice data packets.
-    // When an incoming session is complete, auto-play via MeckVoice.
+    // Voice over LoRa. Envelopes and packets are drained on meck_task
+    // (meck_drain_pending_voice in meck_app.cpp); recordings and incoming
+    // notes are processed by MeckVoice's own tasks. Here the UI picks up
+    // what they finished and keeps the record screen current.
     {
-        // Voice and picture transfer disabled for v0.3.8 — re-enable when
+        // Picture transfer disabled for v0.3.8 — re-enable when
         // the send/receive pipeline is stable.
-        // meck_drain_pending_voice();
         // meck_drain_pending_pictures();
 
         MeckVoice* voice = meck_get_voice_instance();
-        if (voice && voice->isIncomingComplete()) {
-            const MeckVoice::InSession& in = voice->getInSession();
-            printf("MeckUI: voice session complete from %s (%lu bytes)\n",
-                   in.senderName, (unsigned long)in.dataBytes);
 
-#ifdef HAVE_CODEC2
-            // Reassemble packets in order
-            uint8_t ordered[VOICE_C2_MAX_BYTES];
-            uint32_t orderedLen = voice->reassembleIncoming(ordered, sizeof(ordered));
-
-            if (orderedLen > 0 && voice->decodeCodec2(ordered, orderedLen)) {
-                // Ensure inbox folder exists
-                struct stat st;
-                if (stat(VOICE_INBOX_FOLDER, &st) != 0) {
-                    mkdir("/sdcard/voice", 0755);
-                    mkdir(VOICE_INBOX_FOLDER, 0755);
-                }
-
-                // Save decoded audio as WAV to inbox folder
-                uint32_t ts = meck_clock_get_utc();
-                char filename[48];
-                snprintf(filename, sizeof(filename), "voice_rx_%06lu.wav",
-                         (unsigned long)(ts % 1000000UL));
-
-                // Save with inbox folder path
-                char fullpath[128];
-                snprintf(fullpath, sizeof(fullpath), "%s/%s",
-                         VOICE_INBOX_FOLDER, filename);
-
-                // Use saveToWav which writes to VOICE_FOLDER by default.
-                // For inbox, we need to write directly.
-                voice->saveToWav(filename);
-
-                // Move the file from VOICE_FOLDER to VOICE_INBOX_FOLDER
-                char srcPath[128];
-                snprintf(srcPath, sizeof(srcPath), "%s/%s", VOICE_FOLDER, filename);
-                rename(srcPath, fullpath);
-
-                // Calculate duration from Codec2 frame count
-                uint8_t durSec = (uint8_t)(in.dataBytes / VOICE_C2_FRAME_BYTES
-                                           * VOICE_C2_FRAME_MS / 1000);
-
-                // Add to inbox metadata
-                voice_inbox_add(in.senderName, fullpath, ts, durSec);
-                voice_inbox_update_badge();
-
-                printf("MeckUI: voice from %s saved to inbox (%s, %ds)\n",
-                       in.senderName, filename, durSec);
-            } else {
-                printf("MeckUI: Codec2 decode failed for incoming voice\n");
-            }
-#else
-            printf("MeckUI: voice received but HAVE_CODEC2 not enabled\n");
-#endif
-            voice->clearIncoming();
+        // A recording saved (or an older recording prepared for Send)
+        MeckVoice::RecordResult rec_res;
+        if (voice && voice->takeRecordResult(rec_res)) {
+            voice_on_record_result(rec_res);
         }
 
-        // Live UI update during recording: call recordTick to pull
-        // samples from the mic DMA, and refresh the voice screen.
-        if (voice->isRecording()) {
-            voice->recordTick();
-            if (scr_voice && lv_screen_active() == scr_voice) {
-                voice_update_ui();
-            }
+        // An incoming note decoded and saved to the inbox
+        MeckVoice::InboxResult inbox_res;
+        if (voice && voice->takeInboxResult(inbox_res)) {
+            voice_on_inbox_result(inbox_res);
+        }
+
+        // Live record screen while recording or saving
+        if (voice && (voice->isRecording() || voice->isSaving()) &&
+            scr_voice && lv_screen_active() == scr_voice) {
+            voice_update_ui();
         }
 
         // Detect playback completion: if we're on the voice screen and
@@ -16165,16 +16261,9 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                 const char *cur = lv_label_get_text(lbl_voice_status);
                 if (cur && strncmp(cur, "Playing", 7) == 0) {
                     if (g_voice_has_recording) {
-                        char buf[48];
-                        snprintf(buf, sizeof(buf), "Recorded %.1fs",
-                                 voice->getRecDurationSec());
-                        lv_label_set_text(lbl_voice_status, buf);
-                        lv_obj_set_style_text_color(lbl_voice_status,
-                            lv_palette_main(LV_PALETTE_GREEN), 0);
+                        voice_set_status(g_voice_rec_label, lv_palette_main(LV_PALETTE_GREEN));
                     } else {
-                        lv_label_set_text(lbl_voice_status, "Playback finished");
-                        lv_obj_set_style_text_color(lbl_voice_status,
-                            lv_palette_main(LV_PALETTE_GREEN), 0);
+                        voice_set_status("Playback finished", lv_palette_main(LV_PALETTE_GREEN));
                     }
                 }
             }
@@ -16183,32 +16272,38 @@ static void ui_update_timer_cb(lv_timer_t *t) {
         // Detect voice send status changes
         if (g_voice_send_in_flight && lbl_voice_status) {
             int vs = meck_voice_send_get_status();
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
             if (vs == VOICE_SEND_PACKETS_QUEUED) {
-                // Packets are queued via sendDirect. Estimate completion
-                // from packet count.
-                uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
-                if (now_ms >= g_voice_send_complete_ms) {
+                // Every packet is queued with sendDirect, the first at 3 s
+                // and then 3 s apart: done shortly after the last one.
+                if (g_voice_send_complete_ms == 0) {
+                    int n = meck_voice_send_get_packets();
+                    if (n < 1) n = 1;
+                    g_voice_send_complete_ms = now_ms + 3000 + (uint32_t)(n - 1) * 3000 + 2000;
+                    char buf[48];
+                    snprintf(buf, sizeof(buf), "Sending %d packet%s...", n, n == 1 ? "" : "s");
+                    voice_set_status(buf, lv_palette_main(LV_PALETTE_ORANGE));
+                } else if (now_ms >= g_voice_send_complete_ms) {
                     g_voice_send_in_flight = false;
-                    const char *cur = lv_label_get_text(lbl_voice_status);
-                    if (cur && strncmp(cur, "Sending", 7) == 0) {
-                        lv_label_set_text(lbl_voice_status, "Sent");
-                        lv_obj_set_style_text_color(lbl_voice_status,
-                            lv_palette_main(LV_PALETTE_GREEN), 0);
-                        printf("Voice: send complete (all packets transmitted)\n");
-                    }
+                    voice_set_status("Voice sent!", lv_palette_main(LV_PALETTE_GREEN));
+                    printf("Voice: send complete (all packets transmitted)\n");
                 }
+            } else if (vs == VOICE_SEND_PARTIAL) {
+                g_voice_send_in_flight = false;
+                voice_set_status("Send partial", lv_palette_main(LV_PALETTE_ORANGE));
+                printf("Voice: UI updated - not every packet could be queued\n");
             } else if (vs == VOICE_SEND_ACK_TIMEOUT) {
                 g_voice_send_in_flight = false;
-                lv_label_set_text(lbl_voice_status, "Failed: no path");
-                lv_obj_set_style_text_color(lbl_voice_status,
-                    lv_palette_main(LV_PALETTE_RED), 0);
+                voice_set_status("Send failed: no path", lv_palette_main(LV_PALETTE_RED));
                 printf("Voice: UI updated - ACK timeout, no path\n");
             } else if (vs == VOICE_SEND_NO_PATH) {
                 g_voice_send_in_flight = false;
-                lv_label_set_text(lbl_voice_status, "Failed: path unknown");
-                lv_obj_set_style_text_color(lbl_voice_status,
-                    lv_palette_main(LV_PALETTE_RED), 0);
+                voice_set_status("Send failed: path unknown", lv_palette_main(LV_PALETTE_RED));
                 printf("Voice: UI updated - ACK received but no path\n");
+            } else if (vs == VOICE_SEND_FAILED) {
+                g_voice_send_in_flight = false;
+                voice_set_status("Send failed!", lv_palette_main(LV_PALETTE_RED));
+                printf("Voice: UI updated - send failed\n");
             }
         }
     }
@@ -21450,11 +21545,26 @@ static bool meck_row_ring_is_row(lv_obj_t *child) {
     return true;
 }
 
+// The voice record screen's ring runs through its action buttons and then
+// on into the previous-recordings list, whose rows sit one level down in
+// obj_voice_prev_scroll; that list is the only container walked into.
+static bool meck_row_ring_is_nested_list(lv_obj_t *child) {
+    return child && (child == obj_voice_prev_scroll);
+}
+
 static int meck_row_ring_count(lv_obj_t *cont) {
     int n = 0;
     const uint32_t c = lv_obj_get_child_count(cont);
     for (uint32_t i = 0; i < c; i++) {
-        if (meck_row_ring_is_row(lv_obj_get_child(cont, i))) n++;
+        lv_obj_t *child = lv_obj_get_child(cont, i);
+        if (meck_row_ring_is_nested_list(child)) {
+            const uint32_t gc = lv_obj_get_child_count(child);
+            for (uint32_t j = 0; j < gc; j++) {
+                if (meck_row_ring_is_row(lv_obj_get_child(child, j))) n++;
+            }
+        } else if (meck_row_ring_is_row(child)) {
+            n++;
+        }
     }
     return n;
 }
@@ -21464,6 +21574,16 @@ static lv_obj_t *meck_row_ring_button_at(lv_obj_t *cont, int idx) {
     const uint32_t c = lv_obj_get_child_count(cont);
     for (uint32_t i = 0; i < c; i++) {
         lv_obj_t *child = lv_obj_get_child(cont, i);
+        if (meck_row_ring_is_nested_list(child)) {
+            const uint32_t gc = lv_obj_get_child_count(child);
+            for (uint32_t j = 0; j < gc; j++) {
+                lv_obj_t *row = lv_obj_get_child(child, j);
+                if (!meck_row_ring_is_row(row)) continue;
+                if (n == idx) return row;
+                n++;
+            }
+            continue;
+        }
         if (!meck_row_ring_is_row(child)) continue;
         if (n == idx) return child;
         n++;
@@ -21490,6 +21610,9 @@ static lv_obj_t *meck_row_ring_container(void) {
     if (scr == scr_debug_logs)        return scr_debug_logs;
     if (scr == scr_admin_settings)    return obj_admin_settings_list;
     if (scr == scr_admin_cmdlist)     return obj_admin_cmdlist_scroll;
+    if (scr == scr_voice_landing)     return scr_voice_landing;   // Inbox, Record
+    if (scr == scr_voice_inbox)       return obj_voice_inbox_scroll;
+    if (scr == scr_voice)             return scr_voice;   // actions, then previous recordings
 #if MECK_BLE_KEYBOARD_ENABLED
     if (scr == scr_settings_keyboard) return scr_settings_keyboard;
 #endif
@@ -22008,12 +22131,39 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
     // keyboard-only use blanks the screen mid-typing.
     lv_display_trigger_activity(NULL);
 
-    // K270 microphone/record key: toggle the canned-messages overlay on the
+    // K270 microphone/record key: on the Voice screens it starts and stops a
+    // recording (from the landing or inbox it opens the record screen and
+    // starts). Elsewhere it toggles the canned-messages overlay on the
     // channel and room compose screens. Handled before the textarea routing
     // so it stays reachable while the composer is focused mid-typing.
     // Ignored on every other screen.
     if (key == MECK_KEY_MIC) {
-        meck_canned_send_toggle();
+        lv_obj_t *scr = lv_screen_active();
+        if (scr && (scr == scr_voice_landing || scr == scr_voice_inbox)) {
+            MeckVoice* voice = meck_get_voice_instance();
+            if (btn_voice_record_nav) lv_obj_send_event(btn_voice_record_nav, LV_EVENT_CLICKED, NULL);
+            if (voice && !voice->isRecording() && (lv_screen_active() == scr_voice)) {
+                on_voice_record_tap(NULL);
+            }
+        } else if (scr && scr == scr_voice) {
+            on_voice_record_tap(NULL);
+        } else {
+            meck_canned_send_toggle();
+        }
+        return;
+    }
+
+    // Voice send-to list: modal to the keyboard while open (Up/Down ring the
+    // contacts, Enter sends to the ringed one, Esc closes; its Cancel button
+    // has no chevron, so Esc would otherwise leave the record screen).
+    if ((lv_screen_active() == scr_voice) && obj_voice_contact_panel) {
+        switch (key) {
+            case LV_KEY_UP:    meck_row_ring_step(obj_voice_contact_scroll, -1); break;
+            case LV_KEY_DOWN:  meck_row_ring_step(obj_voice_contact_scroll, +1); break;
+            case LV_KEY_ENTER: meck_row_ring_enter();                           break;
+            case LV_KEY_ESC:   on_voice_contact_cancel(NULL);                    break;
+            default:           break;
+        }
         return;
     }
 
@@ -22319,7 +22469,10 @@ static void meck_p4kbd_poll(lv_timer_t *t) {
                     meck_msg_ring_enter();
                     break;
                 }
-                meck_row_ring_enter();
+                // Voice record screen with nothing ringed: Enter is Record / Stop.
+                if (!meck_row_ring_enter() && (lv_screen_active() == scr_voice)) {
+                    on_voice_record_tap(NULL);
+                }
                 break;
             case LV_KEY_LEFT:
             case LV_KEY_RIGHT:
@@ -22547,6 +22700,7 @@ static void meck_ui_build_screens() {
             scr_settings_wifi, scr_settings_contacts, scr_settings_experimental,
             scr_settings_channels,
             scr_channel_detail, scr_settings_position, scr_debug_logs,
+            scr_voice_landing, scr_voice_inbox, scr_voice,
 #if MECK_BLE_KEYBOARD_ENABLED
             scr_settings_keyboard,
 #endif
