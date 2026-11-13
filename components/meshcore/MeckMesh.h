@@ -4678,15 +4678,15 @@ protected:
     }
 
     // Channel datagram received: passed to the app as
-    // RESP_CODE_CHANNEL_DATA_RECV (as Meck). Not shown on the device.
+    // RESP_CODE_CHANNEL_DATA_RECV (as Meck).
     void onChannelDataRecv(const mesh::GroupChannel& channel, mesh::Packet* pkt,
                            uint16_t data_type, const uint8_t* data, size_t data_len) override {
-        // Voice notes on the voice channel stay on the P4 (not passed to the app).
+        // Voice messages on the voice channel go to the P4's voice inbox,
+        // and are also passed to the app below.
         if (data_type == MECK_VOICE_DATA_TYPE && _voiceChanHandler && data_len <= 255) {
             int vidx = findVoiceChannel();
             if (vidx >= 0 && findChannelIdx(channel) == vidx) {
                 _voiceChanHandler(data, (uint8_t)data_len);
-                return;
             }
         }
         meck_companion_push_channel_data((int8_t)(pkt->getSNR() * 4), findChannelIdx(channel),
