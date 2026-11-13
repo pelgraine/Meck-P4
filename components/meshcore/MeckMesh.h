@@ -118,8 +118,8 @@ extern "C" void meck_request_save_message(uint8_t channel_idx, int ring_idx,
 // testing range FF00-FFFF) on the MECK_VOICE_CHANNEL hashtag channel.
 // Contact: encrypted requests whose first byte is MECK_VOICE_REQ_TYPE
 // (upstream request types run 0x00-0x09); the contact replies with a report.
-#define MECK_VOICE_CHANNEL      "#meck-voice"
-#define MECK_VOICE_REGION       "au-nsw-voice"
+#define MECK_VOICE_CHANNEL      "#voice"
+#define MECK_VOICE_REGION       "voice"
 #define MECK_VOICE_DATA_TYPE    0xFF56
 #define MECK_VOICE_REQ_TYPE     0x56
 

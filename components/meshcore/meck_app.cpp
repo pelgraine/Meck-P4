@@ -1756,12 +1756,12 @@ extern "C" void meck_apply_pending_save() {
 // into the inbox. Fetch requests (0x72) are served here from the cached
 // outgoing session, as Meck (T-Deck) and Meck Watch serve them.
 //
-// Voice by flood (Nov 2026, as Meck Watch): channel notes on #meck-voice and
+// Voice by flood (Nov 2026, as Meck Watch): channel notes on #voice and
 // a contact's voice requests are handled by the MeckMesh handlers set in
 // meck_voice_begin(); a status request is answered with a report.
 //
 // Send: the LVGL task queues a send with meck_request_voice_send().
-// meck_apply_pending_voice_send() sends to #meck-voice as channel data, or to
+// meck_apply_pending_voice_send() sends to #voice as channel data, or to
 // a contact as voice requests: along its direct path if it has one,
 // otherwise by private flood, both scoped to MECK_VOICE_REGION, 3 s apart.
 // It then waits for the contact's report and resends anything missing by
@@ -1777,13 +1777,13 @@ MeckVoice* meck_get_voice_instance() { return &g_meck_voice; }
 // Voice send status for UI polling (same values in MeckUI.cpp)
 #define VOICE_SEND_IDLE           0
 #define VOICE_SEND_SENDING        1   // to a contact: queued, waiting for its report
-#define VOICE_SEND_CHANNEL_SENT   2   // to #meck-voice: every packet queued
+#define VOICE_SEND_CHANNEL_SENT   2   // to #voice: every packet queued
 #define VOICE_SEND_DELIVERED      3   // the contact confirmed every packet
 #define VOICE_SEND_NO_REPLY       4   // no report from the contact
 #define VOICE_SEND_PARTIAL        5   // the contact confirmed some packets
 #define VOICE_SEND_FAILED         6
-#define VOICE_SEND_NO_CHANNEL     7   // #meck-voice not added
-#define VOICE_PICK_CHANNEL        (-2)  // send-to list row for #meck-voice
+#define VOICE_SEND_NO_CHANNEL     7   // #voice not added
+#define VOICE_PICK_CHANNEL        (-2)  // send-to list row for #voice
 static volatile int g_voice_send_status = VOICE_SEND_IDLE;
 static volatile int g_voice_send_total  = 0;   // packets in the note being sent
 static volatile int g_voice_send_confirmed = 0; // packets the contact confirmed
@@ -1904,7 +1904,7 @@ extern "C" void meck_drain_pending_voice() {
 static volatile bool g_voice_send_pending       = false;
 static volatile int  g_voice_send_contact_idx   = -1;
 
-// contact_idx: a contact, or VOICE_PICK_CHANNEL for #meck-voice.
+// contact_idx: a contact, or VOICE_PICK_CHANNEL for #voice.
 extern "C" void meck_request_voice_send(int contact_idx) {
     g_voice_send_status = VOICE_SEND_IDLE;   // a new send: forget the last result
     g_voice_send_confirmed = 0;
@@ -1981,7 +1981,7 @@ static void voice_tx_service() {
     voice_tx_finish(g_voice_tx.confirmed ? VOICE_SEND_PARTIAL : VOICE_SEND_NO_REPLY);
 }
 
-// To #meck-voice: a header (sender name, packet count), then the packets,
+// To #voice: a header (sender name, packet count), then the packets,
 // as channel data flood-scoped to MECK_VOICE_REGION, 3 s apart. No
 // confirmation comes back.
 static void voice_send_channel(uint32_t sessionId, int total) {

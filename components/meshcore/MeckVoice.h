@@ -83,7 +83,7 @@ extern "C" {
 #define VOICE_MAX_PACKETS     16    // receivers track packets in a 16-bit map
 
 // Voice by flood (Nov 2026, same format as Meck Watch). Carried as channel
-// data on #meck-voice or as encrypted requests to a contact (MeckMesh.h).
+// data on #voice or as encrypted requests to a contact (MeckMesh.h).
 // Every message starts VOICE_PKT_MAGIC, then one of these:
 //   'H' header  [V][H][sid:4][total][dur][sender name...]   (channel only)
 //   'D' data    [V][D][sid:4][idx][total][len][Codec2 x len]

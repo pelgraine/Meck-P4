@@ -55,13 +55,13 @@ extern "C" int meck_voice_send_get_confirmed(void);
 // Same values as meck_app.cpp
 #define VOICE_SEND_IDLE           0
 #define VOICE_SEND_SENDING        1   // to a contact: queued, waiting for its report
-#define VOICE_SEND_CHANNEL_SENT   2   // to #meck-voice: every packet queued
+#define VOICE_SEND_CHANNEL_SENT   2   // to #voice: every packet queued
 #define VOICE_SEND_DELIVERED      3
 #define VOICE_SEND_NO_REPLY       4
 #define VOICE_SEND_PARTIAL        5   // the contact confirmed some packets
 #define VOICE_SEND_FAILED         6
-#define VOICE_SEND_NO_CHANNEL     7   // #meck-voice not added
-#define VOICE_PICK_CHANNEL        (-2)  // send-to list row for #meck-voice
+#define VOICE_SEND_NO_CHANNEL     7   // #voice not added
+#define VOICE_PICK_CHANNEL        (-2)  // send-to list row for #voice
 #include "NotifSounds.h"
 #include "MeckMapScreen.h"
 #include "MeckCli.h"
@@ -16322,7 +16322,7 @@ static void ui_update_timer_cb(lv_timer_t *t) {
                     voice_set_status(buf, lv_palette_main(LV_PALETTE_ORANGE));
                 }
             } else if (vs == VOICE_SEND_CHANNEL_SENT) {
-                // To #meck-voice: header now, packets from 3 s, then 3 s
+                // To #voice: header now, packets from 3 s, then 3 s
                 // apart. No confirmation comes back.
                 if (g_voice_send_complete_ms == 0) {
                     int n = meck_voice_send_get_packets();
