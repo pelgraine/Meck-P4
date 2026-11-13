@@ -13693,9 +13693,16 @@ static void create_voice_inbox_screen(void) {
     meck_set_font(title, &meck_montserrat_24, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 100, 30);
 
-    // Scrollable message list
+    // Footer hint, in the grey of the other "Tap ..." hints
+    lv_obj_t *hint = lv_label_create(scr_voice_inbox);
+    lv_label_set_text(hint, "Tap a message to play it");
+    lv_obj_set_style_text_color(hint, lv_palette_main(LV_PALETTE_GREY), 0);
+    meck_set_font(hint, &meck_montserrat_14, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -15);
+
+    // Scrollable message list (stops above the footer hint)
     obj_voice_inbox_scroll = lv_obj_create(scr_voice_inbox);
-    lv_obj_set_size(obj_voice_inbox_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 90);
+    lv_obj_set_size(obj_voice_inbox_scroll, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 130);
     lv_obj_set_pos(obj_voice_inbox_scroll, 10, 80);
     lv_obj_set_style_bg_opa(obj_voice_inbox_scroll, 0, 0);
     lv_obj_set_style_border_width(obj_voice_inbox_scroll, 0, 0);

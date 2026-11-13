@@ -132,6 +132,7 @@ extern "C" {
 #define VOICE_HPF_HZ          150.0f
 #define VOICE_LPF_HZ          3600.0f
 #define VOICE_FIR_TAPS        31
+#define VOICE_LEVEL_PERMILLE  999       // normalise so 99.9% of samples sit below 90%
 #define VOICE_AA_HZ           6000.0f   // 44.1 kHz -> 16 kHz anti-alias
 #define VOICE_AA_TAPS         31
 
@@ -1161,6 +1162,11 @@ private:
         int64_t sum = 0;
         for (uint32_t i = 0; i < n; i++) sum += _pcm16[i];
         int32_t dc = (int32_t)(sum / (int64_t)n);
+        // Level = the loudness that 99.9% of samples stay under (histogram of
+        // 256 steps of 128), so one click or knock can't hold the gain down
+        // (as Meck Watch, Nov 2026).
+        static uint32_t hist[256];
+        memset(hist, 0, sizeof(hist));
         int32_t peak = 0;
         for (uint32_t i = 0; i < n; i++) {
             int32_t v = _pcm16[i] - dc;
@@ -1169,18 +1175,28 @@ private:
             _pcm16[i] = (int16_t)v;
             int32_t a = v < 0 ? -v : v;
             if (a > peak) peak = a;
+            hist[(a >> 7) > 255 ? 255 : (a >> 7)]++;
         }
-        if (peak >= 100) {
-            int32_t gain16 = (29491 << 16) / peak;   // 90% of full scale
+        uint64_t want = (uint64_t)n * VOICE_LEVEL_PERMILLE / 1000;
+        uint64_t seen = 0;
+        int32_t level = peak;
+        for (int b = 0; b < 256; b++) {
+            seen += hist[b];
+            if (seen >= want) { level = (b + 1) << 7; break; }
+        }
+        if (level > peak) level = peak;
+        int32_t gain16 = 1 << 16;
+        if (level >= 100) {
+            gain16 = (int32_t)(((int64_t)29491 << 16) / level);   // 90% of full scale
             for (uint32_t i = 0; i < n; i++) {
-                int32_t v = ((int32_t)_pcm16[i] * gain16) >> 16;
+                int32_t v = (int32_t)(((int64_t)_pcm16[i] * gain16) >> 16);
                 if (v > 32767) v = 32767;
                 if (v < -32768) v = -32768;
                 _pcm16[i] = (int16_t)v;
             }
         }
-        printf("MeckVoice: %lu samples at 16 kHz, dc %ld, peak %ld\n",
-               (unsigned long)n, (long)dc, (long)peak);
+        printf("MeckVoice: %lu samples at 16 kHz, dc %ld, peak %ld, level %ld, gain %.1fx\n",
+               (unsigned long)n, (long)dc, (long)peak, (long)level, gain16 / 65536.0f);
 
         // 2nd-order Butterworth high-pass (RBJ biquad)
         const float w0 = 2.0f * (float)M_PI * VOICE_HPF_HZ / VOICE_RATE_16K;
