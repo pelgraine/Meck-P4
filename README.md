@@ -54,9 +54,11 @@ with a `meshcore` ESP-IDF component added on top.
 - [Web Reader](#web-reader)
 - [Maps](#maps)
 - [Games](#games)
+- [Voice Notes](#voice-notes)
 - [Config Export](#config-export)
 - [Config Import](#config-import)
 - [Debug Logs](#debug-logs)
+- [Rx Log](#rx-log)
 - [Settings](#settings)
 - [Companion CLI](#companion-cli)
 - [Bluetooth Companion](#bluetooth-companion)
@@ -227,12 +229,9 @@ navigate between pages. The Home page (page 0) shows node name, unread
 message count, battery percentage and clock in the top-right corner, and
 a ten-tile navigation grid (2 columns x 5 rows) linking to Messages,
 Contacts, Settings, Reader, Notes, Discover, Trace, Maps, Audio, and Web.
-A sixth row — **Voice** and **Games** — is hidden by default: swipe down on
-the grid to reveal it and swipe up to hide it again. Voice opens the voice
-message screens (experimental); Games opens the Game Boy emulator. See
-[Games](#games).
+A sixth row is hidden by default: swipe down on the grid to reveal it and swipe up to hide it again. It holds **Games**, which opens the Game Boy emulator (see [Games](#games)), and on the LR2021 builds **Voice**, which opens the voice notes screens (see [Voice Notes](#voice-notes)).
 
-The Bluetooth builds (v0.9) have no **Web** tile, because the Web Reader won't be available in them (see [Web Reader](#web-reader)). **Games** takes Web's place next to Audio, and the hidden sixth row holds **Voice** only.
+The Bluetooth builds (v0.9) have no **Web** tile, because the Web Reader won't be available in them (see [Web Reader](#web-reader)). **Games** takes Web's place next to Audio. The hidden sixth row holds **Voice** on the LR2021 build; the SX1262 Bluetooth builds have no hidden row.
 
 |Page           |Purpose                                                                                            |
 |---------------|---------------------------------------------------------------------------------------------------|
@@ -1229,6 +1228,47 @@ Sound plays through the speaker at the **volume set in the audio player**. Launc
 
 -----
 
+## Voice Notes
+
+As of v0.9.2, voice notes work: record a short voice message on the P4, send it over LoRa to the **#voice** channel or to one contact, and play the ones you receive. Voice notes use the same format as Meck Watch's 2.4 GHz (SX1280) builds and [Meck Mycelium](#meck-mycelium), so all three can hear each other.
+
+> **2.4 GHz only.** Voice notes are for the AMOLED LR2021 board on 2.4 GHz, because a voice note is many packets, which would crowd a sub-GHz mesh. The **Voice** tile is only in the LR2021 builds.
+
+### Before you start
+
+- **An SD card.** Your recordings are saved in `/sdcard/voice`, and received notes in `/sdcard/voice/inbox`.
+- **The #voice channel.** Add **#voice** as a channel (a public hashtag channel). If you try to send to #voice without it, the screen shows **Add #voice first**.
+- **Repeaters that carry voice.** Every voice note is sent with the region **voice**, so only repeaters that have voice in their list of regions pass it on. If you run a repeater and want it to carry voice, add the voice region to it.
+
+### Recording
+
+1. Swipe down on the home grid to show the hidden row, then tap **Voice**. The Voice screen shows a reminder that voice over LoRa is a work in progress.
+2. Tap **Record**, then tap **Record** again to start and **Stop** when you have finished. Recording stops by itself at 12 seconds. With the K270 keyboard, the microphone key starts and stops a recording.
+3. The screen shows **Saving...**, then **Recorded** and the length. Tap **Play** to listen to it. Earlier recordings are listed under **Previous recordings:**.
+
+### Sending
+
+Tap **Send**. The **Send voice to:** list shows **#voice** first, then your contacts, each marked direct or flood.
+
+- **To #voice:** everyone who has the #voice channel hears it. It travels by flood, so you don't need a route to anyone. The screen shows **Sent to #voice** when it has gone.
+- **To one contact:** it goes along the contact's direct path if there is one, otherwise by flood. The P4 asks the contact for a delivery report and resends any missing parts. The screen shows **Voice delivered**, **Delivered** with the number of parts that arrived, **No reply from contact** or **Send failed!**.
+
+A voice note goes out as several packets, 3 seconds apart, so it takes a little while to send. The screen shows how many packets it is sending.
+
+### Receiving
+
+- A received note is saved to the inbox, and a **Voice note from** popup says who sent it. Notes aren't played automatically.
+- Notes from #voice show in the inbox as **Ch** followed by the sender's name.
+- To listen, open **Voice**, then **Inbox**, and tap a message to play it.
+- A note that arrives while you're recording is saved once you stop.
+- When the MeshCore app or Meck Mycelium is connected, notes on #voice are also passed to it.
+
+### Meck Mycelium
+
+[Meck Mycelium](https://github.com/pelgraine/Meck-Mycelium) is a web app that records, sends and plays voice notes through any 2.4 GHz node running stock MeshCore companion firmware, so nodes without a microphone can send and hear voice notes too. Voice notes from Meck Mycelium can be heard on Meck-P4 and Meck Watch, and theirs can be heard in Meck Mycelium. Open it at <https://pelgraine.github.io/Meck-Mycelium/>; its README lists the browsers that work.
+
+-----
+
 ## Config Export
 
 Tap **Export Config** in Settings to open a modal with four section checkboxes:
@@ -1290,6 +1330,20 @@ The Export button copies the most recent session to the SD card root (e.g. `/sdc
 
 -----
 
+## Rx Log
+
+As of v0.9.2, **Settings > Experimental Features > Rx Log** shows the packets the radio has received, newest first. The title shows how many packets are in the list. Each packet shows:
+
+- its route and packet type, the time it arrived, its size and its hash;
+- its signal-to-noise ratio (SNR);
+- its path: the number of hops and each hop's hash;
+- the channel it was sent on, or who it was from and to;
+- for channels you have, the sender and the message.
+
+New packets are added every 5 seconds while the screen is open. Until something is received, the screen shows **No packets received yet**.
+
+-----
+
 ## Settings
 
 Tap the **Settings** tile on the home grid to open the settings screen.
@@ -1323,7 +1377,7 @@ Tap the **Settings** tile on the home grid to open the settings screen.
 |**Orientation**     |Tap to toggle: Portrait (default) / Landscape. Applies live, rebuilding every screen at the new rotation, and persists across reboots. See [Screen Orientation](#screen-orientation).|
 |**KB Theme**        |Tap to toggle between Dark (default) and Light virtual keyboard themes. See [Virtual Keyboard](#virtual-keyboard) for details.                                                                                                  |
 |**KB Layout**       |Tap to cycle: QWERTY / AZERTY / QWERTZ / ЙЦУКЕН (Cyrillic). Layout switches apply live to every keyboard instance.                                                                                                            |
-|**Experimental Features >>**|Opens the Experimental Features sub-screen — kept a level away from the main list on purpose. It holds **Delete all contacts**: after a confirmation card, every contact is deleted (favourites and custom paths included) along with the direct-message history; channel messages are kept, and the device restarts when the purge finishes. As of v0.9 it also holds **Companion CLI** (see [Companion CLI](#companion-cli)) and, on the LR2021 build, **RX Boosted Gain** and **CAD** (tap to toggle, both off by default).|
+|**Experimental Features >>**|Opens the Experimental Features sub-screen — kept a level away from the main list on purpose. It holds **Delete all contacts**: after a confirmation card, every contact is deleted (favourites and custom paths included) along with the direct-message history; channel messages are kept, and the device restarts when the purge finishes. As of v0.9 it also holds **Companion CLI** (see [Companion CLI](#companion-cli)) and, on the LR2021 build, **RX Boosted Gain** and **CAD** (tap to toggle, both off by default). As of v0.9.2 it also holds **Rx Log** (see [Rx Log](#rx-log)).|
 |**Identity**        |Read-only display of your public key                                                                                                                                                                                            |
 
 All settings persist via NVS with an SD card mirror.
@@ -1362,6 +1416,9 @@ The pairing is remembered, so the phone reconnects without the PIN, including af
 
 - **Clock:** the app sends the phone's time when it connects. Meck-P4 takes it unless it is earlier than the P4's own clock, as upstream MeshCore does.
 - **Read on the P4 once the app has them:** while a paired app is connected and has collected every waiting message, channel messages and DMs are marked read on the P4 too. A DM that arrives after the app's sync stays unread until the app collects it. With no app connected, messages stay unread, even with BLE Companion on.
+- **Adverts and paths reach the app straight away (v0.9.2).** When an advert arrives, or a contact's path changes, the P4 tells the app at once, so the app no longer needs a disconnect and resync to show them.
+- **Radio settings from the app apply straight away (v0.9.2).** A radio preset or TX power chosen in the app is used by the radio at once, not only after you change it on the P4.
+- **More of the app works (v0.9.2):** trace from the app, path discovery, telemetry requests, exporting and importing a contact, the app's auto-add settings, and the app's raw data, channel data and signing commands.
 
 ### Not available in the Bluetooth builds
 
@@ -1374,7 +1431,7 @@ The Garmin build (`-ble-garmin`, or **Meck: Garmin watch support** in menuconfig
 - pairing without a PIN, for the watch and for phones (the PIN on the home screen isn't needed in this build);
 - the P4 also advertises as a heart-rate sensor, so the watch's **Sensors & Accessories** menu can pair with it (no heart-rate data is sent);
 - frames go to and from the watch in small slices, because it keeps the smallest Bluetooth packet size;
-- a favourites list and contact name look-up for the watch's Favourites, repeater admin and Discover screens.
+- as of v0.9.2, the same watch features as Meck's T-Deck Max Garmin build: canned messages, the heard-repeats count for messages you've sent, region names, the P4's own Discover scan run from the watch, the favourites list, and contact name look-up.
 
 The MeshCore phone app works with the Garmin build too.
 
@@ -1423,12 +1480,12 @@ contacts, channels, and so on), see <https://meshcore.io/>.
 
 As of v0.9, the MeshCore app can switch on companion repeat mode from its radio settings, over Bluetooth or WiFi. While it is on, Meck-P4 also forwards the packets it hears, as a repeater does, apart from echoes of its own channel messages. It is off by default.
 
-The app can only switch it on with an allowed frequency, and it can ask the P4 for the list:
+The app can only switch it on with an allowed frequency, and it can ask the P4 for the list. As of v0.9.2 these match the MeshCore app:
 
-- 433.000 MHz, and 433.05 to 434.79 MHz;
-- 869.495 MHz, and 863 to 870 MHz;
-- 918.000 MHz, and 902 to 928 MHz;
-- 2.4 to 2.5 GHz (LR2021 build).
+- 433.000 MHz;
+- 869.495 MHz;
+- 918.000 MHz;
+- 2.4 to 2.5 GHz (LR2021 build), for the 2.4 GHz mesh.
 
 -----
 
@@ -1554,7 +1611,7 @@ Rate) and the preset row will show “Custom”.
   modified to hand off to Meck after init
 - `components/cpp_bus_driver/` — LilyGo’s hardware driver collection
   (BQ27220 fuel gauge, SX1262 radio, XL9555 IO expander, L76K GPS, and
-  friends)
+  friends), copied into the repo (it was a linked library before v0.9.2), with Meck's small changes for the noise floor reading and audio power saving
 - `tools/build-release.sh` — single-command release-image builder
 - `overrides/esp_hosted/` - local copy of ESP-Hosted 2.0.17, used through
   `override_path` in `main/idf_component.yml`. Its one change creates
@@ -1573,7 +1630,7 @@ Files of particular note:
 - `MeckMesh.h` — protocol-side hooks: receive, send, advert handling, ring
   buffers, contact mutation, channel migration, active-discovery state
 - `MeckDataStore.h` — NVS and SD persistence
-- `MeckVoice.h` — voice over LoRa: Codec2 encode/decode, VE3 protocol, session management (not yet enabled)
+- `MeckVoice.h` — voice notes: recording, Codec2 encode and decode, sending and receiving.
 - `MeckPicture.h` — picture over LoRa infrastructure (not yet enabled)
 - `MeckAudio.cpp` / `MeckAudio.h` — audio backend wrapping `chmorgan/esp-audio-player` for WAV + MP3 playback
 - `MeckAudioUI.cpp` / `MeckAudioUI.h` — audio browser and Now Playing screens
@@ -1718,14 +1775,17 @@ no particular timeframes attached.
 - [x] **App commands from MeshCore v1.18** (v0.9) - the app's Discover nodes, requests to nodes that aren't contacts, Share contact, and setting the receive delay and airtime factor.
 - [x] **RX Boosted Gain and CAD** (v0.9, LR2021 build) - in Settings > Experimental Features and the Companion CLI.
 - [x] **Clock kept across restarts** (v0.9) - after a software restart, crash or watchdog reset (MeshCore PR #1896). See [Clock Sync](#clock-sync).
+- [x] **Voice notes** (v0.9.2) - record, send and receive voice notes on the #voice channel or to a contact, compatible with Meck Watch's 2.4 GHz builds and Meck Mycelium. See [Voice Notes](#voice-notes).
+- [x] **Rx Log** (v0.9.2) - on-device packet list in Settings > Experimental Features. See [Rx Log](#rx-log).
+- [x] **More app commands** (v0.9.2) - trace, path discovery, telemetry, contact export and import, auto-add settings, raw data, channel data and signing; adverts and path changes reach the app as they happen; radio settings from the app apply at once.
+- [x] **Garmin watch build: Meck watch features** (v0.9.2) - canned messages, heard repeats, region names, Discover and favourites, as on Meck's T-Deck Max Garmin build.
 
 **Pending:**
 
 - [ ] Ethernet companion over the P4's onboard IP101GRI PHY, following upstream MeshCore's Ethernet support
 
-- [ ] Voice over LoRa — enable Codec2 voice messaging end-to-end (infrastructure is complete, UI and protocol are in place, pending final integration and testing)
 - [ ] Picture over LoRa — enable image transfer end-to-end (infrastructure is complete, pending final integration)
-- [ ] Voice tile is live but experimental (it warns on entry); Camera stays disabled
+- [ ] Camera stays disabled
 - [ ] Games follow-ups — allocate message rings only for channels that exist so 2 MB ROMs load at any point in a session; persist MBC3 real-time-clock state (Pokémon Crystal's clock); keyboard row selection in the games menu and ROM list; Snake and Minesweeper as further Games entries; optional haptic tick on the touch buttons
 - [ ] WiFi Companion on boards whose C6 runs ESP-Hosted (today it needs ESP-AT on the C6)
 - [ ] Mentions-only notification filtering — the "Mentions" preference currently behaves the same as "All"; filtering to trigger only on @nodename is planned
