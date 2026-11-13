@@ -6334,6 +6334,13 @@ static void on_home_tile_scroll_gesture(lv_event_t *e) {
     if (meck_home_page_index() != 0) return;
     const lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
     if (d == LV_DIR_BOTTOM) {
+        // Nothing to reveal when every tile fits in the visible rows (the
+        // SX1262 Bluetooth builds, which have no Voice tile): don't scroll,
+        // or the top row would hide with an empty row below. Same cols and
+        // vis_rows as home_apply_tile_scroll().
+        const bool landscape = (SCREEN_WIDTH > SCREEN_HEIGHT);
+        const int  shown     = (landscape ? 5 : 2) * (landscape ? 2 : 5);
+        if (tile_button_count <= shown) return;
         if (!g_home_tile_scroll) { g_home_tile_scroll = true;  home_apply_tile_scroll(); }
     } else if (d == LV_DIR_TOP) {
         if (g_home_tile_scroll)  { g_home_tile_scroll = false; home_apply_tile_scroll(); }
@@ -6546,21 +6553,36 @@ static void create_page_home(lv_obj_t *page) {
 #else
     volatile bool show_web_tile = true;
 #endif
+    // Voice tile: LR2021 builds only. Voice notes are for 2.4 GHz (a voice
+    // note is many packets, too many for a sub-GHz mesh), so the SX1262
+    // builds leave the tile out. The voice code stays in every build; the
+    // tile is its only entry point (the incoming-note popup is a plain label
+    // and the K270 mic key acts only on the voice screens). Skipped at
+    // RUNTIME, like show_web_tile above, so both branches stay compiled in.
+#if defined(CONFIG_MECK_RADIO_LR2021)
+    volatile bool show_voice_tile = true;
+#else
+    volatile bool show_voice_tile = false;
+#endif
     // Games icon: LV_SYMBOL_KEYBOARD, not LV_SYMBOL_PLAY -- the custom
     // Montserrat fonts embed only a subset of the Font Awesome symbols and
     // 0xF04B (play) is not among them (renders as a missing-glyph box);
     // 0xF11C (keyboard) is embedded.
     if (show_web_tile) {
         create_tile_button(page, LV_SYMBOL_WIFI     "\nWeb",      cb_open_web,         1, 4);
-        // Hidden sixth row: Voice (left) opens the voice landing screen, Games
-        // (right) opens the Game Boy emulator menu. Parked off-view by
-        // home_apply_tile_scroll() until revealed by swipe.
-        create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    goto_voice_landing,  0, 5);
+        // Hidden sixth row: Voice (left, LR2021 only) opens the voice landing
+        // screen, Games (right) opens the Game Boy emulator menu. Parked
+        // off-view by home_apply_tile_scroll() until revealed by swipe.
+        if (show_voice_tile) {
+            create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    goto_voice_landing,  0, 5);
+        }
         create_tile_button(page, LV_SYMBOL_KEYBOARD "\nGames",    cb_todo_games,       1, 5);
     } else {
         create_tile_button(page, LV_SYMBOL_KEYBOARD "\nGames",    cb_todo_games,       1, 4);
-        // Hidden sixth row: Voice only.
-        create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    goto_voice_landing,  0, 5);
+        // Hidden sixth row: Voice only (LR2021); none on the SX1262 builds.
+        if (show_voice_tile) {
+            create_tile_button(page, LV_SYMBOL_AUDIO    "\nVoice",    goto_voice_landing,  0, 5);
+        }
     }
     home_apply_tile_scroll();
     // Camera tile stays disabled: nothing camera-related is to be booted,
